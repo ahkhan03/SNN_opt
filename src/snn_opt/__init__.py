@@ -20,6 +20,8 @@ Public API
 - ``SolverResult`` — solution + diagnostics (trajectory, spike events, …)
 - ``SNNSolver`` — full solver class (use for repeated/warm-started solves)
 - ``solve_qp`` — convenience function for one-shot QPs
+
+See ``docs/applications.md`` for published work that uses this solver.
 """
 
 from .solver import (

@@ -31,7 +31,7 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 ## [0.1.0] — 2026-04-18
 
 Initial public release. The solver itself is unchanged from the development
-version that has been validated across the SNN-X paper series (SNN-PCA,
-SNN-Ridge, SNN-TDSVM, SNN-Norm, SNN-SVM, SNN-CF, SNN-KRR, SNN-Procrustes).
-This release packages, documents, and licenses that codebase for public
-consumption.
+version that backs the published portfolio-optimization application
+(Khan, Mohammed & Li, *Biomimetics* 2025) and supports an ongoing
+research program. This release packages, documents, and licenses that
+codebase for public consumption.

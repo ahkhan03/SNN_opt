@@ -129,21 +129,16 @@ python examples/run_all_examples.py
 
 ## Applications
 
-`snn_opt` is the solver behind the **SNN-X** family of papers — each one casting a classical ML problem as a constrained QP and showing it can be solved by the same spiking dynamics:
+The framework is currently demonstrated in:
 
-| Paper | Problem class | Status |
-|---|---|---|
-| **SNN-SVM** | Box-constrained QP (SVM dual) | Published, 99.3% acc matching scikit-learn |
-| **SNN-LinReg** | Equality-constrained least squares | Published |
-| **SNN-CF** | Collaborative filtering via ALS | Published, +3.9% over baseline ALS |
-| **SNN-PCA** | Sphere-constrained quadratic (eigenproblem) | Published; under review at IEEE TNNLS |
-| **SNN-Procrustes** | Orthogonal Procrustes | Published |
-| **SNN-KRR** | Constrained kernel ridge regression | Published; under review at IEEE TCAS-I |
-| **SNN-Ridge** | Ridge regression with constraint variants | Published |
-| **SNN-TDSVM** | Two-timescale spiking solver for TDSVM | Under review at *Neural Networks* |
-| **SNN-Norm** | Homeostatic normalization for SNNs | Under review |
+- **Khan, Mohammed & Li (2025)** — *Portfolio Optimization: A Neurodynamic
+  Approach Based on Spiking Neural Networks*, **Biomimetics**, 10(12):808.
+  [doi:10.3390/biomimetics10120808](https://doi.org/10.3390/biomimetics10120808).
+  Portfolio selection cast as a constrained QP and solved by the spiking
+  dynamics implemented here.
 
-Other downstream uses of the same solver: model-predictive control of a building cooling loop ([SNN-EnergyPlus](https://github.com/ahkhan03)), neuromorphic image denoising, and SUMO-in-the-loop traffic-signal optimization. See [`docs/applications.md`](docs/applications.md) (work in progress) for a curated list with links.
+Additional applications are in preparation. As they reach publication
+they will be added to [`docs/applications.md`](docs/applications.md).
 
 ## Citing this work
 

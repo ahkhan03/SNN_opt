@@ -16,10 +16,7 @@ abstract: >
   programs of the form min (1/2) x^T A x + b^T x subject to C x + d <= 0, by
   alternating gradient descent steps with discrete boundary projections — the
   optimization equivalent of leaky integrate-and-fire dynamics with constraint
-  spikes. The framework follows Mancoo, Boerlin and Machens (NeurIPS 2020)
-  and is the canonical solver underlying the SNN-X publication series
-  (SNN-PCA, SNN-Ridge, SNN-TDSVM, SNN-Norm, SNN-SVM, SNN-CF, SNN-KRR,
-  SNN-Procrustes).
+  spikes. The framework follows Mancoo, Boerlin and Machens (NeurIPS 2020).
 keywords:
   - "spiking neural networks"
   - "convex optimization"

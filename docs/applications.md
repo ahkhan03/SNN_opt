@@ -1,51 +1,34 @@
 # Applications of `snn_opt`
 
-`snn_opt` is the canonical solver behind the **SNN-X** publication series — a
-sequence of papers that recast classical machine-learning problems as
-constrained convex programs and show they can be solved by the same SNN
-dynamics. It also underlies several applied projects (model-predictive
-control, traffic-signal optimization, image denoising). This page is the
-short-form catalogue; each entry links back to the full paper or repository.
+`snn_opt` was developed in support of an ongoing research program that
+formulates classical machine-learning and control problems as constrained
+convex programs and solves them with the same SNN dynamics. This page is the
+short-form catalogue; entries are added as the corresponding work appears in
+print.
 
-## SNN-X series
+## Published
 
-| Paper | Problem class | Headline result |
-|---|---|---|
-| **SNN-SVM** | Box-constrained QP (SVM dual) | 99.3% accuracy, matches `scikit-learn` to 4 decimals on the standard SVM benchmarks. |
-| **SNN-LinReg** | Equality-constrained least squares | Reproduces `scipy.linalg.lstsq` to machine precision on four constraint variants. |
-| **SNN-CF** | ALS for collaborative filtering | +3.9% RMSE improvement over standard ALS on MovieLens-100K via the constrained formulation. |
-| **SNN-PCA** | Sphere-constrained quadratic (eigenproblem) | Eigenvalue error ≤ 4.4e-12; "projected ascent" formulation lifts Mancoo equivalence to the non-convex setting. *Under review at IEEE TNNLS.* |
-| **SNN-Procrustes** | Orthogonal Procrustes | Rotation error < 1e-12 on 3-D point-cloud registration. |
-| **SNN-KRR** | Constrained kernel ridge regression | Hessian condition number reduced 100× via a reformulation that's natural in the SNN form. *Under review at IEEE TCAS-I.* |
-| **SNN-Ridge** | Ridge regression with four constraint variants | Closed-form-precision agreement; serves as the cleanest tutorial application. |
-| **SNN-TDSVM** | Two-timescale spiking solver for TDSVM | Non-trivial convex application with a custom two-timescale schedule. *Under review at* Neural Networks. |
-| **SNN-Norm** | Homeostatic normalization for SNNs | Asymmetric dependency: NoNorm costs 3.5pp in ANNs but 76pp in SNNs; HN matches BatchNorm without batch statistics. *Under review.* |
+- **Khan, Mohammed & Li (2025)** — *Portfolio Optimization: A Neurodynamic
+  Approach Based on Spiking Neural Networks.* **Biomimetics**, 10(12):808.
+  [doi:10.3390/biomimetics10120808](https://doi.org/10.3390/biomimetics10120808).
+  The portfolio-selection problem is recast as a constrained QP and solved
+  by the spiking dynamics implemented in this repository, demonstrating
+  that SNN solutions match conventional convex solvers within numerical
+  tolerance while exposing the per-asset constraint activations as
+  spike events.
 
-The thread connecting all nine: each problem is reformulated as
+A broader survey of SNN training and hardware accompanies this work:
+**Khan et al. (2025)** — *Spiking Neural Networks: A Comprehensive Survey
+of Training Methodologies, Hardware Implementations and Applications,*
+**Artificial Intelligence Science and Engineering**.
+[doi:10.23919/AISE.2025.000013](https://doi.org/10.23919/AISE.2025.000013).
 
-$$
-\min_x\ \tfrac12 x^\top A x + b^\top x \quad\text{s.t.}\quad C x + d \le 0
-$$
+## In preparation
 
-and dropped into the same `snn_opt.solve_qp(A, b, C, d, ...)` call. The
-solver itself is unchanged across applications — only the formulation
-machinery and the problem-specific reductions vary.
-
-## Applied projects
-
-Beyond the methodology series, the same solver is the inner loop for several
-applied research projects:
-
-- **SNN-EnergyPlus** — Receding-horizon control of a building cooling loop.
-  An SNN-equivalent QP at every control step drives an EnergyPlus simulation
-  via the Python API. SNN solutions match CVXPY to 6 significant figures
-  while staying within the millisecond budget.
-- **Traffic-signal SNN** — SUMO-in-the-loop optimization of phase timings
-  with capacity and pedestrian-wait constraints. The warm-started solver
-  (Figure 3 of the README) scales naturally to the rolling horizon.
-- **Neuromorphic image denoising** — `snn_opt` solves a per-patch
-  total-variation QP across an image grid; benchmarked at 128×128 against
-  classical TV denoising.
+Additional applications of the framework — covering further classical
+ML reductions and control problems — are at various stages of preparation
+and review. Entries will be added here as they are accepted for
+publication.
 
 ## How to add your own application
 
@@ -63,13 +46,9 @@ A, b, C, d, x0 = build_problem(my_inputs)
 result = solve_qp(A, b, C, d, x0)
 ```
 
-Each of the SNN-X papers above is structured this way; their formulation
-modules are the most useful starting templates.
+## Citing the framework
 
-## Citing the application series
-
-A complete BibTeX file with all SNN-X paper entries lives in
-[`docs/snn_x_series.bib`](snn_x_series.bib) *(populated as papers reach
-final accepted form)*. For now, please cite the relevant paper directly
-when applicable, and `snn_opt` itself via the [`CITATION.cff`](../CITATION.cff)
-entry at the repository root.
+Please cite `snn_opt` itself via the [`CITATION.cff`](../CITATION.cff)
+entry at the repository root, and the relevant application paper above
+when applicable. As further papers in the program reach publication they
+will be appended here with full BibTeX entries.
