@@ -101,38 +101,43 @@ All examples print:
 
 ## Extending Examples
 
-To create your own example:
+After installing the package (`pip install -e .` from the repo root), authoring
+a new example reduces to:
+
+```python
+import numpy as np
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
+
+# Define your problem
+A  = ...  # Hessian (n × n, PSD)
+b  = ...  # Linear cost (n,)
+C  = ...  # Constraint matrix (m × n)
+d  = ...  # Constraint offset (m,)
+x0 = ...  # Initial guess (n,)
+
+problem = OptimizationProblem(A=A, b=b, C=C, d=d)
+config  = SolverConfig(
+    k0=None,            # Auto-compute step size from λ_max(A)
+    k0_scale=0.5,       # Conservatism factor on the auto step
+    max_iterations=2000,
+    lower_bound=0.0,    # Optional box-clipping
+    upper_bound=1.0,    # Optional box-clipping
+    # Early stopping is enabled by default; tweak via config.convergence
+)
+solver  = SNNSolver(problem, config)
+result  = solver.solve(x0, verbose=True)
+
+print(result.summary())
+print(f"Converged: {result.converged} ({result.convergence_reason})")
+```
+
+If running directly from a clean checkout without `pip install`, use the same
+`sys.path` bootstrap the bundled examples use:
 
 ```python
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import numpy as np
-from snn_solver import OptimizationProblem, SNNSolver, SolverConfig
-
-# Define your problem
-A = ...  # Hessian
-b = ...  # Linear cost
-C = ...  # Constraint matrix
-d = ...  # Constraint offset
-x0 = ... # Initial guess
-
-# Create and solve (with new features)
-problem = OptimizationProblem(A=A, b=b, C=C, d=d)
-config = SolverConfig(
-    k0=None,           # Auto-compute from Hessian eigenvalue
-    k0_scale=0.5,      # Scaling factor for auto k0
-    max_iterations=2000,
-    lower_bound=0.0,   # Optional: box constraint clipping
-    upper_bound=1.0,   # Optional: box constraint clipping
-    # Convergence detection is enabled by default
-)
-solver = SNNSolver(problem, config)
-result = solver.solve(x0, verbose=True)
-
-print(result.summary())
-print(f"Converged: {result.converged} ({result.convergence_reason})")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 ```
 
 ## Tips for Running Examples

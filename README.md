@@ -1,389 +1,166 @@
-# SNN-Inspired Optimization Solver
+# snn_opt
 
-Python implementation of a spiking neural network-inspired solver for constrained convex optimization.
+**A spiking neural network solver for constrained convex optimization.**
 
-> **For detailed mathematical background and theory**, see [`snn_optimization_framework.md`](snn_optimization_framework.md).
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-0.1.0-informational.svg)](CHANGELOG.md)
+[![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
+[![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
-## Overview
+---
 
-This solver tackles optimization problems of the form:
+## Abstract
 
-```
-minimize    (1/2) x^T A x + b^T x
-subject to  C x + d <= 0
-```
+`snn_opt` is a Python implementation of the **spiking neural network (SNN) → convex optimization** equivalence, developed as part of an ongoing research program on neuromorphic computation for classical machine-learning problems. It solves quadratic and linear programs of the form
 
-The algorithm alternates between:
-1. **Gradient descent**: Following the negative gradient (Euler or continuous ODE integration)
-2. **Boundary projections**: Discrete corrections when constraints are violated (analogous to neural spikes)
+$$
+\min_{x \in \mathbb{R}^n}\ \tfrac{1}{2}\, x^\top A x + b^\top x
+\quad\text{subject to}\quad C x + d \le 0,
+$$
 
-### Key Features
+by alternating gradient descent — playing the role of leaky-integrate membrane drift — with discrete projection events that clamp the trajectory to the constraint boundary, the optimization analogue of an integrate-and-fire **spike**. The construction follows Mancoo, Boerlin and Machens ([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html)) and is the canonical solver underlying the **SNN-X** publication series (PCA, Ridge, TDSVM, Norm, SVM, CF, KRR, Procrustes — see [Applications](#applications)).
 
-- **Auto k0**: Automatically computes gradient step size from Hessian eigenvalue—eliminates `k0` tuning
-- **Adaptive projection**: Automatically computes exact step size to reach constraint boundaries—eliminates `k1` as a hyperparameter
-- **Box constraint clipping**: Handles simple bounds (0 ≤ x ≤ C) via clipping—more stable and neuromorphic than projection
-- **Euler integration**: More stable for tightly constrained problems (e.g., SVM dual)
-- **Early stopping**: Multi-criteria convergence detection (objective plateau, projected gradient norm, feasibility)
-- **Spike diagnostics**: Records projection timestamps, displacements, active constraints, and magnitudes
-- **Warm starting**: Excellent performance for sequences of similar problems (e.g., MPC)
+This repository is intended both as a **research artifact** — every published SNN-X paper can be reproduced from the code here — and as a **teaching resource** for students entering the area: it ships with annotated examples, a self-contained mathematical writeup, and a benchmark suite that visualizes convergence and projection dynamics.
+
+## The problem
+
+Given a positive semi-definite Hessian $A \in \mathbb{R}^{n\times n}$, a linear cost $b \in \mathbb{R}^n$, and $m$ linear inequality constraints stacked into $C \in \mathbb{R}^{m \times n}$ and $d \in \mathbb{R}^m$, we seek
+
+$$
+x^\star \;=\; \arg\min_{x}\ \tfrac{1}{2}\, x^\top A x + b^\top x \quad\text{s.t.}\quad c_i^\top x + d_i \le 0,\ i = 1,\dots,m.
+$$
+
+The class subsumes box-constrained QPs (set $C = [I; -I]$), linear programs ($A = 0$), kernel-ridge subproblems, support-vector machine duals, projected-gradient flows on polytopes, and the bulk of the inner solves that arise in receding-horizon control.
+
+## The spiking idea, in one picture
+
+The continuous-time dynamics
+
+$$
+\dot x \;=\; -\nabla f(x) \;-\; C^\top s(t)
+$$
+
+models a population of $n$ leaky integrators driven by the gradient $\nabla f(x) = Ax + b$, with a corrective spike train $s(t)$ that fires whenever an inequality $c_i^\top x + d_i$ would otherwise become positive. Each spike applies a *minimal* projection that re-enters the feasible set; spike inter-arrival times encode constraint *traffic*. Discretized with forward Euler and an adaptive step that reaches the boundary exactly, this becomes a fast projected-gradient solver with diagnostics that double as a neural raster plot.
+
+See [`docs/theory.md`](docs/theory.md) for the full derivation, including the eigenvalue-based step-size choice that eliminates `k0` as a hyperparameter and the box-clipping shortcut for problems like SVM.
 
 ## Installation
 
-### Requirements
-
-- Python 3.8+
-- NumPy
-- SciPy
-
-Install dependencies:
+`snn_opt` requires Python 3.9+, NumPy, and SciPy. Install from a checkout:
 
 ```bash
-pip install numpy scipy
+git clone https://github.com/ahkhan03/snn_opt.git
+cd snn_opt
+pip install -e .                   # core
+pip install -e ".[examples]"       # also installs matplotlib for examples
+pip install -e ".[dev]"            # examples + cvxpy + pytest + ruff
 ```
 
-Or use the provided requirements file:
+The package can also be run **without** installation — every example and test sits next to a small `sys.path` bootstrap that points at `src/`. Smoke test:
 
 ```bash
-pip install -r requirements.txt
+python tests/test_installation.py
 ```
 
-## Project Structure
-
-```
-SSN_robot/
-├── snn_solver.py           # Core solver implementation
-├── requirements.txt        # Python dependencies
-├── test_installation.py    # Quick verification test
-├── README.md              # This file
-├── snn_optimization_report.md  # Detailed mathematical background
-├── examples/              # Python example scripts
-│   ├── example1_simple_2d.py
-│   ├── example2_3d_polytope.py
-│   ├── example3_linear_program.py
-│   ├── example4_warm_start.py
-│   ├── example5_infeasible_recovery.py
-│   ├── run_all_examples.py
-│   └── README.md
-└── solver_matlab_code/    # MATLAB reference implementation
-    ├── snn_solver.m
-    ├── example1.m
-    ├── example2.m
-    └── main_manip.m
-```
-
-## Quick Start
-
-### Basic Usage
+## Quick start
 
 ```python
 import numpy as np
-from snn_solver import solve_qp
+from snn_opt import solve_qp
 
-# Define problem: minimize ||x||^2 subject to x1 + 2*x2 <= 1
-A = np.eye(2)
-b = np.zeros(2)
-C = np.array([[1.0, 2.0]])
-d = np.array([-1.0])
+# Minimize ||x||^2 subject to  x_1 + 2 x_2 <= 1  (and that's it).
+A  = np.eye(2)
+b  = np.zeros(2)
+C  = np.array([[1.0, 2.0]])
+d  = np.array([-1.0])
 x0 = np.array([1.0, 1.0])
 
-# Solve (uses auto k0, Euler integration, adaptive projection by default)
 result = solve_qp(A, b, C, d, x0, max_iterations=1000)
 
-print(f"Solution: {result.final_x}")
-print(f"Objective: {result.final_objective}")
+print(result.summary())             # converged?  iterations?  spikes?
+print("x* =", result.final_x)
+print("f* =", result.final_objective)
 ```
 
-### With Box Constraints (e.g., SVM)
-
-```python
-# For SVM-style problems with 0 <= x <= C bounds
-result = solve_qp(A, b, C, d, x0,
-    lower_bound=0.0,   # x >= 0 (handled by clipping)
-    upper_bound=1.0,   # x <= C (handled by clipping)
-    max_iterations=2000
-)
-```
-
-### Advanced Usage with Objects
-
-```python
-from snn_solver import OptimizationProblem, SNNSolver, SolverConfig
-
-# Define problem
-problem = OptimizationProblem(A=A, b=b, C=C, d=d)
-
-# Configure solver
-config = SolverConfig(
-    k0=0.05,                    # Gradient descent step size
-    max_iterations=1000,        # Max iterations (Euler mode)
-    integration_method='euler', # 'euler' (recommended) or 'ivp'
-    projection_method='adaptive' # 'adaptive' (no k1 needed) or 'fixed'
-)
-
-# Create and run solver
-solver = SNNSolver(problem, config)
-result = solver.solve(x0, verbose=True)
-
-# Access detailed results
-print(result.summary())
-print(f"Trajectory length: {len(result.t)}")
-print(f"Number of projections: {result.n_projections}")
-```
+For repeated solves (warm-started receding-horizon problems), construct an `SNNSolver` once and call `.solve(x0)` per problem instance — see [`examples/example4_warm_start.py`](examples/example4_warm_start.py).
 
 ## Examples
 
-Five comprehensive examples are provided in the `examples/` directory:
+All scripts live under [`examples/`](examples/) and are runnable as plain `python examples/example_name.py`.
 
-### Example 1: Simple 2D QP
-Basic quadratic program with two linear constraints. Good starting point.
+| # | Script | Problem | Highlights |
+|---|---|---|---|
+| 1 | [`example1_simple_2d.py`](examples/example1_simple_2d.py) | 2D quadratic with two linear cuts | Smallest possible runnable demo |
+| 1b | [`example1_basic_2d.py`](examples/example1_basic_2d.py) | Same problem, with trajectory plot | See `examples/example1_basic_2d.png` |
+| 1c | [`example1_advanced_2d.py`](examples/example1_advanced_2d.py) | Shifted feasible region, infeasible start | Spike raster + violation plot |
+| 2 | [`example2_3d_polytope.py`](examples/example2_3d_polytope.py) | 3D QP with 4 hyperplanes | Multiple active constraints, vertex solution |
+| 3 | [`example3_linear_program.py`](examples/example3_linear_program.py) | Box-constrained LP ($A=0$) | LP via the same machinery |
+| 4 | [`example4_warm_start.py`](examples/example4_warm_start.py) | Sequence of related QPs | Receding-horizon / MPC pattern; spikes drop $30 \to 0$ |
+| 5 | [`example5_infeasible_recovery.py`](examples/example5_infeasible_recovery.py) | Infeasible initializations | Automatic projection to feasibility |
+| 6 | [`example6_equality_constraint.py`](examples/example6_equality_constraint.py) | Equality via a sandwiched band | $x_1 = a$ as a tight $\pm \varepsilon$ inequality pair |
+| 7 | [`example7_svm_dual.py`](examples/example7_svm_dual.py) | SVM dual with kernel | Box clipping + auto step size on a real ML task |
+| — | [`example_raw_mode.py`](examples/example_raw_mode.py) | Bypass auto-config | Compares raw vs. optimized solver settings |
 
-```bash
-python examples/example1_simple_2d.py
-```
-
-### Example 2: 3D Polytope Constraints
-Three-dimensional problem with four constraints defining a polytope. Demonstrates handling multiple active constraints.
-
-```bash
-python examples/example2_3d_polytope.py
-```
-
-### Example 3: Linear Program
-Pure linear program (A=0) with box constraints. Shows LP solving capability and vertex solutions.
-
-```bash
-python examples/example3_linear_program.py
-```
-
-### Example 4: Warm Starting
-Demonstrates receding horizon control scenario where optimization problems are solved sequentially with warm starts. Mimics the manipulator control application.
-
-```bash
-python examples/example4_warm_start.py
-```
-
-### Example 5: Infeasible Recovery
-Shows how the solver handles infeasible starting points and automatically projects them to feasibility.
-
-```bash
-python examples/example5_infeasible_recovery.py
-```
-
-### Run All Examples
+Run them all in sequence:
 
 ```bash
 python examples/run_all_examples.py
 ```
 
-## API Reference
+## Documentation
 
-### `OptimizationProblem`
+- [`docs/theory.md`](docs/theory.md) — derivation of the SNN/convex-optimization equivalence, step-size analysis, projection geometry, convergence criteria.
+- [`docs/applications.md`](docs/applications.md) — *(coming next)* one-page summary of each SNN-X paper with links to PDFs.
+- [`docs/api.md`](docs/api.md) — *(coming next)* hand-curated API reference.
+- [https://snn.ahkhan.me](https://snn.ahkhan.me) — companion site, designed for a broader audience (students, curious researchers).
 
-Encapsulates problem definition.
+## Applications
 
-**Parameters:**
-- `A`: Hessian matrix (n × n)
-- `b`: Linear cost vector (n,)
-- `C`: Constraint matrix (m × n)
-- `d`: Constraint offset vector (m,)
+`snn_opt` is the solver behind the **SNN-X** family of papers — each one casting a classical ML problem as a constrained QP and showing it can be solved by the same spiking dynamics:
 
-**Methods:**
-- `objective(x)`: Evaluate objective function
-- `gradient(x)`: Evaluate gradient
-- `constraint_values(x)`: Evaluate g(x) = Cx + d
-- `is_feasible(x)`: Check constraint satisfaction
-- `max_violation(x)`: Maximum constraint violation
+| Paper | Problem class | Status |
+|---|---|---|
+| **SNN-SVM** | Box-constrained QP (SVM dual) | Published, 99.3% acc matching scikit-learn |
+| **SNN-LinReg** | Equality-constrained least squares | Published |
+| **SNN-CF** | Collaborative filtering via ALS | Published, +3.9% over baseline ALS |
+| **SNN-PCA** | Sphere-constrained quadratic (eigenproblem) | Published; under review at IEEE TNNLS |
+| **SNN-Procrustes** | Orthogonal Procrustes | Published |
+| **SNN-KRR** | Constrained kernel ridge regression | Published; under review at IEEE TCAS-I |
+| **SNN-Ridge** | Ridge regression with constraint variants | Published |
+| **SNN-TDSVM** | Two-timescale spiking solver for TDSVM | Under review at *Neural Networks* |
+| **SNN-Norm** | Homeostatic normalization for SNNs | Under review |
 
-### `SolverConfig`
+Other downstream uses of the same solver: model-predictive control of a building cooling loop ([SNN-EnergyPlus](https://github.com/ahkhan03)), neuromorphic image denoising, and SUMO-in-the-loop traffic-signal optimization. See [`docs/applications.md`](docs/applications.md) (work in progress) for a curated list with links.
 
-Solver configuration parameters.
+## Citing this work
 
-**Parameters:**
-- `k0`: Gradient descent step size. **Set to `None` (default) to auto-compute from Hessian eigenvalue**
-- `k0_scale`: Scaling factor for auto-computed k0 (default: 0.5). Final k0 = k0_scale / λ_max(A)
-- `t_end`: Simulation end time for IVP mode (default: 100.0)
-- `max_step`: Maximum ODE integration step for IVP mode (default: 0.1)
-- `constraint_tol`: Constraint violation tolerance (default: 1e-6)
-- `max_projection_iters`: Max projection iterations per step (default: 100)
-- `integration_method`: `'euler'` (recommended) or `'ivp'` (default: `'euler'`)
-- `max_iterations`: Maximum iterations for Euler mode (default: 2000)
-- `projection_method`: `'adaptive'` (recommended, no k1 needed) or `'fixed'` (default: `'adaptive'`)
-- `k1`: Projection step size, only used when `projection_method='fixed'` (default: 0.05)
-- `lower_bound`: Lower bound for box constraint clipping (default: None = no clipping)
-- `upper_bound`: Upper bound for box constraint clipping (default: None = no clipping)
-- `convergence`: `ConvergenceConfig` object for early stopping (see below)
+If `snn_opt` plays a role in your research or teaching, please cite both the software and the framework paper:
 
-### `ConvergenceConfig`
+```bibtex
+@software{khan2026snnopt,
+  author  = {Khan, Ameer Hamza},
+  title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/ahkhan03/snn_opt},
+  license = {Apache-2.0},
+}
 
-Configuration for early stopping and convergence detection.
-
-**Parameters:**
-- `enable_early_stopping`: Enable/disable early stopping (default: True)
-- `obj_rel_tol`: Relative objective change tolerance over window (default: 1e-8)
-- `proj_grad_tol`: Projected gradient norm tolerance (default: 1e-6)
-- `feasibility_tol`: Max constraint violation for convergence (default: 1e-2)
-- `check_every`: Check convergence every N iterations (default: 50)
-- `min_iterations`: Minimum iterations before checking (default: 100)
-- `window_size`: Window size for objective plateau detection (default: 10)
-- `patience`: Consecutive converged checks needed (default: 3)
-- `use_objective_plateau`: Use objective plateau criterion (default: True)
-- `use_projected_gradient`: Use projected gradient norm criterion (default: True)
-
-### `SNNSolver`
-
-Main solver class.
-
-**Constructor:**
-```python
-SNNSolver(problem: OptimizationProblem, config: SolverConfig = None)
+@inproceedings{mancoo2020understanding,
+  author    = {Mancoo, Allan and Boerlin, Martin and Machens, Christian K.},
+  title     = {Understanding Spiking Networks Through Convex Optimization},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2020},
+}
 ```
 
-**Methods:**
-- `solve(x0, verbose=False)`: Solve optimization from initial guess x0
+The full per-paper bibliography of the SNN-X series is maintained at [`docs/applications.md`](docs/applications.md).
 
-### `SolverResult`
+## License
 
-Contains optimization results.
+Apache-2.0 — see [`LICENSE`](LICENSE). Permissive, with an explicit patent grant; suitable for both academic and commercial reuse.
 
-**Attributes:**
-- `t`: Time points array
-- `X`: State trajectory (len(t) × n)
-- `objective_values`: Objective along trajectory
-- `constraint_violations`: Max violation at each point
-- `n_projections`: Total projection events
-- `converged`: Boolean convergence flag
-- `convergence_reason`: String describing why solver stopped
-- `iterations_used`: Actual number of iterations executed
-- `final_x`: Final solution vector
-- `final_objective`: Final objective value
-- `final_proj_grad_norm`: Projected gradient norm at final solution
-- `spike_times`: Time stamps at which projection spikes occurred
-- `spike_deltas`: Spike displacements (rows align with `spike_times`)
-- `spike_norms`: L2 norm of each spike displacement
-- `spike_constraints`: List of constraint indices active during each spike
-- `spike_violation_values`: Positive residuals for the active constraints at each spike
-- `total_projection_distance`: Sum of spike norms, measuring cumulative projection effort
+## Acknowledgments
 
-**Methods:**
-- `summary()`: Print summary statistics
-
-## Parameter Tuning Guidelines
-
-### Gradient Descent Step Size (`k0`)
-- **Auto mode (recommended)**: Set `k0=None` to auto-compute as `k0 = k0_scale / λ_max(A)`
-- **Manual mode**: Start with `k0 ≈ 0.01 - 0.1`
-- Adjust `k0_scale` (default 0.5) if auto mode is too slow (increase) or unstable (decrease)
-
-### Box Constraints (`lower_bound`, `upper_bound`)
-- For SVM: `lower_bound=0, upper_bound=C`
-- More stable and efficient than treating bounds as linear inequalities
-- Neuromorphic interpretation: neuron firing rate saturation
-
-### Projection Method
-- **`'adaptive'` (recommended)**: Computes exact step to reach each constraint boundary. Eliminates `k1` as a hyperparameter. Works well for most problems including tightly constrained ones (SVM, etc.).
-- **`'fixed'`**: Uses constant step size `k1`. May require tuning.
-
-### Projection Step Size (`k1`) — only for `projection_method='fixed'`
-- Typically set `k1 ≈ k0`
-- Larger values → fewer projection iterations needed
-- Smaller values → more gentle corrections
-- If many projections needed, increase `k1`
-
-### Integration Method
-- **`'euler'` (recommended)**: Discrete steps, more stable for tightly constrained problems
-- **`'ivp'`**: Continuous ODE integration with event detection, original method
-
-### Iterations / Simulation Time
-- For Euler mode: `max_iterations` typically 500-2000
-- For IVP mode: `t_end` typically 50-200
-- Monitor convergence by checking objective stabilization
-
-### Tolerance (`constraint_tol`)
-- Default `1e-6` works for most problems
-- Decrease for higher precision (may need more iterations)
-- Increase for faster convergence with looser constraints
-
-## Performance Characteristics
-
-### Computational Complexity
-- Per iteration: O(n² + mn) where n = variables, m = constraints
-- Typical convergence: 10-100 iterations
-- No matrix factorizations required
-- Well-suited for embedded/real-time applications
-
-### When to Use This Solver
-✓ Real-time control applications  
-✓ Frequent re-solves with warm starts  
-✓ Embedded systems with limited computation  
-✓ Problems where approximate solutions suffice  
-✓ Receding horizon control  
-
-### When NOT to Use
-✗ Need high-accuracy solutions (< 1e-8 error)  
-✗ Large-scale problems (n > 1000)  
-✗ Ill-conditioned problems  
-✗ Problems requiring optimality certificates  
-
-## Design Philosophy
-
-The implementation follows these principles:
-
-1. **Simplicity**: Core algorithm in ~200 lines, no complex data structures
-2. **Extensibility**: Class-based design allows easy addition of visualization, monitoring, adaptive parameters
-3. **Fast-fail**: Errors propagate immediately (per user rules), no defensive programming
-4. **Clean API**: Both simple function interface and detailed object-oriented interface
-
-## Comparison with MATLAB Implementation
-
-| Feature | MATLAB | Python |
-|---------|--------|--------|
-| Core algorithm | ✓ | ✓ |
-| Event detection | `odeset('Events')` | `solve_ivp(events=)` |
-| Euler integration | - | ✓ |
-| Adaptive projection | - | ✓ |
-| Results storage | Cell arrays | Dataclasses |
-| Problem definition | Loose parameters | `OptimizationProblem` class |
-| Configuration | Function args | `SolverConfig` class |
-| Trajectory access | Concatenated arrays | `SolverResult` object |
-
-## Recent Improvements
-
-- **Early stopping**: Multi-criteria convergence detection with projected gradient norm, objective plateau, and feasibility checks
-- **Auto k0**: Computes gradient step from Hessian eigenvalue—eliminates `k0` tuning
-- **Box constraint clipping**: Handles bounds via clipping—more stable and neuromorphic
-- **Adaptive projection**: Eliminates `k1` by computing exact steps to constraint boundaries
-- **Euler integration**: More stable for tightly constrained problems
-- **Relaxed tolerance**: Default `1e-6` (from `1e-10`) for practical convergence
-- **Enhanced diagnostics**: `SolverResult` now includes `convergence_reason`, `iterations_used`, and `final_proj_grad_norm`
-
-## Future Extensions
-
-The class-based design facilitates:
-
-### Performance Enhancements
-- **Per-iteration adaptive `k0`**: Barzilai-Borwein step size for faster convergence
-- **Sparse matrix support**: Efficient handling of large-scale problems with sparse Hessian/constraints
-- **Numba JIT compilation**: Accelerate core projection loop for 10-100x speedup
-- **Hardware acceleration**: GPU or neuromorphic chip implementations
-
-### API & Usability
-- **Builder pattern**: Fluent API for solver configuration
-- **Visualization**: Built-in plotting methods for trajectories and convergence
-- **Callbacks**: User-defined functions called during solve for monitoring
-- **Parallel solves**: Batch optimization for multiple scenarios
-
-### Advanced Features  
-- **Line search**: Optional Armijo backtracking for more robust convergence
-- **Direct equality constraints**: Native handling without two-inequality conversion
-- **Regularization options**: Tikhonov or proximal regularization for ill-conditioned problems
-
-## Theory and References
-
-For detailed mathematical background, derivations, and theoretical analysis, see:
-
-📖 **[`snn_optimization_framework.md`](snn_optimization_framework.md)** — Complete theoretical framework including:
-- Connection to spiking neural network dynamics
-- Derivation of adaptive projection formula
-- Convergence properties
-- Extension to equality constraints
-- Application to robotic control
+Developed at the **School of Artificial Intelligence, Taizhou University**. The framework rests on Mancoo, Boerlin, and Machens (NeurIPS 2020), and on the broader projection-neural-network lineage (Hopfield–Tank, Kennedy–Chua, Xia–Wang, Liu–Wang). Pull requests, bug reports, and citations of the SNN-X papers in your own work are all warmly welcomed.
