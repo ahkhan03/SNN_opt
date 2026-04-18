@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs / temp
+*.tmp
+*.log
+debug_*.py
+temp_*.py
+
+# Local results / scratch
+results/
+scratch/
+
+# NOTE: figures/, *.png, *.pdf are intentionally TRACKED — the repo ships
+# rendered figures so the README and docs render without a build step.

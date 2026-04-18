@@ -1,0 +1,54 @@
+cff-version: 1.2.0
+title: "snn_opt: A Spiking Neural Network Solver for Constrained Convex Optimization"
+message: "If you use this software, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: "Khan"
+    given-names: "Ameer Hamza"
+    affiliation: "School of Artificial Intelligence, Taizhou University"
+    email: "ahkhan@tzc.edu.cn"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"  # add when available
+repository-code: "https://github.com/ahkhan03/snn_opt"
+url: "https://snn.ahkhan.me"
+abstract: >
+  snn_opt is a Python implementation of a spiking neural network (SNN) inspired
+  solver for constrained convex optimization. It targets quadratic and linear
+  programs of the form min (1/2) x^T A x + b^T x subject to C x + d <= 0, by
+  alternating gradient descent steps with discrete boundary projections — the
+  optimization equivalent of leaky integrate-and-fire dynamics with constraint
+  spikes. The framework follows Mancoo, Boerlin and Machens (NeurIPS 2020)
+  and is the canonical solver underlying the SNN-X publication series
+  (SNN-PCA, SNN-Ridge, SNN-TDSVM, SNN-Norm, SNN-SVM, SNN-CF, SNN-KRR,
+  SNN-Procrustes).
+keywords:
+  - "spiking neural networks"
+  - "convex optimization"
+  - "quadratic programming"
+  - "neuromorphic computing"
+  - "constrained optimization"
+  - "projected gradient"
+license: Apache-2.0
+version: "0.1.0"
+date-released: "2026-04-18"
+preferred-citation:
+  type: software
+  title: "snn_opt: A Spiking Neural Network Solver for Constrained Convex Optimization"
+  authors:
+    - family-names: "Khan"
+      given-names: "Ameer Hamza"
+      affiliation: "School of Artificial Intelligence, Taizhou University"
+  year: 2026
+  url: "https://snn.ahkhan.me"
+references:
+  - type: conference-paper
+    title: "Understanding spiking networks through convex optimization"
+    authors:
+      - family-names: "Mancoo"
+        given-names: "Allan"
+      - family-names: "Boerlin"
+        given-names: "Martin"
+      - family-names: "Machens"
+        given-names: "Christian K."
+    collection-title: "Advances in Neural Information Processing Systems"
+    year: 2020
+    notes: "Theoretical foundation: spiking dynamics as a primal-dual solver for convex programs."
