@@ -45,6 +45,18 @@ models a population of $n$ leaky integrators driven by the gradient $\nabla f(x)
 
 See [`docs/theory.md`](docs/theory.md) for the full derivation, including the eigenvalue-based step-size choice that eliminates `k0` as a hyperparameter and the box-clipping shortcut for problems like SVM.
 
+## Convergence and projection dynamics
+
+Three diagnostic figures, regenerated from [`benchmarks/`](benchmarks/), give a quick visual sense of what the solver actually does:
+
+| | |
+|---|---|
+| **Convergence** on a random 50-D QP with 30 inequalities. The objective gap drops geometrically over a few thousand iterations; the iterate stability `‖x_{t+1}−x_t‖` mirrors it; constraint violation stays at machine-precision floor throughout. | ![convergence](figures/01_convergence.png) |
+| **Projection-spike raster** on a 4-D box-constrained problem whose unconstrained optimum lies *outside* the box. Each row is one inequality, each marker a spike (sized by displacement); only the four "active" faces of the box fire. The bottom panel is the corresponding objective gap. This is the literal sense in which the solver is *spiking*. | ![spike raster](figures/02_spike_raster.png) |
+| **Warm-start speedup** on a sequence of 30 drifting QPs (a stylized MPC workload). Cold-started solves take ~260 iterations each; warm-started solves drop to ~140 from the second problem onward — an essentially-free 1.8× speedup, the property that makes this dynamic well-suited to receding-horizon problems. | ![warm start](figures/03_warm_start.png) |
+
+Reproduce these from a checkout with `python benchmarks/run_all.py`.
+
 ## Installation
 
 `snn_opt` requires Python 3.9+, NumPy, and SciPy. Install from a checkout:
