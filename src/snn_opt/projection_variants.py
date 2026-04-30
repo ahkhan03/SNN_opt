@@ -172,26 +172,36 @@ def solve_qp_penalty(
 
     L_C = _spectral_norm(C) if m > 0 else 0.0
 
-    # Auto-tune k_p to balance with L_A
-    # Heuristic: penalty curvature should be ~10x QP curvature for tight feas
+    # Auto-tune k_p so that the penalty force at a unit violation matches the
+    # scale of the unconstrained gradient (||A|| + ||b||). This is the
+    # smallest k_p that can hold the iterate inside the feasible region; the
+    # ramp boosts it to k_p_fin for tight feasibility.
+    grad_scale = max(L_A, np.linalg.norm(b))
     if k_p is None:
-        k_p_init = 10.0 * L_A / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
+        k_p_init = 10.0 * grad_scale / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
     else:
         k_p_init = float(k_p)
     if k_p_ramp:
-        k_p_fin = float(k_p_final) if k_p_final is not None else 10.0 * k_p_init
+        # Ramp by 10^4 over the run -- empirically gives 1e-4 rel_err on MPC
+        k_p_fin = float(k_p_final) if k_p_final is not None else 1e4 * k_p_init
     else:
         k_p_fin = k_p_init
 
     # Penalty term contributes a Lipschitz-like factor of k_p * ||C||_2^2 to
     # the joint dynamics; the safe Euler step is k0_scale / (L_A + k_p_max * ||C||^2_2)
-    L_total = L_A + k_p_fin * (L_C ** 2)
+    # Time-varying step: h adapts to *current* k_p, not the asymptotic value.
+    # This lets the iterate cover the full unconstrained gradient-flow path
+    # while k_p is still small, then decreases as k_p ramps up to maintain
+    # stability when the penalty term becomes stiff.
+    h_user = h
     if h is None:
-        h = k0_scale / max(L_total, 1e-12)
+        h_init = k0_scale / max(L_A, 1e-12)
+    else:
+        h_init = h
 
     if verbose:
         print(f"[penalty] n={n}, m={m}, L_A={L_A:.3e}, ||C||_2={L_C:.3e}")
-        print(f"[penalty] k_p init={k_p_init:.2e} -> fin={k_p_fin:.2e}, h={h:.3e}")
+        print(f"[penalty] k_p init={k_p_init:.2e} -> fin={k_p_fin:.2e}, h_init={h_init:.3e} (adaptive)")
 
     x = x0.copy()
     trajectory: List[np.ndarray] = [x.copy()]
@@ -216,10 +226,19 @@ def solve_qp_penalty(
 
     for k in range(max_iterations):
         if k_p_ramp and max_iterations > 1:
+            # alpha^2 schedule: k_p stays near k_p_init for the first ~half
+            # of iterations (giving the unconstrained gradient flow time to
+            # traverse), then ramps up to k_p_fin to refine feasibility.
             alpha = k / (max_iterations - 1)
-            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** alpha
+            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** (alpha ** 2)
         else:
             k_p_curr = k_p_init
+
+        # adaptive Euler step: stable for current k_p
+        if h_user is None:
+            h_curr = k0_scale / max(L_A + k_p_curr * (L_C ** 2), 1e-12)
+        else:
+            h_curr = h_user
 
         # gradient of unconstrained QP
         grad_f = A @ x + b
@@ -235,7 +254,7 @@ def solve_qp_penalty(
             penalty_force = np.zeros(n)
 
         dx_dt = -(grad_f + penalty_force)
-        x_new = x + h * dx_dt
+        x_new = x + h_curr * dx_dt
         delta = x_new - x
 
         # spike bookkeeping: every iteration with any positive residual is a "spike"
@@ -243,7 +262,7 @@ def solve_qp_penalty(
             active = np.where(v > 0)[0]
             if active.size > 0:
                 spike_times.append(float(k))
-                spike_deltas.append(-h * penalty_force.copy())
+                spike_deltas.append(-h_curr * penalty_force.copy())
                 spike_constraints.append(active.copy())
                 spike_violations.append(v[active].copy())
 
@@ -577,19 +596,21 @@ def solve_qp_heun_penalty(
     L_A = _spectral_norm_symmetric(A) or 1.0
     L_C = _spectral_norm(C) if m > 0 else 0.0
 
+    grad_scale = max(L_A, np.linalg.norm(b))
     if k_p is None:
-        k_p_init = 10.0 * L_A / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
+        k_p_init = 10.0 * grad_scale / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
     else:
         k_p_init = float(k_p)
     k_p_fin = float(k_p_final) if k_p_final is not None else (
-        10.0 * k_p_init if k_p_ramp else k_p_init
+        1e4 * k_p_init if k_p_ramp else k_p_init
     )
 
-    L_total = L_A + k_p_fin * (L_C ** 2)
+    h_user = h
     if h is None:
-        # Heun is stable up to ~2/L for linear problems; allow 1.4x larger step
-        # than forward Euler.
-        h = 1.4 * k0_scale / max(L_total, 1e-12)
+        # Heun is stable up to ~2/L for linear problems; 1.4x larger than Euler
+        h_init = 1.4 * k0_scale / max(L_A, 1e-12)
+    else:
+        h_init = h
 
     def _f(x_arg, k_p_arg):
         if m > 0:
@@ -621,15 +642,23 @@ def solve_qp_heun_penalty(
 
     for k in range(max_iterations):
         if k_p_ramp and max_iterations > 1:
+            # alpha^2 schedule: k_p stays near k_p_init for the first ~half
+            # of iterations (giving the unconstrained gradient flow time to
+            # traverse), then ramps up to k_p_fin to refine feasibility.
             alpha = k / (max_iterations - 1)
-            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** alpha
+            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** (alpha ** 2)
         else:
             k_p_curr = k_p_init
 
+        if h_user is None:
+            h_curr = 1.4 * k0_scale / max(L_A + k_p_curr * (L_C ** 2), 1e-12)
+        else:
+            h_curr = h_user
+
         f1 = _f(x, k_p_curr)
-        x_pred = x + h * f1
+        x_pred = x + h_curr * f1
         f2 = _f(x_pred, k_p_curr)
-        x_new = x + (h / 2.0) * (f1 + f2)
+        x_new = x + (h_curr / 2.0) * (f1 + f2)
 
         if m > 0:
             v_at_x = np.maximum(C @ x + d, 0.0)
@@ -738,23 +767,25 @@ def solve_qp_heavyball_penalty(
 
     L_A = _spectral_norm_symmetric(A) or 1.0
     L_C = _spectral_norm(C) if m > 0 else 0.0
+    grad_scale = max(L_A, np.linalg.norm(b))
     if k_p is None:
-        k_p_init = 10.0 * L_A / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
+        k_p_init = 10.0 * grad_scale / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
     else:
         k_p_init = float(k_p)
     k_p_fin = float(k_p_final) if k_p_final is not None else (
-        10.0 * k_p_init if k_p_ramp else k_p_init
+        1e4 * k_p_init if k_p_ramp else k_p_init
     )
-    L_total = L_A + k_p_fin * (L_C ** 2)
-
+    h_user = h
     if h is None:
-        h = k0_scale / max(L_total, 1e-12)
+        h_init = k0_scale / max(L_A, 1e-12)
+    else:
+        h_init = h
     if beta is None:
         # Conservative momentum coefficient; tuned for stability with k_p ramp
         beta = 0.9
 
     if verbose:
-        print(f"[heavyball] n={n}, m={m}, h={h:.3e}, beta={beta}, "
+        print(f"[heavyball] n={n}, m={m}, h_init={h_init:.3e} (adaptive), beta={beta}, "
               f"k_p {k_p_init:.2e}->{k_p_fin:.2e}")
 
     x = x0.copy()
@@ -779,10 +810,18 @@ def solve_qp_heavyball_penalty(
 
     for k in range(max_iterations):
         if k_p_ramp and max_iterations > 1:
+            # alpha^2 schedule: k_p stays near k_p_init for the first ~half
+            # of iterations (giving the unconstrained gradient flow time to
+            # traverse), then ramps up to k_p_fin to refine feasibility.
             alpha = k / (max_iterations - 1)
-            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** alpha
+            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** (alpha ** 2)
         else:
             k_p_curr = k_p_init
+
+        if h_user is None:
+            h_curr = k0_scale / max(L_A + k_p_curr * (L_C ** 2), 1e-12)
+        else:
+            h_curr = h_user
 
         if m > 0:
             v_resid = np.maximum(C @ x + d, 0.0)
@@ -796,7 +835,7 @@ def solve_qp_heavyball_penalty(
             active = np.array([], dtype=int)
 
         v = beta * v + (1.0 - beta) * f_x
-        x_new = x + h * v
+        x_new = x + h_curr * v
 
         if had_violation:
             spike_times.append(float(k))
@@ -900,21 +939,24 @@ def solve_qp_nesterov_penalty(
 
     L_A = _spectral_norm_symmetric(A) or 1.0
     L_C = _spectral_norm(C) if m > 0 else 0.0
+    grad_scale = max(L_A, np.linalg.norm(b))
     if k_p is None:
-        k_p_init = 10.0 * L_A / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
+        k_p_init = 10.0 * grad_scale / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
     else:
         k_p_init = float(k_p)
     k_p_fin = float(k_p_final) if k_p_final is not None else (
-        10.0 * k_p_init if k_p_ramp else k_p_init
+        1e4 * k_p_init if k_p_ramp else k_p_init
     )
-    L_total = L_A + k_p_fin * (L_C ** 2)
-
+    h_user = h
     if h is None:
-        # FISTA needs h <= 1/L
-        h = k0_scale / max(L_total, 1e-12)
+        # FISTA needs h <= 1/L; auto-step adapts to current k_p (see loop)
+        h_init = k0_scale / max(L_A, 1e-12)
+    else:
+        h_init = h
 
     if verbose:
-        print(f"[nesterov] n={n}, m={m}, h={h:.3e}, k_p {k_p_init:.2e}->{k_p_fin:.2e}")
+        print(f"[nesterov] n={n}, m={m}, h_init={h_init:.3e} (adaptive), "
+              f"k_p {k_p_init:.2e}->{k_p_fin:.2e}")
 
     x_prev = x0.copy()
     x = x0.copy()
@@ -938,10 +980,18 @@ def solve_qp_nesterov_penalty(
 
     for k in range(max_iterations):
         if k_p_ramp and max_iterations > 1:
+            # alpha^2 schedule: k_p stays near k_p_init for the first ~half
+            # of iterations (giving the unconstrained gradient flow time to
+            # traverse), then ramps up to k_p_fin to refine feasibility.
             alpha = k / (max_iterations - 1)
-            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** alpha
+            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** (alpha ** 2)
         else:
             k_p_curr = k_p_init
+
+        if h_user is None:
+            h_curr = k0_scale / max(L_A + k_p_curr * (L_C ** 2), 1e-12)
+        else:
+            h_curr = h_user
 
         # Nesterov lookahead
         if k == 0:
@@ -960,7 +1010,7 @@ def solve_qp_nesterov_penalty(
             had_violation = False
             v_resid = np.zeros(0); active = np.array([], dtype=int)
 
-        x_new = y + h * f_y
+        x_new = y + h_curr * f_y
 
         if had_violation:
             spike_times.append(float(k))
@@ -1080,19 +1130,29 @@ def solve_qp_expeuler_penalty(
 
     L_A = _spectral_norm_symmetric(A) or 1.0
     L_C = _spectral_norm(C) if m > 0 else 0.0
+    grad_scale = max(L_A, np.linalg.norm(b))
+
+    # Exponential Euler precomputes exp(-h*A) once, so h is fixed for the
+    # whole run. Strategy: pick k_p target first (so we have a useful
+    # penalty), then back-compute h so that the explicit penalty force
+    # stays stable: h * k_p_fin * L_C^2 < 0.5.
     if k_p is None:
-        k_p_init = 10.0 * L_A / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
+        k_p_init = 10.0 * grad_scale / max(L_C ** 2, 1e-12) if L_C > 0 else 1.0
     else:
         k_p_init = float(k_p)
+    # Note: expeuler uses a *much* smaller ramp than the time-varying-h
+    # variants because it cannot reduce h as k_p_curr grows. We trade
+    # asymptotic feasibility tightness for a longer effective gradient-flow
+    # horizon (so the iterate can actually reach the optimum).
     k_p_fin = float(k_p_final) if k_p_final is not None else (
         10.0 * k_p_init if k_p_ramp else k_p_init
     )
-
     if h is None:
-        # exponential Euler is unconditionally stable on the linear part;
-        # step is limited only by the penalty term. With k_p auto-tuned to
-        # ~10 * L_A / ||C||^2, we have k_p * ||C||^2 ~ 10 L_A, so h = k0_scale/L_A.
-        h = k0_scale / max(k_p_fin * (L_C ** 2) + 1e-12, 1e-12)
+        if L_C > 0:
+            h_penalty_lim = 0.5 / max(k_p_fin * (L_C ** 2), 1e-12)
+        else:
+            h_penalty_lim = float("inf")
+        h = min(k0_scale / max(L_A, 1e-12), h_penalty_lim)
 
     # Precompute E_h = exp(-h A) and B_h = A^{-1} (I - E_h)
     E_h = expm(-h * A)
@@ -1137,8 +1197,11 @@ def solve_qp_expeuler_penalty(
 
     for k in range(max_iterations):
         if k_p_ramp and max_iterations > 1:
+            # alpha^2 schedule: k_p stays near k_p_init for the first ~half
+            # of iterations (giving the unconstrained gradient flow time to
+            # traverse), then ramps up to k_p_fin to refine feasibility.
             alpha = k / (max_iterations - 1)
-            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** alpha
+            k_p_curr = k_p_init * (k_p_fin / k_p_init) ** (alpha ** 2)
         else:
             k_p_curr = k_p_init
 
