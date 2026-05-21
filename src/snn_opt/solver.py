@@ -75,6 +75,17 @@ class SolverConfig:
     # Convergence detection
     convergence: ConvergenceConfig = field(default_factory=ConvergenceConfig)
 
+    # Instrumentation / performance
+    # record_trajectory=True (default) keeps the full iterate trajectory and
+    # per-projection spike-event metadata -- needed for figures and diagnostics.
+    # record_trajectory=False runs the lean solve path: no trajectory or spike
+    # storage, one fused A@x matvec per iteration. Use this for benchmarking.
+    record_trajectory: bool = True
+
+    # Solve backend: 'python' (reference) or 'c' (compiled pybind11 kernel,
+    # euler + adaptive projection only; implies record_trajectory=False).
+    backend: str = 'python'
+
 
 @dataclass
 class OptimizationProblem:
@@ -493,10 +504,13 @@ class SNNSolver:
         self._iterations_used = 0
         
         # Dispatch to appropriate solver
+        if self.config.backend == 'c':
+            return self._solve_euler_c(x0, verbose)
         if self.config.integration_method == 'euler':
-            return self._solve_euler(x0, verbose)
-        else:
-            return self._solve_ivp(x0, verbose)
+            if self.config.record_trajectory:
+                return self._solve_euler(x0, verbose)
+            return self._solve_euler_lean(x0, verbose)
+        return self._solve_ivp(x0, verbose)
     
     def _solve_euler(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
@@ -585,9 +599,196 @@ class SNNSolver:
         
         self._t_segments = [t]
         self._x_segments = [X]
-        
+
         return self._build_result()
-    
+
+    def _solve_euler_lean(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
+        """
+        Lean discrete-Euler solve: no trajectory or spike-event storage.
+
+        Numerically tracks :meth:`_solve_euler` but drops every per-iteration
+        instrumentation cost: the full iterate trajectory, the per-projection
+        spike-event dicts, and the full-trajectory recompute in the result
+        builder. The objective needed for the plateau check reuses the
+        gradient's ``A @ x`` matvec instead of computing a second one, which
+        roughly halves the dense matvec count per iteration.
+
+        This method is the reference implementation that the compiled C/C++
+        backend mirrors; keep the two in lockstep.
+        """
+        conv_cfg = self.config.convergence
+        A = self.problem.A
+        b = self.problem.b
+        track_x_history = conv_cfg.use_solution_stable
+
+        x_current = np.asarray(x0, dtype=float).copy()
+        obj_history: List[float] = []
+        x_history: List[np.ndarray] = []
+        patience_counter = 0
+
+        if verbose:
+            print(f"[lean] Using k0 = {self._k0:.6e} (auto-computed: {self.config.k0 is None})")
+
+        # A @ x for the current iterate; recomputed once per iteration and
+        # reused for both the gradient step and the plateau-check objective.
+        Ax = A @ x_current
+
+        for iteration in range(self.config.max_iterations):
+            # Phase 1: gradient descent step (gradient = A x + b, A x cached)
+            gradient = Ax + b
+            x_current = x_current - self._k0 * gradient
+
+            # Phase 2: project to feasible region (no spike-info dicts)
+            x_current, n_proj, _ = self._project_to_feasible(x_current, build_info=False)
+            self._n_projections += n_proj
+
+            # Phase 3: clip to box constraints if specified
+            x_current = self._clip_to_bounds(x_current)
+
+            # Objective for the plateau check: reuse the A @ x we need anyway
+            # for the next iteration's gradient (O(n^2) once, not twice).
+            Ax = A @ x_current
+            obj_current = 0.5 * float(x_current @ Ax) + float(b @ x_current)
+            obj_history.append(obj_current)
+            if track_x_history:
+                x_history.append(x_current.copy())
+
+            # Keep history bounded
+            max_history = conv_cfg.window_size * 2
+            if len(obj_history) > max_history:
+                obj_history = obj_history[-max_history:]
+                if track_x_history:
+                    x_history = x_history[-max_history:]
+
+            if verbose and iteration % 100 == 0:
+                viol = self.problem.max_violation(x_current)
+                print(f"[lean] Iter {iteration}: obj={obj_current:.6e}, max_viol={viol:.6e}")
+
+            # Check convergence (with patience)
+            if conv_cfg.enable_early_stopping:
+                converged, reason, was_check = self._check_convergence(
+                    iteration, x_current, obj_history, x_history)
+                if was_check:
+                    if converged:
+                        patience_counter += 1
+                        if patience_counter >= conv_cfg.patience:
+                            self._converged = True
+                            self._convergence_reason = reason
+                            self._iterations_used = iteration + 1
+                            if verbose:
+                                print(f"[lean] Iter {iteration}: Early stop - {reason}")
+                            break
+                    else:
+                        patience_counter = 0
+
+        if not self._converged:
+            self._iterations_used = self.config.max_iterations
+            self._convergence_reason = "max_iterations"
+
+        return self._build_lean_result(x_current)
+
+    def _build_lean_result(self, final_x: np.ndarray) -> SolverResult:
+        """
+        Build a minimal :class:`SolverResult` for the lean solve path.
+
+        Only final-state fields are populated; trajectory and spike-event
+        arrays are intentionally empty (``record_trajectory=False``). The
+        reported ``final_objective`` is computed with the exact objective
+        formula, not the matvec-reuse approximation used internally for the
+        plateau check.
+        """
+        final_x = np.asarray(final_x, dtype=float)
+        final_objective = self.problem.objective(final_x)
+        final_proj_grad_norm = self._compute_projected_gradient_norm(final_x)
+        final_violation = self.problem.max_violation(final_x)
+        n = self.problem.n_vars
+
+        return SolverResult(
+            t=np.array([float(self._iterations_used)]),
+            X=final_x.reshape(1, -1),
+            objective_values=np.array([final_objective]),
+            constraint_violations=np.array([final_violation]),
+            n_projections=self._n_projections,
+            converged=self._converged,
+            convergence_reason=self._convergence_reason,
+            iterations_used=self._iterations_used,
+            final_x=final_x,
+            final_objective=final_objective,
+            final_proj_grad_norm=final_proj_grad_norm,
+            spike_times=np.array([], dtype=float),
+            spike_deltas=np.empty((0, n)),
+            spike_norms=np.empty((0,), dtype=float),
+            spike_constraints=[],
+            spike_violation_values=[],
+            total_projection_distance=0.0,
+        )
+
+    def _solve_euler_c(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
+        """
+        Solve via the compiled C++ kernel (``snn_opt._kernel``).
+
+        A faithful compiled port of :meth:`_solve_euler_lean`. Supported
+        configuration: ``integration_method='euler'``,
+        ``projection_method='adaptive'``, dense ``A`` and ``C``. Always lean
+        (``record_trajectory`` is ignored) -- only final-state fields of the
+        returned :class:`SolverResult` are populated.
+        """
+        try:
+            from . import _kernel
+        except ImportError as exc:
+            raise ImportError(
+                "backend='c' requires the compiled snn_opt._kernel extension. "
+                "Build it with `python setup.py build_ext --inplace`."
+            ) from exc
+
+        if self.config.projection_method != 'adaptive':
+            raise ValueError(
+                "backend='c' supports projection_method='adaptive' only "
+                f"(got {self.config.projection_method!r})")
+        if _issparse(self.problem.A) or _issparse(self.problem.C):
+            raise ValueError(
+                "backend='c' requires dense A and C (scipy sparse not supported)")
+
+        prob = self.problem
+        conv = self.config.convergence
+        n, m = prob.n_vars, prob.n_constraints
+
+        A = np.ascontiguousarray(prob.A, dtype=np.float64)
+        b = np.ascontiguousarray(prob.b, dtype=np.float64)
+        C = np.ascontiguousarray(prob.C, dtype=np.float64).reshape(m, n)
+        d = np.ascontiguousarray(prob.d, dtype=np.float64)
+        c_norms_sq = np.ascontiguousarray(self._c_norms_sq, dtype=np.float64).reshape(m)
+        x0c = np.ascontiguousarray(x0, dtype=np.float64)
+
+        has_lower = self.config.lower_bound is not None
+        has_upper = self.config.upper_bound is not None
+
+        final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
+            A, b, C, d, c_norms_sq, x0c,
+            self._k0, self.config.constraint_tol,
+            self.config.max_iterations, self.config.max_projection_iters,
+            conv.enable_early_stopping, conv.check_every, conv.min_iterations,
+            conv.window_size, conv.patience,
+            conv.obj_rel_tol, conv.x_rel_tol, conv.proj_grad_tol,
+            conv.feasibility_tol,
+            conv.use_objective_plateau, conv.use_projected_gradient,
+            conv.use_solution_stable, conv.require_feasibility,
+            has_lower, float(self.config.lower_bound) if has_lower else 0.0,
+            has_upper, float(self.config.upper_bound) if has_upper else 0.0,
+        )
+
+        self._n_projections = int(n_proj)
+        self._converged = bool(converged)
+        self._iterations_used = int(iters)
+        self._convergence_reason = (
+            "converged(c-backend)" if reason_code == 1 else "max_iterations")
+
+        if verbose:
+            print(f"[c] iterations={iters}, n_projections={n_proj}, "
+                  f"converged={bool(converged)}")
+
+        return self._build_lean_result(np.asarray(final_x, dtype=float))
+
     def _solve_ivp(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
         Solve using continuous ODE integration (original method).
@@ -666,14 +867,24 @@ class SNNSolver:
         # Compile results
         return self._build_result()
     
-    def _project_to_feasible(self, x: np.ndarray) -> Tuple[np.ndarray, int, List[dict]]:
+    def _project_to_feasible(self, x: np.ndarray,
+                             build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Project x back into feasible region using discrete corrections.
-        
+
         Supports two projection methods:
         - 'adaptive': Computes exact step to reach constraint boundary (k1 = g_j / ||c_j||²)
         - 'fixed': Uses fixed step size k1 (original method)
-        
+
+        Parameters
+        ----------
+        x : ndarray
+            Point to project.
+        build_info : bool, optional
+            If True (default) build per-projection spike-event metadata. The
+            lean solve path passes False to skip the dict allocations; the
+            projected point and iteration count are unaffected.
+
         Returns
         -------
         x_proj : ndarray
@@ -681,14 +892,15 @@ class SNNSolver:
         n_iters : int
             Number of projection iterations performed
         spike_info : list of dict
-            Metadata for each projection applied (constraints, delta, violations)
+            Metadata for each projection applied (empty when build_info=False)
         """
         if self.config.projection_method == 'adaptive':
-            return self._project_adaptive(x)
+            return self._project_adaptive(x, build_info=build_info)
         else:
-            return self._project_fixed(x)
-    
-    def _project_adaptive(self, x: np.ndarray) -> Tuple[np.ndarray, int, List[dict]]:
+            return self._project_fixed(x, build_info=build_info)
+
+    def _project_adaptive(self, x: np.ndarray,
+                          build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Adaptive projection: compute exact step to reach each constraint boundary.
         
@@ -733,43 +945,46 @@ class SNNSolver:
             delta_x = -k1_adaptive * c_j
             x_proj = x_proj + delta_x
             n_iters += 1
-            
-            spike_info.append({
-                "constraints": np.array([j]),
-                "delta_x": delta_x,
-                "violations": np.array([violation])
-            })
-        
+
+            if build_info:
+                spike_info.append({
+                    "constraints": np.array([j]),
+                    "delta_x": delta_x,
+                    "violations": np.array([violation])
+                })
+
         return x_proj, n_iters, spike_info
     
-    def _project_fixed(self, x: np.ndarray) -> Tuple[np.ndarray, int, List[dict]]:
+    def _project_fixed(self, x: np.ndarray,
+                       build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Fixed projection: use constant step size k1 for all constraints.
-        
+
         Original method that requires tuning k1 hyperparameter.
         """
         x_proj = x.copy()
         n_iters = 0
         spike_info: List[dict] = []
-        
+
         for _ in range(self.config.max_projection_iters):
             g = self.problem.constraint_values(x_proj)
             violations = g > self.config.constraint_tol
-            
+
             if not np.any(violations):
                 break
-            
+
             # Apply projection: x <- x - k1 * C^T * violations
             direction = self.problem.C.T @ violations.astype(float)
             delta_x = -self.config.k1 * direction
             x_proj = x_proj + delta_x
             n_iters += 1
-            spike_info.append({
-                "constraints": np.where(violations)[0],
-                "delta_x": delta_x,
-                "violations": g[violations].copy()
-            })
-        
+            if build_info:
+                spike_info.append({
+                    "constraints": np.where(violations)[0],
+                    "delta_x": delta_x,
+                    "violations": g[violations].copy()
+                })
+
         return x_proj, n_iters, spike_info
     
     def _integrate_gradient_descent(self, t_span: Tuple[float, float], x0: np.ndarray):
@@ -869,6 +1084,8 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
              lower_bound: float = None,
              upper_bound: float = None,
              enable_early_stopping: bool = True,
+             record_trajectory: bool = True,
+             backend: str = 'python',
              verbose: bool = False) -> SolverResult:
     """
     Convenience function to solve a QP without creating objects explicitly.
@@ -906,9 +1123,16 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
         Upper bound for box constraint clipping (e.g., C for SVM)
     enable_early_stopping : bool
         Whether to enable convergence-based early stopping
+    record_trajectory : bool
+        If True (default) record the full iterate trajectory and spike-event
+        metadata. If False, run the lean solve path (no trajectory/spike
+        storage, one fused matvec per iteration) -- use for benchmarking.
+    backend : str
+        'python' (reference) or 'c' (compiled pybind11 kernel; euler +
+        adaptive projection only, implies record_trajectory=False).
     verbose : bool
         Print progress
-        
+
     Returns
     -------
     result : SolverResult
@@ -916,13 +1140,15 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
     """
     problem = OptimizationProblem(A=A, b=b, C=C, d=d)
     conv_config = ConvergenceConfig(enable_early_stopping=enable_early_stopping)
-    config = SolverConfig(k0=k0, t_end=t_end, 
+    config = SolverConfig(k0=k0, t_end=t_end,
                           max_iterations=max_iterations,
                           integration_method=integration_method,
                           projection_method=projection_method,
                           k0_scale=k0_scale,
                           lower_bound=lower_bound,
                           upper_bound=upper_bound,
+                          record_trajectory=record_trajectory,
+                          backend=backend,
                           convergence=conv_config)
     solver = SNNSolver(problem, config)
     return solver.solve(x0, verbose=verbose)

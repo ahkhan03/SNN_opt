@@ -1,0 +1,3 @@
+# Ship the native kernel sources in the sdist so `pip install` from source can
+# compile the optional snn_opt._kernel extension.
+recursive-include src/snn_opt/_native *.hpp *.cpp
