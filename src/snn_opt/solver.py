@@ -82,6 +82,13 @@ class SolverConfig:
     # storage, one fused A@x matvec per iteration. Use this for benchmarking.
     record_trajectory: bool = True
 
+    # If False, do not retain per-projection spike_info (delta_x, constraints,
+    # violations) across outer iterations. Saves O(max_iterations *
+    # max_projection_iters) memory which is the dominant cost for long runs at
+    # large projection budgets. Default True preserves backward-compat with
+    # figure / illustration scripts that read result.spike_*.
+    record_spike_history: bool = True
+
     # Solve backend: 'python' (reference) or 'c' (compiled pybind11 kernel,
     # euler + adaptive projection only; implies record_trajectory=False).
     backend: str = 'python'
@@ -540,8 +547,8 @@ class SNNSolver:
             # Phase 2: Project to feasible region
             x_current, n_proj, spike_info = self._project_to_feasible(x_current)
             self._n_projections += n_proj
-            
-            if n_proj > 0:
+
+            if n_proj > 0 and self.config.record_spike_history:
                 for info in spike_info:
                     self._spike_times.append(float(iteration))
                     self._spike_deltas.append(info["delta_x"])
@@ -808,8 +815,8 @@ class SNNSolver:
             # Phase 1: Project back into feasible region
             x_current, n_proj, spike_info = self._project_to_feasible(x_current)
             self._n_projections += n_proj
-            
-            if n_proj > 0:
+
+            if n_proj > 0 and self.config.record_spike_history:
                 for info in spike_info:
                     self._spike_times.append(t_current)
                     self._spike_deltas.append(info["delta_x"])
