@@ -82,39 +82,52 @@ inline double max_violation(const double* C, const double* d, const double* x,
 }
 
 // ----------------------------------------------------------------------------
-// Adaptive projection -- mirrors SNNSolver._project_adaptive
+// Adaptive projection -- Gram-matrix (event-driven lateral-update) form
 // ----------------------------------------------------------------------------
-// Repeatedly snaps the most-violated constraint to its boundary with the
-// closed-form exact step k1 = g_j / ||c_j||^2. Modifies x in place. Returns
-// the number of projection sub-iterations actually applied (n_projections).
+// Snaps the most-violated constraint to its boundary with the closed-form exact
+// step k1 = g_j / ||c_j||^2, as SNNSolver._project_adaptive does -- but instead
+// of recomputing the residual r = C x + d from scratch every sub-iteration,
+// each projection event ("spike") on constraint j updates the residual of every
+// coupled constraint by -k1 * G[:,j], where G = C C^T is the constraint-
+// coupling (recurrent) matrix. This is event-driven lateral propagation:
+// O(m) per spike rather than an O(m*n) residual recompute.
+//
+// The residual is recomputed exactly once per call (C x + d). Incremental drift
+// over the bounded sub-iteration loop stays ~1e-12 (<< constraint_tol) and is
+// reset by the fresh recompute on the next outer iteration.
+//
+// G is m x m, row-major, symmetric (so column j == row j); G[j][j] equals
+// c_norms_sq[j]. Modifies x in place. Returns the number of projection events.
 inline int project_adaptive(double* x,
                              const double* C, const double* d,
-                             const double* c_norms_sq,
+                             const double* c_norms_sq, const double* G,
                              int n, int m,
                              double constraint_tol, int max_projection_iters,
-                             double* r_scratch) {
+                             double* r) {
     if (m == 0) return 0;
+    matvec(C, x, r, m, n);                         // r = C x      (once)
+    for (int i = 0; i < m; ++i) r[i] += d[i];      // r = C x + d
+
     int n_iters = 0;
     for (int it = 0; it < max_projection_iters; ++it) {
-        // r = C x + d
-        matvec(C, x, r_scratch, m, n);
-        for (int i = 0; i < m; ++i) r_scratch[i] += d[i];
-
         // most-violated constraint (np.argmax: first maximal index)
         int j = 0;
-        double gmax = r_scratch[0];
+        double gmax = r[0];
         for (int i = 1; i < m; ++i) {
-            if (r_scratch[i] > gmax) { gmax = r_scratch[i]; j = i; }
+            if (r[i] > gmax) { gmax = r[i]; j = i; }
         }
         if (gmax <= constraint_tol) break;  // all constraints satisfied
 
-        // Degenerate constraint: Python does `continue` (re-evaluate). The
-        // outer loop is bounded by max_projection_iters so this terminates.
+        // Degenerate constraint: re-evaluate (x and r unchanged). The outer
+        // loop is bounded by max_projection_iters so this terminates.
         if (c_norms_sq[j] < 1e-12) continue;
 
         const double k1 = gmax / c_norms_sq[j];
         const double* cj = C + static_cast<std::size_t>(j) * n;
-        for (int k = 0; k < n; ++k) x[k] -= k1 * cj[k];  // x <- x - k1 * c_j
+        for (int k = 0; k < n; ++k) x[k] -= k1 * cj[k];      // primal update
+        // Lateral update: spike j propagates -k1 * G[:,j] to coupled rows.
+        const double* Gj = G + static_cast<std::size_t>(j) * m;
+        for (int i = 0; i < m; ++i) r[i] -= k1 * Gj[i];
         ++n_iters;
     }
     return n_iters;
@@ -180,7 +193,7 @@ inline double projected_gradient_norm(const double* x,
 // ----------------------------------------------------------------------------
 inline Result solve_euler(const double* A, const double* b,
                           const double* C, const double* d,
-                          const double* c_norms_sq,
+                          const double* c_norms_sq, const double* G,
                           int n, int m,
                           double k0, double constraint_tol,
                           int max_iterations, int max_projection_iters,
@@ -225,7 +238,7 @@ inline Result solve_euler(const double* A, const double* b,
         for (int i = 0; i < n; ++i) x[i] -= k0 * (Ax[i] + b[i]);
 
         // Phase 2: project to feasible region
-        n_projections += project_adaptive(x.data(), C, d, c_norms_sq, n, m,
+        n_projections += project_adaptive(x.data(), C, d, c_norms_sq, G, n, m,
                                           constraint_tol, max_projection_iters,
                                           r.data());
 

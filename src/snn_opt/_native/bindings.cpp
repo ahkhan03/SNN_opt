@@ -18,7 +18,8 @@ namespace py = pybind11;
 using darray = py::array_t<double, py::array::c_style | py::array::forcecast>;
 
 static py::tuple solve_euler_py(
-        darray A, darray b, darray C, darray d, darray c_norms_sq, darray x0,
+        darray A, darray b, darray C, darray d, darray c_norms_sq,
+        darray c_gram, darray x0,
         double k0, double constraint_tol,
         int max_iterations, int max_projection_iters,
         bool enable_early_stopping, int check_every, int min_iterations,
@@ -44,6 +45,8 @@ static py::tuple solve_euler_py(
         throw std::invalid_argument("C must have shape (m, n)");
     if (c_norms_sq.ndim() != 1 || c_norms_sq.shape(0) != m)
         throw std::invalid_argument("c_norms_sq must have shape (m,)");
+    if (c_gram.ndim() != 2 || c_gram.shape(0) != m || c_gram.shape(1) != m)
+        throw std::invalid_argument("c_gram must have shape (m, m)");
     if (check_every < 1)
         throw std::invalid_argument("check_every must be >= 1");
     if (window_size < 1)
@@ -60,6 +63,7 @@ static py::tuple solve_euler_py(
         py::gil_scoped_release release;
         res = snn_qp::solve_euler(
             A.data(), b.data(), C.data(), d.data(), c_norms_sq.data(),
+            c_gram.data(),
             n, m, k0, constraint_tol, max_iterations, max_projection_iters,
             enable_early_stopping, check_every, min_iterations,
             window_size, patience,
@@ -80,7 +84,7 @@ PYBIND11_MODULE(_kernel, m) {
           "Returns (x_final, iterations_used, n_projections, converged, "
           "reason_code); reason_code: 0=max_iterations, 1=converged.",
           py::arg("A"), py::arg("b"), py::arg("C"), py::arg("d"),
-          py::arg("c_norms_sq"), py::arg("x0"),
+          py::arg("c_norms_sq"), py::arg("c_gram"), py::arg("x0"),
           py::arg("k0"), py::arg("constraint_tol"),
           py::arg("max_iterations"), py::arg("max_projection_iters"),
           py::arg("enable_early_stopping"), py::arg("check_every"),

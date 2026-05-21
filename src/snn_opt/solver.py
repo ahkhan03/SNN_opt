@@ -275,7 +275,18 @@ class SNNSolver:
                 self._c_norms_sq = np.sum(C ** 2, axis=1)
         else:
             self._c_norms_sq = np.array([])
-        
+
+        # Pre-compute the constraint Gram matrix G = C C^T (the constraint-
+        # coupling / recurrent matrix). The compiled C backend uses it for the
+        # event-driven projection: each projection spike on constraint j applies
+        # the lateral update r <- r - k1 * G[:,j] instead of recomputing C x.
+        # Only built for backend='c' with dense C (the C backend rejects sparse).
+        self._c_gram = None
+        if (self.config.backend == 'c' and self.problem.n_constraints > 0
+                and not _issparse(self.problem.C)):
+            C = np.asarray(self.problem.C, dtype=float)
+            self._c_gram = np.ascontiguousarray(C @ C.T, dtype=np.float64)
+
         # Storage for trajectory segments
         self._t_segments: List[np.ndarray] = []
         self._x_segments: List[np.ndarray] = []
@@ -765,13 +776,17 @@ class SNNSolver:
         C = np.ascontiguousarray(prob.C, dtype=np.float64).reshape(m, n)
         d = np.ascontiguousarray(prob.d, dtype=np.float64)
         c_norms_sq = np.ascontiguousarray(self._c_norms_sq, dtype=np.float64).reshape(m)
+        if self._c_gram is not None:
+            c_gram = np.ascontiguousarray(self._c_gram, dtype=np.float64).reshape(m, m)
+        else:
+            c_gram = np.zeros((m, m), dtype=np.float64)
         x0c = np.ascontiguousarray(x0, dtype=np.float64)
 
         has_lower = self.config.lower_bound is not None
         has_upper = self.config.upper_bound is not None
 
         final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
-            A, b, C, d, c_norms_sq, x0c,
+            A, b, C, d, c_norms_sq, c_gram, x0c,
             self._k0, self.config.constraint_tol,
             self.config.max_iterations, self.config.max_projection_iters,
             conv.enable_early_stopping, conv.check_every, conv.min_iterations,
