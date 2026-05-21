@@ -21,6 +21,13 @@ def _issparse(x):
     return _sp.issparse(x)
 
 
+# Cap on the constraint count m for precomputing the m x m constraint Gram
+# matrix G = C C^T (used by the event-driven adaptive projection). Above this,
+# the m x m matrix is judged too costly; the Python path falls back to
+# recomputing the residual and backend='c' raises a clear error.
+_MAX_GRAM_M = 4096
+
+
 @dataclass
 class ConvergenceConfig:
     """Configuration for convergence detection."""
@@ -277,13 +284,16 @@ class SNNSolver:
             self._c_norms_sq = np.array([])
 
         # Pre-compute the constraint Gram matrix G = C C^T (the constraint-
-        # coupling / recurrent matrix). The compiled C backend uses it for the
-        # event-driven projection: each projection spike on constraint j applies
-        # the lateral update r <- r - k1 * G[:,j] instead of recomputing C x.
-        # Only built for backend='c' with dense C (the C backend rejects sparse).
+        # coupling / recurrent matrix). Both the compiled C kernel and the
+        # Python adaptive projection use it for the event-driven update: a
+        # projection spike on constraint j applies the lateral update
+        # g <- g - k1 * G[:,j] (O(m)) instead of recomputing C x (O(m*n)).
+        # Built for dense C with m <= _MAX_GRAM_M; sparse C or larger m keeps
+        # the residual-recompute path (and backend='c' then raises).
         self._c_gram = None
-        if (self.config.backend == 'c' and self.problem.n_constraints > 0
-                and not _issparse(self.problem.C)):
+        if (self.problem.n_constraints > 0
+                and not _issparse(self.problem.C)
+                and self.problem.n_constraints <= _MAX_GRAM_M):
             C = np.asarray(self.problem.C, dtype=float)
             self._c_gram = np.ascontiguousarray(C @ C.T, dtype=np.float64)
 
@@ -778,8 +788,13 @@ class SNNSolver:
         c_norms_sq = np.ascontiguousarray(self._c_norms_sq, dtype=np.float64).reshape(m)
         if self._c_gram is not None:
             c_gram = np.ascontiguousarray(self._c_gram, dtype=np.float64).reshape(m, m)
+        elif m == 0:
+            c_gram = np.zeros((0, 0), dtype=np.float64)
         else:
-            c_gram = np.zeros((m, m), dtype=np.float64)
+            raise ValueError(
+                f"backend='c' needs the constraint Gram matrix, but m={m} "
+                f"exceeds the precompute cap (_MAX_GRAM_M={_MAX_GRAM_M}); "
+                f"use backend='python'")
         x0c = np.ascontiguousarray(x0, dtype=np.float64)
 
         has_lower = self.config.lower_bound is not None
@@ -925,30 +940,39 @@ class SNNSolver:
                           build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Adaptive projection: compute exact step to reach each constraint boundary.
-        
-        For violated constraint g_j(x) = c_j^T x + d_j > 0, the exact step is:
-            k1_j = g_j / ||c_j||²
-        
-        This projects exactly onto the constraint boundary in one step per constraint,
-        eliminating k1 as a hyperparameter.
+
+        For violated constraint g_j(x) = c_j^T x + d_j > 0, the exact step is
+        k1_j = g_j / ||c_j||^2; this projects exactly onto the boundary in one
+        step per constraint, eliminating k1 as a hyperparameter.
+
+        When the constraint Gram matrix G = C C^T has been precomputed (dense C,
+        m <= _MAX_GRAM_M), the residual g = C x_proj + d is maintained
+        incrementally: each projection event on constraint j applies the lateral
+        update g <- g - k1 * G[:,j] (O(m)), the constraint-coupling form of a
+        spike-triggered update, instead of recomputing C x_proj (O(m*n)). For
+        sparse C or large m it falls back to recomputing the residual.
         """
         x_proj = x.copy()
         n_iters = 0
         spike_info: List[dict] = []
-        
+
         # Handle unconstrained case
         if self.problem.n_constraints == 0:
             return x_proj, 0, spike_info
-        
+
+        gram = self._c_gram  # None -> recompute path; else event-driven path
+        g = self.problem.constraint_values(x_proj)
+
         for _ in range(self.config.max_projection_iters):
-            g = self.problem.constraint_values(x_proj)
-            
+            if gram is None:
+                g = self.problem.constraint_values(x_proj)
+
             # Find most violated constraint
             j = np.argmax(g)
             if g[j] <= self.config.constraint_tol:
                 break  # All constraints satisfied
-            
-            # Compute exact step to reach boundary: k1 = g_j / ||c_j||²
+
+            # Compute exact step to reach boundary: k1 = g_j / ||c_j||^2
             c_j = self.problem.C[j]
             # Convert sparse row to dense 1D array
             if _issparse(c_j):
@@ -966,6 +990,9 @@ class SNNSolver:
             # Project: x <- x - k1 * c_j
             delta_x = -k1_adaptive * c_j
             x_proj = x_proj + delta_x
+            if gram is not None:
+                # Spike j propagates a lateral update to coupled constraints.
+                g = g - k1_adaptive * gram[j]
             n_iters += 1
 
             if build_info:
