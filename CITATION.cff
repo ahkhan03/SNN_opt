@@ -8,7 +8,7 @@ authors:
     affiliation: "School of Artificial Intelligence, Taizhou University"
     email: "ahkhan@tzc.edu.cn"
     # orcid: "https://orcid.org/0000-0000-0000-0000"  # add when available
-repository-code: "https://github.com/ahkhan03/snn_opt"
+repository-code: "https://github.com/ahkhan03/SNN_opt"
 url: "https://snn.ahkhan.me"
 abstract: >
   snn_opt is a Python implementation of a spiking neural network (SNN) inspired
@@ -26,7 +26,7 @@ keywords:
   - "projected gradient"
 license: Apache-2.0
 version: "0.1.0"
-date-released: "2026-04-18"
+date-released: "2026-05-23"
 preferred-citation:
   type: software
   title: "snn_opt: A Spiking Neural Network Solver for Constrained Convex Optimization"

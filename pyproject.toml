@@ -41,9 +41,10 @@ dev = ["pytest>=7", "ruff>=0.5", "matplotlib>=3.5", "cvxpy>=1.4"]
 
 [project.urls]
 Homepage = "https://snn.ahkhan.me"
-Repository = "https://github.com/ahkhan03/snn_opt"
+Repository = "https://github.com/ahkhan03/SNN_opt"
 Documentation = "https://snn.ahkhan.me/docs"
-Issues = "https://github.com/ahkhan03/snn_opt/issues"
+Issues = "https://github.com/ahkhan03/SNN_opt/issues"
+Changelog = "https://github.com/ahkhan03/SNN_opt/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
