@@ -43,6 +43,11 @@ jobs:
           # Skip musl (Alpine) and PyPy to keep the matrix small.
           CIBW_SKIP: "*-musllinux* pp*"
           CIBW_ARCHS: ${{ matrix.arch }}
+          # scipy >=1.13 dropped manylinux2014 wheels; pin to manylinux_2_28
+          # so the post-build test container can pip-install scipy as a
+          # binary wheel instead of falling back to a from-sdist build.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # Smoke-test every built wheel by importing + running the test suite.
           CIBW_TEST_REQUIRES: "pytest"
           CIBW_TEST_COMMAND: "pytest {project}/tests -q"
