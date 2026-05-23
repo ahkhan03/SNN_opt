@@ -185,7 +185,7 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
 
 ```bibtex
 @software{khan2026snnopt,
-  author  = {Khan, Ameer Hamza},
+  author  = {Khan, Ameer Hamza and Li, Shuai},
   title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
   year    = {2026},
   version = {0.1.0},
@@ -209,4 +209,6 @@ Apache-2.0 — see [`LICENSE`](LICENSE). Permissive, with an explicit patent gra
 
 ## Acknowledgments
 
-Developed at the **School of Artificial Intelligence, Taizhou University**. The framework rests on Mancoo, Boerlin, and Machens (NeurIPS 2020), and on the broader projection-neural-network lineage (Hopfield–Tank, Kennedy–Chua, Xia–Wang, Liu–Wang). Pull requests, bug reports, and citations of the SNN-X papers in your own work are all warmly welcomed.
+Developed at the **School of Artificial Intelligence, Taizhou University**.
+
+This codebase implements the SNN-QP research program led by **Prof. Shuai Li** (IEEE Fellow; Faculty of Information Technology and Electrical Engineering, University of Oulu, Finland), who originated the line of work and co-authors the application papers in the SNN-X series. The mathematical framework follows Mancoo, Boerlin and Machens (NeurIPS 2020) and the broader projection-neural-network lineage (Hopfield–Tank, Kennedy–Chua, Xia–Wang, Liu–Wang). Pull requests, bug reports, and citations of the SNN-X papers in your own work are all warmly welcomed.

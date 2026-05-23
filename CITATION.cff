@@ -7,7 +7,12 @@ authors:
     given-names: "Ameer Hamza"
     affiliation: "School of Artificial Intelligence, Taizhou University"
     email: "ahkhan@tzc.edu.cn"
-    # orcid: "https://orcid.org/0000-0000-0000-0000"  # add when available
+    orcid: "https://orcid.org/0000-0002-5367-5277"
+  - family-names: "Li"
+    given-names: "Shuai"
+    affiliation: "Faculty of Information Technology and Electrical Engineering, University of Oulu, Finland"
+    email: "shuaili@ieee.org"
+    orcid: "https://orcid.org/0000-0002-9574-9609"
 repository-code: "https://github.com/ahkhan03/SNN_opt"
 url: "https://snn.ahkhan.me"
 abstract: >
@@ -34,6 +39,11 @@ preferred-citation:
     - family-names: "Khan"
       given-names: "Ameer Hamza"
       affiliation: "School of Artificial Intelligence, Taizhou University"
+      orcid: "https://orcid.org/0000-0002-5367-5277"
+    - family-names: "Li"
+      given-names: "Shuai"
+      affiliation: "Faculty of Information Technology and Electrical Engineering, University of Oulu, Finland"
+      orcid: "https://orcid.org/0000-0002-9574-9609"
   year: 2026
   url: "https://snn.ahkhan.me"
 references:
