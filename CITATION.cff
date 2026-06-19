@@ -30,8 +30,8 @@ keywords:
   - "constrained optimization"
   - "projected gradient"
 license: Apache-2.0
-version: "0.1.0"
-date-released: "2026-05-23"
+version: "0.2.0"
+date-released: "2026-06-19"
 preferred-citation:
   type: software
   title: "snn_opt: A Spiking Neural Network Solver for Constrained Convex Optimization"

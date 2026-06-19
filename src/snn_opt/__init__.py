@@ -19,7 +19,13 @@ Public API
 - ``ConvergenceConfig`` — early-stopping criteria
 - ``SolverResult`` — solution + diagnostics (trajectory, spike events, …)
 - ``SNNSolver`` — full solver class (use for repeated/warm-started solves)
-- ``solve_qp`` — convenience function for one-shot QPs
+- ``solve_qp`` — convenience function for one-shot QPs (set ``backend='c'`` for
+  the compiled kernel; see ``SolverConfig.backend`` for the 'c'/'c_serial'/
+  'c_openmp' variants)
+- ``solve_qp_penalty`` / ``solve_qp_lagrangian`` / ``solve_qp_heun_penalty`` /
+  ``solve_qp_heavyball_penalty`` / ``solve_qp_nesterov_penalty`` /
+  ``solve_qp_expeuler_penalty`` — neuromorphic-pure projection variants (no
+  inner projection loop); see ``snn_opt.projection_variants``
 
 See ``docs/applications.md`` for published work that uses this solver.
 """
@@ -41,7 +47,8 @@ from .projection_variants import (
     solve_qp_expeuler_penalty,
 )
 
-__version__ = "0.1.0"
+# Keep in sync with the version in pyproject.toml and CITATION.cff.
+__version__ = "0.2.0"
 
 __all__ = [
     "ConvergenceConfig",

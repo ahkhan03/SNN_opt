@@ -4,7 +4,7 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-06-19
 
 ### Added
 - **Multicore C++ backend variants.** The compiled kernel now exposes three

@@ -10,6 +10,13 @@ from snn_opt import (
     SolverResult,
     SNNSolver,
     solve_qp,
+    # neuromorphic-pure projection variants (see below)
+    solve_qp_penalty,
+    solve_qp_lagrangian,
+    solve_qp_heun_penalty,
+    solve_qp_heavyball_penalty,
+    solve_qp_nesterov_penalty,
+    solve_qp_expeuler_penalty,
 )
 ```
 
@@ -33,6 +40,8 @@ Convenience function that wraps `OptimizationProblem` + `SolverConfig` +
 | `k0_scale` | `float` | Conservatism factor on auto step. Default `0.5`. |
 | `lower_bound`, `upper_bound` | `float` or `None` | Box clipping (e.g. SVM dual). |
 | `enable_early_stopping` | `bool` | Convergence-based termination, default on. |
+| `record_trajectory` | `bool` | Keep the full iterate trajectory + spike events (default `True`). `False` runs the lean path; the compiled backends imply `False`. |
+| `backend` | `str` | `'python'` (default), `'c'` (auto), `'c_serial'`, or `'c_openmp'`. See [`SolverConfig`](#solverconfig). |
 | `verbose` | `bool` | Print solver progress. |
 
 Returns: a [`SolverResult`](#solverresult).
@@ -65,6 +74,8 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 | `projection_method` | `'adaptive'` | `'adaptive'` or `'fixed'`. |
 | `k1` | `0.05` | Projection step (only used when `projection_method='fixed'`). |
 | `lower_bound`, `upper_bound` | `None` | Box clipping. |
+| `record_trajectory` | `True` | Store the full iterate trajectory + per-spike events. `False` runs the lean solve (final state only); the compiled backends always run lean. |
+| `backend` | `'python'` | Solve backend. `'python'` is the NumPy reference. The compiled pybind11 kernel (dense + `projection_method='adaptive'` only) comes in three numerically identical variants differing only in matvec threading: `'c'` (auto — OpenMP multicore when the wheel was built with it *and* the problem is large enough to amortize it, else single-thread), `'c_serial'` (forced single-thread), `'c_openmp'` (forced multicore; raises if the build lacks OpenMP). Only the matvec is parallel; the Euler recurrence + greedy projection are serial. Honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` / `max_threads()` report the build's capability. |
 | `convergence` | `ConvergenceConfig()` | See below. |
 
 ## `ConvergenceConfig`
@@ -107,6 +118,34 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
   the projection-spike raster (see [`figure 02_spike_raster.py`](../benchmarks/02_spike_raster.py)).
 - `total_projection_distance` — sum of spike norms.
 - `summary()` — human-readable one-line-per-statistic string.
+
+## Projection variants (`snn_opt.projection_variants`)
+
+The canonical solver uses an *event-triggered* adaptive-projection inner loop
+(select the most-violated constraint, snap it to its boundary, repeat). These
+variants instead replace that inner loop with **continuous-time dynamics
+integrated by forward Euler** — a single population (or a primal–dual pair) that
+just integrates its membrane voltage every tick, with no per-iteration `argmax`
+and no snap-to-boundary step. They are the "neuromorphic-pure" formulations and
+are useful when the whole solve must map onto plain LIF dynamics.
+
+All take the same `(A, b, C, d, x0, ...)` problem arguments as `solve_qp` and
+return a [`SolverResult`](#solverresult); variant-specific knobs are
+keyword-only.
+
+| Function | Strategy |
+|---|---|
+| `solve_qp_penalty` | Quadratic-penalty method; `dx/dt = -(Ax+b) - k_p Cᵀ relu(Cx+d)`. Penalty weight `k_p` ramps up (homotopy). Single population. |
+| `solve_qp_lagrangian` | Augmented-Lagrangian / dual-ascent saddle-point dynamics; coupled primal `x` and dual `λ ≥ 0` populations (unbiased at convergence). |
+| `solve_qp_heun_penalty` | Penalty dynamics with Heun (RK2) integration. |
+| `solve_qp_heavyball_penalty` | Penalty dynamics with heavy-ball momentum. |
+| `solve_qp_nesterov_penalty` | Penalty dynamics with Nesterov acceleration. |
+| `solve_qp_expeuler_penalty` | Penalty dynamics with exponential-Euler integration (handles stiffness). |
+
+Common keyword arguments include `k0` / `k0_scale` (gradient step), `k_p` /
+`k_p_ramp` / `k_p_final` (penalty schedule), `h` (Euler step), `max_iterations`,
+`feasibility_tol`, `proj_grad_tol`, `enable_early_stopping`, and `verbose`. See
+each function's docstring for the full list.
 
 ## Versioning
 
