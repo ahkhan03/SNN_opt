@@ -99,6 +99,22 @@ inline void matvec(const double* M, const double* x, double* y,
     }
 }
 
+// Apply the Hessian: y = A @ x. Dispatches to the diagonal fast path when the
+// problem has been reduced to a diagonal A (e.g. an eigenbasis transform has
+// rotated A = V Lambda V^T into its eigencoordinates, so the dominant O(n^2)
+// A @ x step collapses to the O(n) elementwise product Lambda (.) x). When
+// `use_diag` is true, `a_diag` is the length-n diagonal and `A` is ignored;
+// otherwise the dense matvec runs. This is a backend-agnostic structure
+// exploitation -- any future transform that yields a diagonal A benefits.
+inline void apply_hessian(const double* A, const double* a_diag, bool use_diag,
+                          const double* x, double* y, int n, bool parallel) {
+    if (use_diag) {
+        for (int i = 0; i < n; ++i) y[i] = a_diag[i] * x[i];
+        return;
+    }
+    matvec(A, x, y, n, n, parallel);
+}
+
 inline double dot(const double* a, const double* b, int n) {
     double acc = 0.0;
     #pragma omp simd reduction(+ : acc)
@@ -187,7 +203,8 @@ inline void clip_to_bounds(double* x, int n,
 // Note: the constraint-normal component uses the *original* gradient, while the
 // running projection accumulates into a separate buffer (pg), matching Python.
 inline double projected_gradient_norm(const double* x,
-                                      const double* A, const double* b,
+                                      const double* A, const double* a_diag,
+                                      bool use_diag, const double* b,
                                       const double* C, const double* d,
                                       const double* c_norms_sq,
                                       int n, int m, double constraint_tol,
@@ -195,7 +212,7 @@ inline double projected_gradient_norm(const double* x,
                                       bool has_upper, double upper,
                                       double* grad, double* pg, double* r,
                                       bool parallel) {
-    matvec(A, x, grad, n, n, parallel);             // grad = A x + b
+    apply_hessian(A, a_diag, use_diag, x, grad, n, parallel);  // grad = A x + b
     for (int i = 0; i < n; ++i) grad[i] += b[i];
     for (int i = 0; i < n; ++i) pg[i] = grad[i];
 
@@ -244,6 +261,7 @@ inline Result solve_euler(const double* A, const double* b,
                           bool use_sol_stable, bool require_feas,
                           bool has_lower, double lower,
                           bool has_upper, double upper,
+                          const double* a_diag, bool use_diag,
                           bool parallel,
                           const double* x0, double* x_out) {
     // --- one-time scratch allocation (HLS build: replace with static arrays) -
@@ -270,8 +288,8 @@ inline Result solve_euler(const double* A, const double* b,
                         + (use_sol_stable ? 1 : 0);
 
     // A @ x for the current iterate; reused for both the gradient step and the
-    // plateau-check objective (one O(n^2) matvec per iteration, not two).
-    matvec(A, x.data(), Ax.data(), n, n, parallel);
+    // plateau-check objective (one Hessian apply per iteration, not two).
+    apply_hessian(A, a_diag, use_diag, x.data(), Ax.data(), n, parallel);
 
     for (int it = 0; it < max_iterations; ++it) {
         // Phase 1: gradient descent step  (gradient = A x + b)
@@ -286,7 +304,7 @@ inline Result solve_euler(const double* A, const double* b,
         clip_to_bounds(x.data(), n, has_lower, lower, has_upper, upper);
 
         // Objective for the plateau check -- reuse the A @ x needed next iter.
-        matvec(A, x.data(), Ax.data(), n, n, parallel);
+        apply_hessian(A, a_diag, use_diag, x.data(), Ax.data(), n, parallel);
         const double obj_current =
             0.5 * dot(x.data(), Ax.data(), n) + dot(b, x.data(), n);
         obj_ring[obj_head] = obj_current;
@@ -326,8 +344,8 @@ inline Result solve_euler(const double* A, const double* b,
         }
         if (use_proj_grad) {
             const double pgn = projected_gradient_norm(
-                x.data(), A, b, C, d, c_norms_sq, n, m, constraint_tol,
-                has_lower, lower, has_upper, upper,
+                x.data(), A, a_diag, use_diag, b, C, d, c_norms_sq, n, m,
+                constraint_tol, has_lower, lower, has_upper, upper,
                 grad.data(), pg.data(), r.data(), parallel);
             if (pgn < proj_grad_tol) ++n_met;
         }

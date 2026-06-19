@@ -12,8 +12,8 @@ inspired by spiking neural network dynamics.
 import numpy as np
 import scipy.sparse as _sp
 from scipy.integrate import solve_ivp
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Callable
+from dataclasses import dataclass, field, replace
+from typing import Optional, Tuple, List, Callable, Union
 
 
 def _issparse(x):
@@ -115,6 +115,13 @@ class SolverConfig:
     # The three C variants are numerically identical; only the matvec threading
     # differs (the Euler recurrence + greedy projection are inherently serial).
     backend: str = 'python'
+
+    # Problem transform (the "transform axis"): an explicit, backend-agnostic
+    # rewrite of the problem that is solved in transformed coordinates and mapped
+    # back. None (default) = canonical solve. A name ('eigenbasis') or a
+    # snn_opt.transforms.Transform instance opts in. Composes with any backend;
+    # implies the lean result (final-state fields only). See snn_opt.transforms.
+    transform: Optional[Union[str, "object"]] = None
 
 
 @dataclass
@@ -282,7 +289,12 @@ class SNNSolver:
     def __init__(self, problem: OptimizationProblem, config: Optional[SolverConfig] = None):
         self.problem = problem
         self.config = config or SolverConfig()
-        
+
+        # Diagonal Hessian fast-path hint. None = dense A (the usual case). Set
+        # to the length-n diagonal by the transform path (e.g. eigenbasis) so the
+        # O(n^2) A @ x step collapses to an O(n) elementwise product.
+        self._a_diag = None
+
         # Auto-compute k0 from Lipschitz constant if not provided
         if self.config.k0 is None:
             self._k0 = self._compute_adaptive_k0()
@@ -547,6 +559,11 @@ class SNNSolver:
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
         
+        # Transform axis: an explicit problem transform (e.g. eigenbasis) rewrites
+        # the problem, solves the equivalent system, and maps the solution back.
+        if self.config.transform is not None:
+            return self._solve_with_transform(x0, verbose)
+
         # Dispatch to appropriate solver
         if self.config.backend not in _VALID_BACKENDS:
             raise ValueError(
@@ -559,7 +576,41 @@ class SNNSolver:
                 return self._solve_euler(x0, verbose)
             return self._solve_euler_lean(x0, verbose)
         return self._solve_ivp(x0, verbose)
-    
+
+    def _solve_with_transform(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
+        """Solve via an explicit problem transform (the transform axis).
+
+        Resolves ``config.transform``, checks applicability (e.g. eigenbasis
+        rejects box constraints), rewrites the problem into transformed
+        coordinates, solves the equivalent system with the canonical dynamics on
+        the chosen backend (using the diagonal Hessian fast path when the
+        transform diagonalizes A), then maps the solution back. Always returns
+        the lean result (final-state fields); the transform is a performance
+        path, so the inner solve runs lean regardless of ``record_trajectory``.
+        """
+        from .transforms import resolve_transform
+
+        transform = resolve_transform(self.config.transform)
+        transform.check_applicable(self.problem, self.config)
+        ctx = transform.forward(self.problem, x0, self.config)
+
+        # Inner solve on the transformed problem: canonical dynamics (no nested
+        # transform), lean, same backend + convergence config.
+        inner_problem = OptimizationProblem(A=ctx.A, b=ctx.b, C=ctx.C, d=ctx.d)
+        inner_config = replace(self.config, transform=None, record_trajectory=False)
+        inner = SNNSolver(inner_problem, inner_config)
+        inner._a_diag = ctx.a_diag  # enable the O(n) diagonal Hessian fast path
+        inner_result = inner.solve(ctx.x0, verbose=verbose)
+
+        # Map the solution back to the original coordinates and report metrics
+        # against the ORIGINAL problem.
+        final_x = ctx.recover(inner_result.final_x)
+        self._converged = inner._converged
+        self._convergence_reason = inner._convergence_reason
+        self._iterations_used = inner._iterations_used
+        self._n_projections = inner._n_projections
+        return self._build_lean_result(final_x)
+
     def _solve_euler(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
         Solve using discrete Euler integration with convergence detection.
@@ -679,7 +730,10 @@ class SNNSolver:
 
         # A @ x for the current iterate; recomputed once per iteration and
         # reused for both the gradient step and the plateau-check objective.
-        Ax = A @ x_current
+        # When a transform has diagonalized A (self._a_diag set), use the O(n)
+        # elementwise product instead of the dense O(n^2) matvec.
+        a_diag = self._a_diag
+        Ax = (a_diag * x_current) if a_diag is not None else A @ x_current
 
         for iteration in range(self.config.max_iterations):
             # Phase 1: gradient descent step (gradient = A x + b, A x cached)
@@ -694,8 +748,9 @@ class SNNSolver:
             x_current = self._clip_to_bounds(x_current)
 
             # Objective for the plateau check: reuse the A @ x we need anyway
-            # for the next iteration's gradient (O(n^2) once, not twice).
-            Ax = A @ x_current
+            # for the next iteration's gradient (O(n^2) once, not twice; O(n)
+            # elementwise when the Hessian is diagonal).
+            Ax = (a_diag * x_current) if a_diag is not None else A @ x_current
             obj_current = 0.5 * float(x_current @ Ax) + float(b @ x_current)
             obj_history.append(obj_current)
             if track_x_history:
@@ -839,6 +894,12 @@ class SNNSolver:
         else:  # 'c' -- auto: multicore when the build supports it, else serial
             parallel = has_omp
 
+        # Diagonal Hessian fast path: when a transform has diagonalized A, hand
+        # the kernel the length-n diagonal so its A @ x step is O(n) elementwise.
+        use_diag = self._a_diag is not None
+        a_diag_c = (np.ascontiguousarray(self._a_diag, dtype=np.float64)
+                    if use_diag else np.zeros(0, dtype=np.float64))
+
         final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
             A, b, C, d, c_norms_sq, c_gram, x0c,
             self._k0, self.config.constraint_tol,
@@ -852,6 +913,7 @@ class SNNSolver:
             has_lower, float(self.config.lower_bound) if has_lower else 0.0,
             has_upper, float(self.config.upper_bound) if has_upper else 0.0,
             parallel=parallel,
+            a_diag=a_diag_c, use_diag=use_diag,
         )
 
         self._n_projections = int(n_proj)

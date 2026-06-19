@@ -22,6 +22,8 @@ Public API
 - ``solve_qp`` — convenience function for one-shot QPs (set ``backend='c'`` for
   the compiled kernel; see ``SolverConfig.backend`` for the 'c'/'c_serial'/
   'c_openmp' variants)
+- ``Transform`` / ``EigenbasisTransform`` — problem transforms (the transform
+  axis); opt in via ``SolverConfig.transform`` (e.g. ``transform='eigenbasis'``)
 
 See ``docs/applications.md`` for published work that uses this solver.
 """
@@ -34,9 +36,10 @@ from .solver import (
     SolverResult,
     solve_qp,
 )
+from .transforms import Transform, EigenbasisTransform
 
 # Keep in sync with the version in pyproject.toml and CITATION.cff.
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "ConvergenceConfig",
@@ -45,5 +48,7 @@ __all__ = [
     "SolverConfig",
     "SolverResult",
     "solve_qp",
+    "Transform",
+    "EigenbasisTransform",
     "__version__",
 ]

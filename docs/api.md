@@ -69,6 +69,7 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 | `lower_bound`, `upper_bound` | `None` | Box clipping. |
 | `record_trajectory` | `True` | Store the full iterate trajectory + per-spike events. `False` runs the lean solve (final state only); the compiled backends always run lean. |
 | `backend` | `'python'` | Solve backend. `'python'` is the NumPy reference. The compiled pybind11 kernel (dense + `projection_method='adaptive'` only) comes in three numerically identical variants differing only in matvec threading: `'c'` (auto — OpenMP multicore when the wheel was built with it *and* the problem is large enough to amortize it, else single-thread), `'c_serial'` (forced single-thread), `'c_openmp'` (forced multicore; raises if the build lacks OpenMP). Only the matvec is parallel; the Euler recurrence + greedy projection are serial. Honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` / `max_threads()` report the build's capability. |
+| `transform` | `None` | Optional problem transform (the *transform axis*). `None` = canonical solve. A name (`'eigenbasis'`) or a `Transform` instance opts in; the problem is solved in transformed coordinates and mapped back. Composes with any backend; implies the lean result. See [Transforms](#transforms). |
 | `convergence` | `ConvergenceConfig()` | See below. |
 
 ## `ConvergenceConfig`
@@ -111,6 +112,27 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
   the projection-spike raster (see [`figure 02_spike_raster.py`](../benchmarks/02_spike_raster.py)).
 - `total_projection_distance` — sum of spike norms.
 - `summary()` — human-readable one-line-per-statistic string.
+
+## Transforms
+
+`snn_opt.transforms` is the **transform axis**: an explicit, backend-agnostic
+rewrite of the problem that is solved in transformed coordinates and mapped back.
+Transforms operate on the problem data (`A, b, C, d`), not the solve loop, so they
+compose with every backend. Opt in via `SolverConfig(transform=...)`; the
+canonical solver is the default.
+
+```python
+from snn_opt import solve_qp, EigenbasisTransform
+solve_qp(A, b, C, d, x0, ...)                                   # canonical
+# via SolverConfig:
+cfg = SolverConfig(transform='eigenbasis')                     # by name
+cfg = SolverConfig(transform=EigenbasisTransform())            # by instance
+```
+
+| Symbol | Notes |
+|---|---|
+| `Transform` | Base class. Subclass and implement `forward(problem, x0, config)` (and usually `check_applicable`). |
+| `EigenbasisTransform` (`'eigenbasis'`) | Rotates a symmetric-PSD Hessian into its eigenbasis (`A = VΛVᵀ`), so the dominant `O(n²)` `A @ x` gradient step becomes an `O(n)` elementwise product `Λ ⊙ ỹ`; constraints rotate to `Ĉ = CV` with the Gram/row-norms invariant, so the projection is unchanged. Recovers `x = V ỹ`. **Box constraints are unsupported** — raises `ValueError` on `lower_bound`/`upper_bound` (the rotation is not box-preserving). Best on the compiled backends and larger `n`. |
 
 ## Versioning
 

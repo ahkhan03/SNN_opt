@@ -4,7 +4,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-informational.svg)](CHANGELOG.md)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
 [![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
@@ -131,6 +131,21 @@ honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` and
 
 All backends are kept in lockstep by the parity test suite (`tests/test_c_backend_parity.py`). The C kernel supports dense problems with `projection_method='adaptive'`; sparse and non-adaptive paths transparently use Python. The same kernel source is HLS-compatible and is the basis for the FPGA deployment track. When the precompiled kernel is unavailable on your platform (rare), the `'c*'` backends raise a clear error and the Python backend continues to work.
 
+### Problem transforms (eigenbasis)
+
+Orthogonal to the backend, the **transform axis** rewrites the problem into an equivalent one that is cheaper to solve and maps the solution back. Transforms are an explicit opt-in (`SolverConfig.transform`); the canonical solver stays the default, and a transform composes with any backend.
+
+```python
+from snn_opt import solve_qp
+result = solve_qp(A, b, C, d, x0, ...)  # canonical (default)
+
+from snn_opt import SNNSolver, SolverConfig, OptimizationProblem
+cfg = SolverConfig(transform='eigenbasis', backend='c')
+result = SNNSolver(OptimizationProblem(A, b, C, d), cfg).solve(x0)
+```
+
+`EigenbasisTransform` (`transform='eigenbasis'`) rotates a symmetric-PSD Hessian into its eigenbasis (`A = VΛVᵀ`), collapsing the dominant `O(n²)` `A @ x` gradient step into an `O(n)` elementwise product; the projection is unchanged because the constraint Gram is rotation-invariant. The win grows with problem size. **Box constraints are not supported** with this transform (per-coordinate bounds are not rotation-invariant) — it raises a clear error if `lower_bound`/`upper_bound` are set. See [`docs/api.md`](docs/api.md#transforms).
+
 ## Quick start
 
 ```python
@@ -205,7 +220,7 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
   author  = {Khan, Ameer Hamza and Li, Shuai},
   title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
   year    = {2026},
-  version = {0.3.0},
+  version = {0.4.0},
   url     = {https://github.com/ahkhan03/SNN_opt},
   license = {Apache-2.0},
 }

@@ -4,6 +4,22 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-06-19
+
+### Added
+- **Transform axis** (`snn_opt.transforms`): an explicit, backend-agnostic
+  problem-rewrite layer, opted in via `SolverConfig(transform=...)`. The canonical
+  solver stays the default; transforms compose with any backend.
+- **`EigenbasisTransform`** (`transform='eigenbasis'`): rotates a symmetric-PSD
+  Hessian into its eigenbasis so the dominant `O(n²)` `A @ x` gradient step
+  collapses to an `O(n)` elementwise product (measured ~1.25–1.5× faster on CPU,
+  growing with `n`). Works across all four backends. **Box constraints are
+  unsupported** — raises `ValueError` when `lower_bound`/`upper_bound` are set,
+  since the rotation does not preserve per-coordinate box bounds.
+- **Diagonal-Hessian fast path** in the compiled kernel (`apply_hessian`, exposed
+  via `use_diag`/`a_diag`) and the Python lean path — a general structure
+  exploitation reusable by any future transform that yields a diagonal `A`.
+
 ## [0.3.0] — 2026-06-19
 
 ### Removed

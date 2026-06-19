@@ -33,7 +33,7 @@ static py::tuple solve_euler_py(
         bool use_obj_plateau, bool use_proj_grad, bool use_sol_stable,
         bool require_feas,
         bool has_lower, double lower, bool has_upper, double upper,
-        bool parallel) {
+        bool parallel, darray a_diag, bool use_diag) {
     if (x0.ndim() != 1)
         throw std::invalid_argument("x0 must be a 1-D array");
     if (d.ndim() != 1)
@@ -58,6 +58,9 @@ static py::tuple solve_euler_py(
         throw std::invalid_argument("window_size must be >= 1");
     if (max_iterations < 0 || max_projection_iters < 0)
         throw std::invalid_argument("iteration bounds must be non-negative");
+    if (use_diag && (a_diag.ndim() != 1 || a_diag.shape(0) != n))
+        throw std::invalid_argument(
+            "a_diag must have shape (n,) when use_diag is set");
 
     auto x_out = darray(n);
 
@@ -75,6 +78,7 @@ static py::tuple solve_euler_py(
             obj_rel_tol, x_rel_tol, proj_grad_tol, feasibility_tol,
             use_obj_plateau, use_proj_grad, use_sol_stable, require_feas,
             has_lower, lower, has_upper, upper,
+            a_diag.data(), use_diag,
             parallel,
             x0.data(), x_out.mutable_data());
     }
@@ -101,7 +105,8 @@ PYBIND11_MODULE(_kernel, m) {
           py::arg("use_sol_stable"), py::arg("require_feas"),
           py::arg("has_lower"), py::arg("lower"),
           py::arg("has_upper"), py::arg("upper"),
-          py::arg("parallel") = false);
+          py::arg("parallel") = false,
+          py::arg("a_diag") = darray(0), py::arg("use_diag") = false);
 
     // Build-time OpenMP capability. The `'c'` auto backend reads HAS_OPENMP to
     // decide whether to request the multicore path; `'c_openmp'` raises when it
