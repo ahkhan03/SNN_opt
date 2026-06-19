@@ -108,11 +108,28 @@ python tests/test_installation.py
 The PyPI wheels ship a precompiled C++ kernel (`snn_opt._kernel`) that accelerates the inner adaptive-projection loop by roughly an order of magnitude over the pure-Python path. Opt in via the `backend` keyword:
 
 ```python
-result = solve_qp(A, b, C, d, x0, backend='c')   # compiled kernel
-result = solve_qp(A, b, C, d, x0, backend='python')  # reference (default)
+result = solve_qp(A, b, C, d, x0, backend='c')        # compiled kernel (auto)
+result = solve_qp(A, b, C, d, x0, backend='python')   # reference (default)
 ```
 
-Both backends are kept in lockstep by the parity test suite (`tests/test_c_backend_parity.py`). The C kernel supports dense problems with `projection_method='adaptive'`; sparse and non-adaptive paths transparently use Python. The same kernel source is HLS-compatible and is the basis for the planned FPGA deployment track. When the precompiled kernel is unavailable on your platform (rare), `backend='c'` raises a clear error and the Python backend continues to work.
+The compiled kernel comes in three numerically identical variants that differ
+only in how the inner matrix–vector products are threaded:
+
+| `backend`    | matvec threading                                                              |
+|--------------|------------------------------------------------------------------------------|
+| `'c'`        | auto — OpenMP multicore when the wheel was built with it, else single-thread |
+| `'c_serial'` | forced single-thread (SIMD only)                                             |
+| `'c_openmp'` | forced OpenMP multicore (raises if the wheel was built without OpenMP)       |
+
+Only the matvec is data-parallel; the Euler recurrence and the greedy projection
+are inherently serial (an Amdahl ceiling of roughly 2–3× on a few cores). Because
+per-call thread fork/join only pays off on large systems, the multicore path is
+automatically skipped below a work threshold, so `'c'` matches the serial path on
+small/medium problems and only spins up threads on large ones. Multithreading
+honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` and
+`snn_opt._kernel.max_threads()` report the build's capability.
+
+All backends are kept in lockstep by the parity test suite (`tests/test_c_backend_parity.py`). The C kernel supports dense problems with `projection_method='adaptive'`; sparse and non-adaptive paths transparently use Python. The same kernel source is HLS-compatible and is the basis for the FPGA deployment track. When the precompiled kernel is unavailable on your platform (rare), the `'c*'` backends raise a clear error and the Python backend continues to work.
 
 ## Quick start
 

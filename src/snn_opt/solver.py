@@ -27,6 +27,14 @@ def _issparse(x):
 # recomputing the residual and backend='c' raises a clear error.
 _MAX_GRAM_M = 4096
 
+# Compiled-kernel backends. All three route to the same C++ kernel; they differ
+# only in the matvec threading the kernel uses:
+#   'c'        -- auto: multicore if the wheel was built with OpenMP, else serial
+#   'c_serial' -- force single-threaded (SIMD only)
+#   'c_openmp' -- force OpenMP multicore (raises if the wheel lacks OpenMP)
+_C_BACKENDS = frozenset({'c', 'c_serial', 'c_openmp'})
+_VALID_BACKENDS = frozenset({'python'}) | _C_BACKENDS
+
 
 @dataclass
 class ConvergenceConfig:
@@ -96,8 +104,16 @@ class SolverConfig:
     # figure / illustration scripts that read result.spike_*.
     record_spike_history: bool = True
 
-    # Solve backend: 'python' (reference) or 'c' (compiled pybind11 kernel,
-    # euler + adaptive projection only; implies record_trajectory=False).
+    # Solve backend (euler + adaptive projection only; implies
+    # record_trajectory=False for every compiled variant):
+    #   'python'   -- pure-NumPy reference
+    #   'c'        -- compiled pybind11 kernel; auto-uses OpenMP multicore matvec
+    #                 when the build supports it, else single-threaded
+    #   'c_serial' -- compiled kernel, forced single-threaded (SIMD only)
+    #   'c_openmp' -- compiled kernel, forced OpenMP multicore (raises if the
+    #                 build lacks OpenMP)
+    # The three C variants are numerically identical; only the matvec threading
+    # differs (the Euler recurrence + greedy projection are inherently serial).
     backend: str = 'python'
 
 
@@ -532,7 +548,11 @@ class SNNSolver:
         self._iterations_used = 0
         
         # Dispatch to appropriate solver
-        if self.config.backend == 'c':
+        if self.config.backend not in _VALID_BACKENDS:
+            raise ValueError(
+                f"unknown backend {self.config.backend!r}; expected one of "
+                f"{sorted(_VALID_BACKENDS)}")
+        if self.config.backend in _C_BACKENDS:
             return self._solve_euler_c(x0, verbose)
         if self.config.integration_method == 'euler':
             if self.config.record_trajectory:
@@ -800,6 +820,25 @@ class SNNSolver:
         has_lower = self.config.lower_bound is not None
         has_upper = self.config.upper_bound is not None
 
+        # Resolve the matvec threading from the backend string. Only the matvec
+        # is data-parallel (the Euler recurrence + greedy projection are serial
+        # -- the Amdahl ceiling), so results are identical across all three; the
+        # flag only changes how the matvec rows are distributed.
+        has_omp = bool(getattr(_kernel, 'HAS_OPENMP', False))
+        backend = self.config.backend
+        if backend == 'c_serial':
+            parallel = False
+        elif backend == 'c_openmp':
+            if not has_omp:
+                raise ValueError(
+                    "backend='c_openmp' requires the compiled kernel to be "
+                    "built with OpenMP (-fopenmp), but this build is SIMD-only "
+                    "(_kernel.HAS_OPENMP is False). Use backend='c' (auto) or "
+                    "'c_serial', or rebuild with an OpenMP-capable compiler.")
+            parallel = True
+        else:  # 'c' -- auto: multicore when the build supports it, else serial
+            parallel = has_omp
+
         final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
             A, b, C, d, c_norms_sq, c_gram, x0c,
             self._k0, self.config.constraint_tol,
@@ -812,6 +851,7 @@ class SNNSolver:
             conv.use_solution_stable, conv.require_feasibility,
             has_lower, float(self.config.lower_bound) if has_lower else 0.0,
             has_upper, float(self.config.upper_bound) if has_upper else 0.0,
+            parallel=parallel,
         )
 
         self._n_projections = int(n_proj)
@@ -1177,8 +1217,10 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
         metadata. If False, run the lean solve path (no trajectory/spike
         storage, one fused matvec per iteration) -- use for benchmarking.
     backend : str
-        'python' (reference) or 'c' (compiled pybind11 kernel; euler +
-        adaptive projection only, implies record_trajectory=False).
+        'python' (reference), or one of the compiled pybind11 kernels (euler +
+        adaptive projection only, implies record_trajectory=False): 'c' (auto,
+        OpenMP multicore when available), 'c_serial' (single-threaded), or
+        'c_openmp' (forced multicore). The C variants are numerically identical.
     verbose : bool
         Print progress
 

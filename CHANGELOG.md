@@ -4,6 +4,28 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — unreleased
+
+### Added
+- **Multicore C++ backend variants.** The compiled kernel now exposes three
+  numerically identical backends differing only in matvec threading:
+  `backend='c'` (auto — OpenMP multicore when the wheel was built with it, else
+  single-thread), `'c_serial'` (forced single-thread), and `'c_openmp'` (forced
+  multicore; raises if the build lacks OpenMP). Only the inner matrix–vector
+  products are parallelized; the Euler recurrence and greedy projection remain
+  serial (Amdahl-bound). The threaded path is automatically skipped below a work
+  threshold so small/medium problems never pay fork/join overhead, and it honours
+  `OMP_NUM_THREADS`.
+- `snn_opt._kernel.HAS_OPENMP` and `snn_opt._kernel.max_threads()` report the
+  build's OpenMP capability.
+
+### Changed
+- `backend='c'` now uses the OpenMP multicore matvec on large problems when the
+  wheel was built with OpenMP (previously single-thread); results are unchanged.
+- The build probes the compiler for `-fopenmp` and enables it when available,
+  falling back to SIMD-only (`-fopenmp-simd`) otherwise — the extension always
+  builds; only the multicore capability is conditional.
+
 ## [0.1.0] — 2026-05-23
 
 Initial PyPI release. The solver itself is unchanged from the development

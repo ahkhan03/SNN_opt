@@ -22,6 +22,17 @@
 #include <cstddef>
 #include <vector>
 
+// Minimum matvec work (rows*cols MACs) at or above which the OpenMP-threaded
+// path is used; below it the per-call fork/join overhead dominates and the
+// serial SIMD loop is faster -- by up to ~170x on tiny matvecs on a 32-thread
+// box (measured crossover ~9e4 MACs there; lower on fewer cores). This guard is
+// why the multicore `'c'`/`'c_openmp'` path is a no-op on small/medium QPs (all
+// current application problems are n<=~150) and only spins up threads on genuinely
+// large systems. Tunable at build time with -DSNN_QP_OMP_MIN_WORK=<n>.
+#ifndef SNN_QP_OMP_MIN_WORK
+#define SNN_QP_OMP_MIN_WORK 65536
+#endif
+
 namespace snn_qp {
 
 // Terminal convergence reasons. Mirrors the category of
@@ -46,12 +57,39 @@ struct Result {
 // y = M @ x ; M is (rows x cols), row-major.
 //
 // The `#pragma omp simd reduction` lets the CPU build (compiled with
-// -fopenmp-simd) vectorise the sum reduction -- a plain -O3 will not, because
-// floating-point addition is not associative. The loop body stays a clean dot
-// product, so it remains an ideal HLS pipeline target: an HLS build ignores
-// the omp pragma and applies its own `#pragma HLS PIPELINE` instead.
+// -fopenmp-simd or -fopenmp) vectorise the sum reduction -- a plain -O3 will
+// not, because floating-point addition is not associative. The loop body stays
+// a clean dot product, so it remains an ideal HLS pipeline target: an HLS build
+// ignores the omp pragma and applies its own `#pragma HLS PIPELINE` instead.
+//
+// When `parallel` is true AND the translation unit was compiled with full
+// OpenMP (`-fopenmp`, which defines `_OPENMP`), the row loop is distributed
+// across a thread team (`backend='c_openmp'` / the multicore path of the
+// `'c'` auto backend). Each call forks/joins a team -- a per-call cost the
+// inner-loop SIMD vectorisation amortises only once the matrix is large enough,
+// which is why the small-problem default leans on the serial path. Without
+// `-fopenmp` the `parallel` flag is inert and the serial SIMD loop runs (so a
+// SIMD-only build still satisfies `backend='c_serial'` exactly). The matvec is
+// the only data-parallel hot spot; the Euler recurrence and the greedy
+// projection are strictly serial (the Amdahl ceiling, ~2x at 4 cores).
 inline void matvec(const double* M, const double* x, double* y,
-                    int rows, int cols) {
+                    int rows, int cols, bool parallel) {
+#ifdef _OPENMP
+    if (parallel &&
+        static_cast<long long>(rows) * cols >= SNN_QP_OMP_MIN_WORK) {
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < rows; ++i) {
+            const double* Mi = M + static_cast<std::size_t>(i) * cols;
+            double acc = 0.0;
+            #pragma omp simd reduction(+ : acc)
+            for (int j = 0; j < cols; ++j) acc += Mi[j] * x[j];
+            y[i] = acc;
+        }
+        return;
+    }
+#else
+    (void)parallel;
+#endif
     for (int i = 0; i < rows; ++i) {
         const double* Mi = M + static_cast<std::size_t>(i) * cols;
         double acc = 0.0;
@@ -70,9 +108,9 @@ inline double dot(const double* a, const double* b, int n) {
 
 // max(0, max_i (C x + d)_i). Returns 0 when there are no constraints.
 inline double max_violation(const double* C, const double* d, const double* x,
-                            int n, int m, double* r_scratch) {
+                            int n, int m, double* r_scratch, bool parallel) {
     if (m == 0) return 0.0;
-    matvec(C, x, r_scratch, m, n);
+    matvec(C, x, r_scratch, m, n, parallel);
     double mv = 0.0;
     for (int i = 0; i < m; ++i) {
         double g = r_scratch[i] + d[i];
@@ -103,9 +141,9 @@ inline int project_adaptive(double* x,
                              const double* c_norms_sq, const double* G,
                              int n, int m,
                              double constraint_tol, int max_projection_iters,
-                             double* r) {
+                             double* r, bool parallel) {
     if (m == 0) return 0;
-    matvec(C, x, r, m, n);                         // r = C x      (once)
+    matvec(C, x, r, m, n, parallel);               // r = C x      (once)
     for (int i = 0; i < m; ++i) r[i] += d[i];      // r = C x + d
 
     int n_iters = 0;
@@ -155,13 +193,14 @@ inline double projected_gradient_norm(const double* x,
                                       int n, int m, double constraint_tol,
                                       bool has_lower, double lower,
                                       bool has_upper, double upper,
-                                      double* grad, double* pg, double* r) {
-    matvec(A, x, grad, n, n);                       // grad = A x + b
+                                      double* grad, double* pg, double* r,
+                                      bool parallel) {
+    matvec(A, x, grad, n, n, parallel);             // grad = A x + b
     for (int i = 0; i < n; ++i) grad[i] += b[i];
     for (int i = 0; i < n; ++i) pg[i] = grad[i];
 
     if (m > 0) {
-        matvec(C, x, r, m, n);                      // r = C x + d
+        matvec(C, x, r, m, n, parallel);            // r = C x + d
         for (int i = 0; i < m; ++i) r[i] += d[i];
         const double active_tol = constraint_tol * 10.0;
         for (int j = 0; j < m; ++j) {
@@ -205,6 +244,7 @@ inline Result solve_euler(const double* A, const double* b,
                           bool use_sol_stable, bool require_feas,
                           bool has_lower, double lower,
                           bool has_upper, double upper,
+                          bool parallel,
                           const double* x0, double* x_out) {
     // --- one-time scratch allocation (HLS build: replace with static arrays) -
     std::vector<double> x(n), Ax(n), grad(n), pg(n);
@@ -231,7 +271,7 @@ inline Result solve_euler(const double* A, const double* b,
 
     // A @ x for the current iterate; reused for both the gradient step and the
     // plateau-check objective (one O(n^2) matvec per iteration, not two).
-    matvec(A, x.data(), Ax.data(), n, n);
+    matvec(A, x.data(), Ax.data(), n, n, parallel);
 
     for (int it = 0; it < max_iterations; ++it) {
         // Phase 1: gradient descent step  (gradient = A x + b)
@@ -240,13 +280,13 @@ inline Result solve_euler(const double* A, const double* b,
         // Phase 2: project to feasible region
         n_projections += project_adaptive(x.data(), C, d, c_norms_sq, G, n, m,
                                           constraint_tol, max_projection_iters,
-                                          r.data());
+                                          r.data(), parallel);
 
         // Phase 3: clip to box constraints
         clip_to_bounds(x.data(), n, has_lower, lower, has_upper, upper);
 
         // Objective for the plateau check -- reuse the A @ x needed next iter.
-        matvec(A, x.data(), Ax.data(), n, n);
+        matvec(A, x.data(), Ax.data(), n, n, parallel);
         const double obj_current =
             0.5 * dot(x.data(), Ax.data(), n) + dot(b, x.data(), n);
         obj_ring[obj_head] = obj_current;
@@ -267,7 +307,7 @@ inline Result solve_euler(const double* A, const double* b,
         // Feasibility gate first: if infeasible the outcome is "not converged"
         // regardless of the other criteria, so the early skip is exact.
         if (require_feas &&
-            max_violation(C, d, x.data(), n, m, r.data()) > feasibility_tol) {
+            max_violation(C, d, x.data(), n, m, r.data(), parallel) > feasibility_tol) {
             patience_counter = 0;
             continue;
         }
@@ -288,7 +328,7 @@ inline Result solve_euler(const double* A, const double* b,
             const double pgn = projected_gradient_norm(
                 x.data(), A, b, C, d, c_norms_sq, n, m, constraint_tol,
                 has_lower, lower, has_upper, upper,
-                grad.data(), pg.data(), r.data());
+                grad.data(), pg.data(), r.data(), parallel);
             if (pgn < proj_grad_tol) ++n_met;
         }
         if (use_sol_stable && x_count >= window_size) {

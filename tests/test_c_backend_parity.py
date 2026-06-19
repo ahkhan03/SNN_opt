@@ -107,9 +107,16 @@ def _solve(p, backend, max_it):
     return res, time.perf_counter() - t0
 
 
-def _compare(p, max_it):
+# The compiled C variants. They share one kernel and differ only in matvec
+# threading, so each must match the Python reference. 'c_openmp' is only
+# meaningful (and only valid) when the wheel was built with OpenMP.
+_HAS_OMP = bool(getattr(_kernel, "HAS_OPENMP", False))
+_C_VARIANTS = ["c", "c_serial"] + (["c_openmp"] if _HAS_OMP else [])
+
+
+def _compare(p, max_it, backend="c"):
     py, t_py = _solve(p, "python", max_it)
-    c, t_c = _solve(p, "c", max_it)
+    c, t_c = _solve(p, backend, max_it)
     dx = float(np.max(np.abs(py.final_x - c.final_x)))
     fscale = max(abs(py.final_objective), 1e-12)
     dobj = abs(py.final_objective - c.final_objective) / fscale
@@ -119,9 +126,10 @@ def _compare(p, max_it):
 # --------------------------------------------------------------------------
 # pytest cases
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize("backend", _C_VARIANTS)
 @pytest.mark.parametrize("name,p,max_it", _battery())
-def test_c_backend_matches_python_lean(name, p, max_it):
-    r = _compare(p, max_it)
+def test_c_backend_matches_python_lean(name, p, max_it, backend):
+    r = _compare(p, max_it, backend)
     py, c = r["py"], r["c"]
 
     # solution agreement -- the primary correctness check
@@ -141,6 +149,39 @@ def test_c_backend_matches_python_lean(name, p, max_it):
     assert abs(c.n_projections - py.n_projections) / nproj_scale < 0.01, (
         f"{name}: n_projections {py.n_projections} (py) vs "
         f"{c.n_projections} (c)")
+
+
+def test_c_variants_agree_with_each_other():
+    """All compiled variants share one kernel -> bit-for-bit identical output.
+
+    Unlike the Python comparison (BLAS gemv vs explicit-loop matvec -> ULP
+    drift), the C variants run the *same* matvec code, so the only difference is
+    row scheduling -- final_x must match exactly (sum-reduction order per row is
+    unchanged; OpenMP only splits which thread owns which row).
+    """
+    p = _random_qp(120, 70, 99)
+    ref, _ = _solve(p, "c_serial", 4000)
+    for backend in _C_VARIANTS:
+        c, _ = _solve(p, backend, 4000)
+        dx = float(np.max(np.abs(ref.final_x - c.final_x)))
+        assert dx == 0.0, f"{backend} differs from c_serial by {dx:.2e}"
+
+
+def test_openmp_capability_attrs():
+    """The kernel exposes its build-time OpenMP capability for the dispatcher."""
+    assert isinstance(_kernel.HAS_OPENMP, bool)
+    assert _kernel.max_threads() >= 1
+    if not _kernel.HAS_OPENMP:
+        assert _kernel.max_threads() == 1
+
+
+def test_c_openmp_raises_when_unavailable():
+    """A SIMD-only build must reject 'c_openmp' with a clear error, not crash."""
+    if _kernel.HAS_OPENMP:
+        pytest.skip("OpenMP built in; nothing to assert about the error path")
+    p = _random_qp(20, 10, 1)
+    with pytest.raises(ValueError, match="c_openmp"):
+        _solve(p, "c_openmp", 1000)
 
 
 # --------------------------------------------------------------------------

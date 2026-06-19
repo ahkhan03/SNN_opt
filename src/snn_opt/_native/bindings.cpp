@@ -10,6 +10,10 @@
 
 #include <stdexcept>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "snn_qp_core.hpp"
 
 namespace py = pybind11;
@@ -28,7 +32,8 @@ static py::tuple solve_euler_py(
         double proj_grad_tol, double feasibility_tol,
         bool use_obj_plateau, bool use_proj_grad, bool use_sol_stable,
         bool require_feas,
-        bool has_lower, double lower, bool has_upper, double upper) {
+        bool has_lower, double lower, bool has_upper, double upper,
+        bool parallel) {
     if (x0.ndim() != 1)
         throw std::invalid_argument("x0 must be a 1-D array");
     if (d.ndim() != 1)
@@ -70,6 +75,7 @@ static py::tuple solve_euler_py(
             obj_rel_tol, x_rel_tol, proj_grad_tol, feasibility_tol,
             use_obj_plateau, use_proj_grad, use_sol_stable, require_feas,
             has_lower, lower, has_upper, upper,
+            parallel,
             x0.data(), x_out.mutable_data());
     }
 
@@ -94,5 +100,21 @@ PYBIND11_MODULE(_kernel, m) {
           py::arg("use_obj_plateau"), py::arg("use_proj_grad"),
           py::arg("use_sol_stable"), py::arg("require_feas"),
           py::arg("has_lower"), py::arg("lower"),
-          py::arg("has_upper"), py::arg("upper"));
+          py::arg("has_upper"), py::arg("upper"),
+          py::arg("parallel") = false);
+
+    // Build-time OpenMP capability. The `'c'` auto backend reads HAS_OPENMP to
+    // decide whether to request the multicore path; `'c_openmp'` raises when it
+    // is False. Set from the _OPENMP macro, which the compiler defines only when
+    // the extension was built with full `-fopenmp` (not merely -fopenmp-simd).
+#ifdef _OPENMP
+    m.attr("HAS_OPENMP") = true;
+    m.def("max_threads", []() { return omp_get_max_threads(); },
+          "Maximum OpenMP threads available to the multicore matvec "
+          "(honours OMP_NUM_THREADS).");
+#else
+    m.attr("HAS_OPENMP") = false;
+    m.def("max_threads", []() { return 1; },
+          "OpenMP unavailable in this build; always 1.");
+#endif
 }
