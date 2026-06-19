@@ -4,6 +4,17 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-06-19
+
+### Removed
+- **The six projection-variant solvers** (`solve_qp_penalty`,
+  `solve_qp_lagrangian`, `solve_qp_heun_penalty`, `solve_qp_heavyball_penalty`,
+  `solve_qp_nesterov_penalty`, `solve_qp_expeuler_penalty`) are no longer part of
+  the public API. The package now ships only the canonical solver (Euler +
+  adaptive projection) across its four backends (`python`, `c`, `c_serial`,
+  `c_openmp`). The variants are being re-scoped for a staged, individually
+  documented re-release; until then they remain available in `0.2.0`.
+
 ## [0.2.0] — 2026-06-19
 
 ### Added

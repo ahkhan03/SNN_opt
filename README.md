@@ -4,7 +4,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.2.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](CHANGELOG.md)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
 [![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
@@ -205,7 +205,7 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
   author  = {Khan, Ameer Hamza and Li, Shuai},
   title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
   year    = {2026},
-  version = {0.2.0},
+  version = {0.3.0},
   url     = {https://github.com/ahkhan03/SNN_opt},
   license = {Apache-2.0},
 }

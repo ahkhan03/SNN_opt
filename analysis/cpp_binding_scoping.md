@@ -300,14 +300,15 @@ binding lays real groundwork for it:
 - the HLS-readiness discipline (no STL/alloc/exceptions in the inner loop)
   transfers directly.
 
-Worth noting separately: the **single-population projection variants** in
-`projection_variants.py` (penalty, Heun, heavy-ball, Nesterov, exp-Euler) are
-*easier* to port than the canonical adaptive solver — they are pure forward-Euler
-with no event-triggered argmax inner loop and no data-dependent control flow,
-which makes them both trivial C++ and the most HLS-friendly targets in the
-codebase. The planned single-population accelerated-solvers methods paper would
-benefit from the same compiled backend at near-zero marginal cost once the build
-infra from Phase 1 exists.
+Worth noting separately: the **single-population projection variants** (penalty,
+Heun, heavy-ball, Nesterov, exp-Euler) — held on the `future-research` branch for
+staged release, not shipped in the package — would be *easier* to port than the
+canonical adaptive solver: they are pure forward-Euler with no event-triggered
+argmax inner loop and no data-dependent control flow, which makes them both
+trivial C++ and the most HLS-friendly targets. Each is its own kernel, though;
+the current `_kernel` accelerates only the canonical adaptive solver. The planned
+single-population accelerated-solvers methods paper would benefit from the same
+compiled-backend infra at near-zero marginal cost.
 
 ---
 

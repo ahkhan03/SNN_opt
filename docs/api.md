@@ -10,13 +10,6 @@ from snn_opt import (
     SolverResult,
     SNNSolver,
     solve_qp,
-    # neuromorphic-pure projection variants (see below)
-    solve_qp_penalty,
-    solve_qp_lagrangian,
-    solve_qp_heun_penalty,
-    solve_qp_heavyball_penalty,
-    solve_qp_nesterov_penalty,
-    solve_qp_expeuler_penalty,
 )
 ```
 
@@ -118,34 +111,6 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
   the projection-spike raster (see [`figure 02_spike_raster.py`](../benchmarks/02_spike_raster.py)).
 - `total_projection_distance` — sum of spike norms.
 - `summary()` — human-readable one-line-per-statistic string.
-
-## Projection variants (`snn_opt.projection_variants`)
-
-The canonical solver uses an *event-triggered* adaptive-projection inner loop
-(select the most-violated constraint, snap it to its boundary, repeat). These
-variants instead replace that inner loop with **continuous-time dynamics
-integrated by forward Euler** — a single population (or a primal–dual pair) that
-just integrates its membrane voltage every tick, with no per-iteration `argmax`
-and no snap-to-boundary step. They are the "neuromorphic-pure" formulations and
-are useful when the whole solve must map onto plain LIF dynamics.
-
-All take the same `(A, b, C, d, x0, ...)` problem arguments as `solve_qp` and
-return a [`SolverResult`](#solverresult); variant-specific knobs are
-keyword-only.
-
-| Function | Strategy |
-|---|---|
-| `solve_qp_penalty` | Quadratic-penalty method; `dx/dt = -(Ax+b) - k_p Cᵀ relu(Cx+d)`. Penalty weight `k_p` ramps up (homotopy). Single population. |
-| `solve_qp_lagrangian` | Augmented-Lagrangian / dual-ascent saddle-point dynamics; coupled primal `x` and dual `λ ≥ 0` populations (unbiased at convergence). |
-| `solve_qp_heun_penalty` | Penalty dynamics with Heun (RK2) integration. |
-| `solve_qp_heavyball_penalty` | Penalty dynamics with heavy-ball momentum. |
-| `solve_qp_nesterov_penalty` | Penalty dynamics with Nesterov acceleration. |
-| `solve_qp_expeuler_penalty` | Penalty dynamics with exponential-Euler integration (handles stiffness). |
-
-Common keyword arguments include `k0` / `k0_scale` (gradient step), `k_p` /
-`k_p_ramp` / `k_p_final` (penalty schedule), `h` (Euler step), `max_iterations`,
-`feasibility_tol`, `proj_grad_tol`, `enable_early_stopping`, and `verbose`. See
-each function's docstring for the full list.
 
 ## Versioning
 
