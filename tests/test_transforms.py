@@ -69,13 +69,17 @@ def test_eigenbasis_instance_and_string_agree():
     assert np.max(np.abs(r_str.final_x - r_obj.final_x)) == 0.0
 
 
-def test_eigenbasis_rejects_box_constraints():
-    """Box bounds are not rotation-invariant -> must raise, not silently fail."""
+def test_eigenbasis_supports_box_via_rotated_facet_rows():
+    """v0.5.0: box bounds are folded into explicit rotated unit-norm rows
+    (the box is not axis-aligned in the eigenbasis), and the solution must be
+    jointly feasible against the ORIGINAL box + rows."""
     prob, x0 = _qp(20, 5, 2)
-    cfg = SolverConfig(max_iterations=100, transform="eigenbasis",
+    cfg = SolverConfig(max_iterations=4000, transform="eigenbasis",
                        lower_bound=0.0, upper_bound=1.0)
-    with pytest.raises(ValueError, match="box"):
-        SNNSolver(prob, cfg).solve(x0)
+    res = SNNSolver(prob, cfg).solve(x0)
+    assert res.max_violation_box <= 1e-5
+    assert res.max_distance_rows <= 1e-5
+    assert np.all(res.final_x >= -1e-5) and np.all(res.final_x <= 1.0 + 1e-5)
 
 
 def test_unknown_transform_raises():

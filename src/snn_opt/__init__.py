@@ -39,7 +39,7 @@ from .solver import (
 from .transforms import Transform, EigenbasisTransform
 
 # Keep in sync with the version in pyproject.toml and CITATION.cff.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "ConvergenceConfig",

@@ -4,6 +4,54 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-07-15
+
+### Fixed
+- **Clip-after-project defect (structural correctness fix).** Pre-0.5, box
+  bounds were enforced by a TERMINAL clip applied after the greedy halfspace
+  sweep, with nothing re-projecting behind it. Composing the two mechanisms is
+  not a projection onto the intersection (a classical POCS failure), so on
+  problems where the box and an interacting row are simultaneously active the
+  solver stalled at an infeasible point whose objective can UNDERCUT the true
+  optimum while reporting box violation exactly 0. Bounds are now implicit
+  unit-normal **constraint facets inside the unified projection sweep** (facet
+  spike = exact O(1) single-coordinate correction with an O(m) lateral residual
+  update); the terminal clip is gone. Box-only problems (`m == 0`) dispatch to
+  the exact vectorized box projection, unchanged.
+- **Feasibility was rows-only.** The convergence gate (and the C kernel's
+  feasibility check) now use the JOINT geometric violation: row violation
+  distances (raw residual / ‖c_j‖) and box violations together.
+
+### Changed
+- **Normalized-distance winner selection.** The sweep selects the most-violated
+  constraint by Euclidean distance instead of raw residual, making selection
+  invariant to positive row rescaling and `constraint_tol` a geometric distance
+  tolerance. Zero rows are screened at init (`d > tol` ⇒ certified infeasible,
+  raises; else inert).
+- **`max_projection_iters` is now a safety watchdog** (default `None` → auto
+  `max(1000, 10·(m + #facets))`). The sweep is meant to reach joint tolerance;
+  hitting the cap ABORTS the solve with
+  `convergence_reason='projection_budget_exhausted'` (never reported as
+  convergence, never silently continued from a knowingly infeasible point).
+- `projection_method='fixed'` with box bounds now raises (the fixed-step
+  legacy path cannot enforce bounds correctly without the removed clip).
+- **`EigenbasisTransform` accepts box bounds** by materializing bound facets as
+  explicit rotated unit-norm rows (`m` grows by up to `2n`; the implicit O(1)
+  facet advantage is deliberately surrendered under a transform).
+
+### Added
+- `SolverResult.joint_feasible`, `.max_violation_rows_raw`,
+  `.max_distance_rows`, `.max_violation_box`, `.projection_budget_exhausted`.
+- `SolverResult.stationarity_residual`: an NNLS-based KKT certificate
+  `min_{μ≥0} ‖∇f + Σ μ_i a_i‖` over active unified normals, computed host-side
+  at the final point for every backend. `converged` detects the network's
+  fixed point; this residual quantifies its distance from stationarity (the
+  O(k0) floor at oblique active corners — see the framework paper, Sec. III).
+- Frozen candidate/tie ordering shared by all backends: rows in input order,
+  then lower facets `0..n-1`, then upper facets `0..n-1`; first maximal index
+  wins. Facet spike IDs in `spike_constraints`: lower facet i → `m + i`,
+  upper facet i → `m + n + i`.
+
 ## [0.4.0] — 2026-06-19
 
 ### Added

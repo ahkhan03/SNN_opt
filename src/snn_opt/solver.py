@@ -3,10 +3,20 @@ SNN-Inspired Constrained Optimization Solver
 
 Solves convex optimization problems with linear inequality constraints:
     minimize    (1/2) x^T A x + b^T x
-    subject to  C x + d <= 0
+    subject to  C x + d <= 0   (optionally including scalar box bounds l <= x <= u)
 
 The algorithm alternates between gradient descent and discrete boundary projections,
 inspired by spiking neural network dynamics.
+
+Since v0.5.0, box bounds are handled INSIDE the projection sweep as implicit
+unit-normal constraint facets (one constraint neuron per bound facet), selected
+by the same normalized-distance winner-take-all rule as the general rows. The
+pre-v0.5 terminal clip (applied after the halfspace sweep, with nothing
+re-projecting behind it) was a structural correctness defect: composing the two
+mechanisms is not a projection onto the intersection, so on problems where the
+box and an interacting row are simultaneously active the solver stalled at an
+infeasible point whose objective can undercut the true optimum. Box-only
+problems (m == 0) still dispatch to the exact vectorized box projection.
 """
 
 import numpy as np
@@ -67,8 +77,16 @@ class SolverConfig:
     k0: float = None  # Gradient descent step size (None = auto-compute from Lipschitz constant)
     t_end: float = 100.0  # Simulation end time (for IVP mode)
     max_step: float = 0.1  # Maximum integration step size (for IVP mode)
-    constraint_tol: float = 1e-6  # Constraint violation tolerance
-    max_projection_iters: int = 100  # Maximum projection iterations
+    # Geometric (Euclidean-distance) constraint tolerance: a row counts as
+    # satisfied when its violation DISTANCE (raw residual / ||c_j||) is <= tol.
+    # Box facets have unit normals, so their raw violation is already a distance.
+    constraint_tol: float = 1e-6
+    # Safety watchdog for the inner projection sweep. None (default) resolves to
+    # max(1000, 10 * (m + number of box facets)). The sweep is meant to run to
+    # joint tolerance; hitting this cap aborts the solve with
+    # convergence_reason='projection_budget_exhausted' (never silently continued
+    # from a knowingly infeasible point).
+    max_projection_iters: Optional[int] = None
     
     # Integration method: 'ivp' (continuous ODE) or 'euler' (discrete steps)
     integration_method: str = 'euler'  # Default to euler for better stability
@@ -82,10 +100,13 @@ class SolverConfig:
     # Values < 1.0 are more conservative (slower but safer), > 1.0 are aggressive
     k0_scale: float = 0.5  # Default to 0.5 for stability
     
-    # Box constraint clipping (for problems like SVM with 0 <= x <= C)
-    # If provided, variables are clipped to [lower_bound, upper_bound] after each projection
-    lower_bound: float = None  # If set, clip x >= lower_bound
-    upper_bound: float = None  # If set, clip x <= upper_bound
+    # Scalar box bounds (for problems like SVM with 0 <= x <= C). Since v0.5.0
+    # these are NOT enforced by a terminal clip: each bound facet participates
+    # in the unified projection sweep as an implicit unit-normal constraint
+    # (facet spike = exact single-coordinate correction). Box-only problems
+    # (m == 0) use the exact vectorized box projection instead.
+    lower_bound: float = None  # If set, enforce x >= lower_bound
+    upper_bound: float = None  # If set, enforce x <= upper_bound
     
     # Convergence detection
     convergence: ConvergenceConfig = field(default_factory=ConvergenceConfig)
@@ -226,11 +247,34 @@ class SolverResult:
     spike_norms : ndarray
         L2 norm of each spike displacement
     spike_constraints : list of ndarray
-        Indices of constraints that were active for each spike event
+        Indices of constraints that were active for each spike event. Row j is
+        index j; box facets use the frozen convention: lower facet of coordinate
+        i is m + i, upper facet is m + n + i.
     spike_violation_values : list of ndarray
         Positive constraint residuals at the moment each spike was applied
     total_projection_distance : float
         Sum of norms of all spike displacements (cumulative distance)
+    joint_feasible : bool
+        Whether the final point satisfies rows AND box to feasibility_tol
+        (geometric distances). This is THE feasibility verdict; the legacy
+        constraint_violations covers rows only, in raw (un-normalized) units.
+    max_violation_rows_raw : float
+        Max positive row residual max_j (c_j^T x + d_j)_+ in raw user units.
+    max_distance_rows : float
+        Max row violation as a Euclidean distance (raw residual / ||c_j||).
+    max_violation_box : float
+        Max box-bound violation (already a distance; unit normals).
+    stationarity_residual : float
+        KKT stationarity certificate: min over mu >= 0 of
+        ||grad f(x) + sum_i mu_i a_i|| with a_i the active unified (normalized)
+        constraint normals, computed by NNLS at the final point. NaN if the
+        certificate could not be computed. NOTE: `converged` detects the
+        network's fixed point; this residual quantifies how close that fixed
+        point is to a KKT point (the O(k0) floor -- see paper Sec. III).
+    projection_budget_exhausted : bool
+        True when an inner sweep hit the safety cap before reaching joint
+        tolerance; the solve is aborted at that iteration with
+        convergence_reason='projection_budget_exhausted'.
     """
     t: np.ndarray
     X: np.ndarray
@@ -249,6 +293,12 @@ class SolverResult:
     spike_constraints: List[np.ndarray]
     spike_violation_values: List[np.ndarray]
     total_projection_distance: float
+    joint_feasible: bool = False
+    max_violation_rows_raw: float = 0.0
+    max_distance_rows: float = 0.0
+    max_violation_box: float = 0.0
+    stationarity_residual: float = float("nan")
+    projection_budget_exhausted: bool = False
     
     def summary(self) -> str:
         """Generate summary statistics string."""
@@ -258,11 +308,16 @@ class SolverResult:
             f"  Convergence reason: {self.convergence_reason}",
             f"  Iterations used: {self.iterations_used}",
             f"  Final objective: {self.final_objective:.6e}",
-            f"  Final proj. gradient norm: {self.final_proj_grad_norm:.6e}",
-            f"  Max constraint violation: {np.max(self.constraint_violations):.6e}",
+            f"  Joint feasible: {self.joint_feasible} "
+            f"(rows dist={self.max_distance_rows:.2e}, box={self.max_violation_box:.2e})",
+            f"  Stationarity residual (NNLS): {self.stationarity_residual:.6e}",
+            f"  Final proj. gradient norm (heuristic): {self.final_proj_grad_norm:.6e}",
+            f"  Max row violation (raw): {np.max(self.constraint_violations):.6e}",
             f"  Total projections: {self.n_projections}",
             f"  Total spikes recorded: {len(self.spike_times)}",
         ]
+        if self.projection_budget_exhausted:
+            lines.append("  WARNING: projection budget exhausted (solve aborted)")
 
         if len(self.spike_norms) > 0:
             lines.append(f"  Avg spike norm: {self.spike_norms.mean():.6e}")
@@ -311,6 +366,44 @@ class SNNSolver:
         else:
             self._c_norms_sq = np.array([])
 
+        # Normalized-distance selection scales: dist_j = (c_j^T x + d_j) / ||c_j||.
+        # Zero rows are screened here: with c_j = 0 the row is either redundant
+        # (d_j <= tol: never violated, scale 0 makes it inert in selection) or a
+        # certificate that the problem is infeasible (d_j > tol: 0 <= -d_j < 0).
+        self._c_norms = np.sqrt(self._c_norms_sq)
+        with np.errstate(divide="ignore"):
+            self._row_scale = np.where(self._c_norms > 1e-12,
+                                       1.0 / np.maximum(self._c_norms, 1e-300), 0.0)
+        if self.problem.n_constraints > 0:
+            degenerate = self._c_norms <= 1e-12
+            if np.any(degenerate & (np.asarray(self.problem.d).ravel()
+                                    > self.config.constraint_tol)):
+                bad = int(np.argmax(degenerate & (np.asarray(self.problem.d).ravel()
+                                                  > self.config.constraint_tol)))
+                raise ValueError(
+                    f"constraint row {bad} has a zero normal and d > 0: the "
+                    f"problem is certifiably infeasible (0 <= {-self.problem.d[bad]})")
+
+        # The legacy fixed-step projection predates the unified facet sweep and
+        # cannot enforce box bounds correctly; fail fast rather than silently
+        # reintroduce the clip-after-project defect.
+        if (self.config.projection_method == 'fixed'
+                and (self.config.lower_bound is not None
+                     or self.config.upper_bound is not None)):
+            raise ValueError(
+                "projection_method='fixed' does not support box bounds since "
+                "v0.5.0 (the terminal clip was removed as a correctness defect); "
+                "use projection_method='adaptive'")
+
+        # Inner-sweep safety watchdog (see SolverConfig.max_projection_iters).
+        n_facets = ((self.problem.n_vars if self.config.lower_bound is not None else 0)
+                    + (self.problem.n_vars if self.config.upper_bound is not None else 0))
+        if self.config.max_projection_iters is None:
+            self._proj_cap = max(1000, 10 * (self.problem.n_constraints + n_facets))
+        else:
+            self._proj_cap = int(self.config.max_projection_iters)
+        self._projection_budget_exhausted = False
+
         # Pre-compute the constraint Gram matrix G = C C^T (the constraint-
         # coupling / recurrent matrix). Both the compiled C kernel and the
         # Python adaptive projection use it for the event-driven update: a
@@ -341,10 +434,13 @@ class SNNSolver:
     
     def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
         """
-        Clip variables to box constraints if specified.
-        
-        This is used for problems with simple bounds (like SVM with 0 <= alpha <= C)
-        where box constraints are better handled by clipping than by iterative projection.
+        Exact projection onto the box (vectorized clip).
+
+        Since v0.5.0 this is ONLY the box-only (m == 0) fast path of the unified
+        projection: with no general rows the box projection is separable and
+        exact, so a single vectorized clip is the correct projection. For mixed
+        problems the bound facets are handled inside the sweep instead --
+        clipping AFTER the halfspace sweep was the clip-after-project defect.
         """
         if self.config.lower_bound is not None:
             x = np.maximum(x, self.config.lower_bound)
@@ -352,6 +448,75 @@ class SNNSolver:
             x = np.minimum(x, self.config.upper_bound)
         return x
     
+    def _violation_split(self, x: np.ndarray) -> Tuple[float, float, float]:
+        """(max raw row violation, max row violation DISTANCE, max box violation).
+
+        Row distances divide the raw residual by ||c_j||; box violations are
+        already distances (unit facet normals). All three are 0 when satisfied.
+        """
+        raw = dist = 0.0
+        if self.problem.n_constraints > 0:
+            g = np.asarray(self.problem.constraint_values(x)).ravel()
+            raw = float(np.max(np.maximum(g, 0.0)))
+            dist = float(np.max(np.maximum(g * self._row_scale, 0.0)))
+        box = 0.0
+        if self.config.lower_bound is not None:
+            box = max(box, float(np.max(np.maximum(self.config.lower_bound - x, 0.0))))
+        if self.config.upper_bound is not None:
+            box = max(box, float(np.max(np.maximum(x - self.config.upper_bound, 0.0))))
+        return raw, dist, box
+
+    def _joint_max_violation(self, x: np.ndarray) -> float:
+        """Joint geometric infeasibility: max of row distances and box violations.
+
+        This is the feasibility quantity used by the convergence gate and the
+        result report. The legacy `OptimizationProblem.max_violation` covers
+        rows only, in raw units, and never sees the box.
+        """
+        _, dist, box = self._violation_split(x)
+        return max(dist, box)
+
+    def _stationarity_residual(self, x: np.ndarray) -> float:
+        """KKT stationarity certificate at x (host-side instrumentation).
+
+        Fits nonnegative multipliers on the ACTIVE unified normalized normals
+        (rows within active_tol of their boundary, box facets at their bound):
+        returns min_{mu >= 0} ||grad f(x) + N^T mu||_2 via NNLS. Zero (to
+        tolerance) certifies a KKT point; at the solver's fixed point this
+        quantifies the O(k0) stationarity floor. Returns ||grad|| when nothing
+        is active, NaN if the fit fails.
+        """
+        grad = np.asarray(self.problem.gradient(x), dtype=float).ravel()
+        active_tol = self.config.constraint_tol * 10
+        n = self.problem.n_vars
+        normals = []
+        if self.problem.n_constraints > 0:
+            g = np.asarray(self.problem.constraint_values(x)).ravel()
+            for j in np.nonzero(g * self._row_scale >= -active_tol)[0]:
+                if self._c_norms[j] <= 1e-12:
+                    continue
+                c_j = self.problem.C[j]
+                c_j = (np.asarray(c_j.todense()).ravel() if _issparse(c_j)
+                       else np.asarray(c_j, dtype=float).ravel())
+                normals.append(c_j * self._row_scale[j])
+        if self.config.lower_bound is not None:
+            for i in np.nonzero(self.config.lower_bound - x >= -active_tol)[0]:
+                e = np.zeros(n); e[i] = -1.0
+                normals.append(e)
+        if self.config.upper_bound is not None:
+            for i in np.nonzero(x - self.config.upper_bound >= -active_tol)[0]:
+                e = np.zeros(n); e[i] = 1.0
+                normals.append(e)
+        if not normals:
+            return float(np.linalg.norm(grad))
+        try:
+            from scipy.optimize import nnls
+            N = np.asarray(normals)          # (k, n)
+            _, rnorm = nnls(N.T, -grad)      # min ||N^T mu + grad||, mu >= 0
+            return float(rnorm)
+        except Exception:
+            return float("nan")
+
     def _compute_adaptive_k0(self) -> float:
         """
         Compute adaptive step size based on Lipschitz constant of the gradient.
@@ -509,9 +674,9 @@ class SNNSolver:
             if x_rel_change < conv_cfg.x_rel_tol:
                 reasons_met.append(f"x_stable(range={x_rel_change:.2e})")
         
-        # 4. Check feasibility (if required)
+        # 4. Check feasibility (if required) -- JOINT: rows (as distances) + box.
         if conv_cfg.require_feasibility:
-            max_viol = self.problem.max_violation(x_curr)
+            max_viol = self._joint_max_violation(x_curr)
             if max_viol > conv_cfg.feasibility_tol:
                 return False, "still_infeasible", True  # Check happened but failed
         
@@ -558,7 +723,8 @@ class SNNSolver:
         self._converged = False
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
-        
+        self._projection_budget_exhausted = False
+
         # Transform axis: an explicit problem transform (e.g. eigenbasis) rewrites
         # the problem, solves the equivalent system, and maps the solution back.
         if self.config.transform is not None:
@@ -595,9 +761,15 @@ class SNNSolver:
         ctx = transform.forward(self.problem, x0, self.config)
 
         # Inner solve on the transformed problem: canonical dynamics (no nested
-        # transform), lean, same backend + convergence config.
+        # transform), lean, same backend + convergence config. When the
+        # transform folded the box into explicit rows (consumes_bounds), the
+        # inner solve must run bound-free -- the scalar bounds are meaningless
+        # in the transformed coordinates.
         inner_problem = OptimizationProblem(A=ctx.A, b=ctx.b, C=ctx.C, d=ctx.d)
-        inner_config = replace(self.config, transform=None, record_trajectory=False)
+        inner_kwargs = dict(transform=None, record_trajectory=False)
+        if getattr(ctx, "consumes_bounds", False):
+            inner_kwargs.update(lower_bound=None, upper_bound=None)
+        inner_config = replace(self.config, **inner_kwargs)
         inner = SNNSolver(inner_problem, inner_config)
         inner._a_diag = ctx.a_diag  # enable the O(n) diagonal Hessian fast path
         inner_result = inner.solve(ctx.x0, verbose=verbose)
@@ -609,6 +781,7 @@ class SNNSolver:
         self._convergence_reason = inner._convergence_reason
         self._iterations_used = inner._iterations_used
         self._n_projections = inner._n_projections
+        self._projection_budget_exhausted = inner._projection_budget_exhausted
         return self._build_lean_result(final_x)
 
     def _solve_euler(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
@@ -646,10 +819,15 @@ class SNNSolver:
                     self._spike_deltas.append(info["delta_x"])
                     self._spike_constraints.append(info["constraints"])
                     self._spike_violation_values.append(info["violations"])
-            
-            # Phase 3: Clip to box constraints if specified
-            x_current = self._clip_to_bounds(x_current)
-            
+
+            # (v0.5.0: the former Phase-3 terminal box clip is gone -- bounds
+            # are facets inside the Phase-2 sweep; clipping here broke rows.)
+            if self._projection_budget_exhausted:
+                self._convergence_reason = "projection_budget_exhausted"
+                self._iterations_used = iteration + 1
+                trajectory.append(x_current.copy())
+                break
+
             trajectory.append(x_current.copy())
             
             # Track history for convergence
@@ -687,8 +865,9 @@ class SNNSolver:
                     else:
                         patience_counter = 0  # Reset patience only if check failed
         
-        # If we didn't converge early, record final state
-        if not self._converged:
+        # If we didn't converge early (and didn't abort), record final state
+        if (not self._converged
+                and self._convergence_reason != "projection_budget_exhausted"):
             self._iterations_used = self.config.max_iterations
             self._convergence_reason = "max_iterations"
         
@@ -744,8 +923,12 @@ class SNNSolver:
             x_current, n_proj, _ = self._project_to_feasible(x_current, build_info=False)
             self._n_projections += n_proj
 
-            # Phase 3: clip to box constraints if specified
-            x_current = self._clip_to_bounds(x_current)
+            # (v0.5.0: the former Phase-3 terminal box clip is gone -- bounds
+            # are facets inside the Phase-2 sweep; clipping here broke rows.)
+            if self._projection_budget_exhausted:
+                self._convergence_reason = "projection_budget_exhausted"
+                self._iterations_used = iteration + 1
+                break
 
             # Objective for the plateau check: reuse the A @ x we need anyway
             # for the next iteration's gradient (O(n^2) once, not twice; O(n)
@@ -784,7 +967,8 @@ class SNNSolver:
                     else:
                         patience_counter = 0
 
-        if not self._converged:
+        if (not self._converged
+                and self._convergence_reason != "projection_budget_exhausted"):
             self._iterations_used = self.config.max_iterations
             self._convergence_reason = "max_iterations"
 
@@ -804,6 +988,7 @@ class SNNSolver:
         final_objective = self.problem.objective(final_x)
         final_proj_grad_norm = self._compute_projected_gradient_norm(final_x)
         final_violation = self.problem.max_violation(final_x)
+        raw_rows, dist_rows, box_viol = self._violation_split(final_x)
         n = self.problem.n_vars
 
         return SolverResult(
@@ -824,6 +1009,13 @@ class SNNSolver:
             spike_constraints=[],
             spike_violation_values=[],
             total_projection_distance=0.0,
+            joint_feasible=(max(dist_rows, box_viol)
+                            <= self.config.convergence.feasibility_tol),
+            max_violation_rows_raw=raw_rows,
+            max_distance_rows=dist_rows,
+            max_violation_box=box_viol,
+            stationarity_residual=self._stationarity_residual(final_x),
+            projection_budget_exhausted=self._projection_budget_exhausted,
         )
 
     def _solve_euler_c(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
@@ -900,10 +1092,12 @@ class SNNSolver:
         a_diag_c = (np.ascontiguousarray(self._a_diag, dtype=np.float64)
                     if use_diag else np.zeros(0, dtype=np.float64))
 
+        row_scale = np.ascontiguousarray(self._row_scale, dtype=np.float64).reshape(m)
+
         final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
-            A, b, C, d, c_norms_sq, c_gram, x0c,
+            A, b, C, d, c_norms_sq, row_scale, c_gram, x0c,
             self._k0, self.config.constraint_tol,
-            self.config.max_iterations, self.config.max_projection_iters,
+            self.config.max_iterations, self._proj_cap,
             conv.enable_early_stopping, conv.check_every, conv.min_iterations,
             conv.window_size, conv.patience,
             conv.obj_rel_tol, conv.x_rel_tol, conv.proj_grad_tol,
@@ -919,8 +1113,13 @@ class SNNSolver:
         self._n_projections = int(n_proj)
         self._converged = bool(converged)
         self._iterations_used = int(iters)
-        self._convergence_reason = (
-            "converged(c-backend)" if reason_code == 1 else "max_iterations")
+        if reason_code == 1:
+            self._convergence_reason = "converged(c-backend)"
+        elif reason_code == 2:
+            self._convergence_reason = "projection_budget_exhausted"
+            self._projection_budget_exhausted = True
+        else:
+            self._convergence_reason = "max_iterations"
 
         if verbose:
             print(f"[c] iterations={iters}, n_projections={n_proj}, "
@@ -1041,68 +1240,135 @@ class SNNSolver:
     def _project_adaptive(self, x: np.ndarray,
                           build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
         """
-        Adaptive projection: compute exact step to reach each constraint boundary.
+        Unified adaptive projection: exact steps onto the currently most-violated
+        constraint, where "constraints" means the general rows AND the implicit
+        box facets in one candidate family.
 
-        For violated constraint g_j(x) = c_j^T x + d_j > 0, the exact step is
-        k1_j = g_j / ||c_j||^2; this projects exactly onto the boundary in one
-        step per constraint, eliminating k1 as a hyperparameter.
+        Selection is winner-take-all on the NORMALIZED violation distance
+        (raw row residual / ||c_j||; box facets have unit normals), so the
+        winner choice is invariant to positive row rescaling and
+        `constraint_tol` is a geometric distance. For a violated row the exact
+        step is k1 = g_j / ||c_j||^2 (one step to the boundary); for a violated
+        facet it is the exact single-coordinate correction to the bound (an
+        O(1) primal update). The frozen candidate order for ties is: rows in
+        input order, then lower facets 0..n-1, then upper facets 0..n-1
+        (first maximal index wins) -- identical across all backends.
+
+        The sweep runs until JOINT tolerance (rows + box) or the safety cap
+        `self._proj_cap`; cap exhaustion sets
+        `self._projection_budget_exhausted` and the caller aborts the solve.
 
         When the constraint Gram matrix G = C C^T has been precomputed (dense C,
-        m <= _MAX_GRAM_M), the residual g = C x_proj + d is maintained
-        incrementally: each projection event on constraint j applies the lateral
-        update g <- g - k1 * G[:,j] (O(m)), the constraint-coupling form of a
-        spike-triggered update, instead of recomputing C x_proj (O(m*n)). For
-        sparse C or large m it falls back to recomputing the residual.
+        m <= _MAX_GRAM_M), the row residual g = C x_proj + d is maintained
+        incrementally: a row spike on j applies the lateral update
+        g <- g - k1 * G[:,j] (O(m)) and a facet spike on coordinate i applies
+        g <- g + delta * C[:,i] (O(m)). For sparse C or large m it falls back
+        to recomputing the residual each micro-step. Facet residuals are read
+        directly off x, so they are always fresh.
+
+        Box-only problems (m == 0) dispatch to the exact vectorized box
+        projection (separable, so the clip IS the projection).
         """
+        cfg = self.config
+        lo, hi = cfg.lower_bound, cfg.upper_bound
+        has_box = lo is not None or hi is not None
+        m = self.problem.n_constraints
+        n = self.problem.n_vars
         x_proj = x.copy()
-        n_iters = 0
         spike_info: List[dict] = []
 
-        # Handle unconstrained case
-        if self.problem.n_constraints == 0:
+        # Unconstrained case
+        if m == 0 and not has_box:
             return x_proj, 0, spike_info
 
-        gram = self._c_gram  # None -> recompute path; else event-driven path
-        g = self.problem.constraint_values(x_proj)
+        # Box-only fast path: separable set, vectorized clip is the exact
+        # projection (counted as one population event per clipped coordinate).
+        if m == 0:
+            clipped = self._clip_to_bounds(x_proj.copy())
+            changed = np.nonzero(clipped != x_proj)[0]
+            if changed.size and build_info:
+                deltas = clipped - x_proj
+                lo_side = deltas[changed] > 0  # pushed up -> lower facet
+                ids = np.where(lo_side, m + changed, m + n + changed)
+                spike_info.append({
+                    "constraints": ids,
+                    "delta_x": deltas,
+                    "violations": np.abs(deltas[changed]),
+                })
+            return clipped, int(changed.size), spike_info
 
-        for _ in range(self.config.max_projection_iters):
+        gram = self._c_gram  # None -> recompute path; else event-driven path
+        tol = cfg.constraint_tol
+        g = self.problem.constraint_values(x_proj)
+        n_iters = 0
+
+        for _ in range(self._proj_cap):
             if gram is None:
                 g = self.problem.constraint_values(x_proj)
 
-            # Find most violated constraint
-            j = np.argmax(g)
-            if g[j] <= self.config.constraint_tol:
-                break  # All constraints satisfied
+            # Winner-take-all over normalized distances, frozen candidate order
+            # (rows, lower facets, upper facets; first maximal index wins).
+            j_row = int(np.argmax(g * self._row_scale)) if m else -1
+            best_val = g[j_row] * self._row_scale[j_row] if m else -np.inf
+            kind = "row"
+            j = j_row
+            if lo is not None:
+                v_lo = lo - x_proj
+                i = int(np.argmax(v_lo))
+                if v_lo[i] > best_val:
+                    best_val, kind, j = float(v_lo[i]), "lo", i
+            if hi is not None:
+                v_hi = x_proj - hi
+                i = int(np.argmax(v_hi))
+                if v_hi[i] > best_val:
+                    best_val, kind, j = float(v_hi[i]), "hi", i
 
-            # Compute exact step to reach boundary: k1 = g_j / ||c_j||^2
-            c_j = self.problem.C[j]
-            # Convert sparse row to dense 1D array
-            if _issparse(c_j):
-                c_j = np.asarray(c_j.todense()).ravel()
+            if best_val <= tol:
+                break  # jointly satisfied (geometric tolerance)
+
+            if kind == "row":
+                c_j = self.problem.C[j]
+                if _issparse(c_j):
+                    c_j = np.asarray(c_j.todense()).ravel()
+                else:
+                    c_j = np.asarray(c_j).ravel()
+                violation = g[j]  # raw residual; step uses raw / ||c||^2
+                k1_adaptive = violation / self._c_norms_sq[j]
+                delta_x = -k1_adaptive * c_j
+                x_proj = x_proj + delta_x
+                if gram is not None:
+                    # Spike j propagates a lateral update to coupled rows.
+                    g = g - k1_adaptive * gram[j]
+                event_id, event_viol = j, violation
             else:
-                c_j = np.asarray(c_j).ravel()
-            violation = g[j]
-
-            # Avoid division by zero for degenerate constraints
-            if self._c_norms_sq[j] < 1e-12:
-                continue
-
-            k1_adaptive = violation / self._c_norms_sq[j]
-
-            # Project: x <- x - k1 * c_j
-            delta_x = -k1_adaptive * c_j
-            x_proj = x_proj + delta_x
-            if gram is not None:
-                # Spike j propagates a lateral update to coupled constraints.
-                g = g - k1_adaptive * gram[j]
+                # Facet spike: exact single-coordinate correction to the bound.
+                delta = best_val if kind == "lo" else -best_val
+                if build_info:
+                    delta_x = np.zeros(n)
+                    delta_x[j] = delta
+                x_proj[j] += delta
+                if gram is not None:
+                    col = self.problem.C[:, j]
+                    if _issparse(col):
+                        col = np.asarray(col.todense()).ravel()
+                    else:
+                        col = np.asarray(col).ravel()
+                    g = g + delta * col
+                event_id = (m + j) if kind == "lo" else (m + n + j)
+                event_viol = best_val
             n_iters += 1
 
             if build_info:
                 spike_info.append({
-                    "constraints": np.array([j]),
+                    "constraints": np.array([event_id]),
                     "delta_x": delta_x,
-                    "violations": np.array([violation])
+                    "violations": np.array([event_viol])
                 })
+        else:
+            # Cap hit: re-check joint violation; if still above tolerance the
+            # sweep failed and the solve must abort (see the euler loops).
+            if self._joint_max_violation(x_proj) > tol:
+                self._projection_budget_exhausted = True
 
         return x_proj, n_iters, spike_info
     
@@ -1117,7 +1383,7 @@ class SNNSolver:
         n_iters = 0
         spike_info: List[dict] = []
 
-        for _ in range(self.config.max_projection_iters):
+        for _ in range(self._proj_cap):
             g = self.problem.constraint_values(x_proj)
             violations = g > self.config.constraint_tol
 
@@ -1204,7 +1470,8 @@ class SNNSolver:
         final_x = X[-1]
         final_objective = objective_values[-1]
         final_proj_grad_norm = self._compute_projected_gradient_norm(final_x)
-        
+        raw_rows, dist_rows, box_viol = self._violation_split(final_x)
+
         return SolverResult(
             t=t,
             X=X,
@@ -1222,7 +1489,14 @@ class SNNSolver:
             spike_norms=spike_norms,
             spike_constraints=spike_constraints,
             spike_violation_values=spike_violation_values,
-            total_projection_distance=total_projection_distance
+            total_projection_distance=total_projection_distance,
+            joint_feasible=(max(dist_rows, box_viol)
+                            <= self.config.convergence.feasibility_tol),
+            max_violation_rows_raw=raw_rows,
+            max_distance_rows=dist_rows,
+            max_violation_box=box_viol,
+            stationarity_residual=self._stationarity_residual(final_x),
+            projection_budget_exhausted=self._projection_budget_exhausted,
         )
 
 

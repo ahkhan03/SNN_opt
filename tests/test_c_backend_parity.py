@@ -82,6 +82,20 @@ def _well_conditioned_qp(n, seed):
     return dict(A=A, b=b, C=C, d=d, x0=x0, lower=None, upper=None)
 
 
+def _mixed_active_qp(n, seed):
+    """Markowitz-shaped: ACTIVE budget row + ACTIVE long-only box. This is the
+    clip-after-project defect's canonical shape; it exercises the v0.5 unified
+    sweep's interleaved row spikes + facet spikes (and their lateral updates)
+    across backends."""
+    rng = np.random.default_rng(seed)
+    F = rng.standard_normal((n, max(2, n // 3)))
+    A = F @ F.T / F.shape[1] + np.diag(0.1 + 0.2 * rng.random(n))
+    b = -(0.05 + 0.15 * rng.random(n)) / 5.0
+    C = np.ones((1, n))
+    d = np.array([-1.0])
+    return dict(A=A, b=b, C=C, d=d, x0=np.zeros(n), lower=0.0, upper=1.0)
+
+
 def _battery():
     cases = []
     for n, m, s in [(10, 5, 1), (50, 30, 7), (50, 30, 2),
@@ -89,6 +103,8 @@ def _battery():
         cases.append((f"random n={n} m={m} s{s}", _random_qp(n, m, s), 4000))
     for n, s in [(20, 11), (80, 12)]:
         cases.append((f"box n={n} s{s}", _box_qp(n, s), 4000))
+    for n, s in [(25, 41), (100, 42)]:
+        cases.append((f"mixed-active n={n} s{s}", _mixed_active_qp(n, s), 4000))
     for n, s in [(30, 21), (120, 22)]:
         cases.append((f"unconstrained n={n} s{s}", _unconstrained_qp(n, s), 4000))
     for n, s in [(40, 31), (150, 32)]:

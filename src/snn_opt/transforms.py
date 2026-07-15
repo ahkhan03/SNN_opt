@@ -19,8 +19,10 @@ Currently implemented
 ---------------------
 - :class:`EigenbasisTransform` — rotate a symmetric-PSD Hessian into its
   eigenbasis so the dominant ``O(n^2)`` ``A @ x`` step collapses to an ``O(n)``
-  elementwise product. Requires a box-free problem (the rotation does not
-  preserve per-coordinate box bounds).
+  elementwise product. Since v0.5.0 box bounds are supported by materializing
+  the bound facets as explicit rotated rows (the box is not axis-aligned in the
+  eigenbasis, so the implicit O(1)-per-facet representation is surrendered:
+  each facet becomes a dense unit-norm row ±V[i,:] and m grows by up to 2n).
 """
 
 from __future__ import annotations
@@ -49,6 +51,11 @@ class TransformContext:
         matvec path.
     recover : callable
         Maps a solution in transformed coordinates back to the original ones.
+    consumes_bounds : bool
+        True when the transform has folded the config's scalar box bounds into
+        explicit rows of ``C`` (e.g. rotated facets under an eigenbasis); the
+        inner solve must then run with ``lower_bound = upper_bound = None`` so
+        the bounds are not applied a second time in the wrong coordinates.
     """
 
     A: np.ndarray
@@ -58,6 +65,7 @@ class TransformContext:
     x0: np.ndarray
     a_diag: Optional[np.ndarray]
     recover: Callable[[np.ndarray], np.ndarray]
+    consumes_bounds: bool = False
 
 
 class Transform:
@@ -90,22 +98,19 @@ class EigenbasisTransform(Transform):
     orthogonal ``V``, so the projection step is numerically identical. The
     solution maps back as ``x = V ỹ``.
 
-    Restriction: **box constraints are not supported.** Per-coordinate bounds
-    ``l ≤ x ≤ u`` are not preserved by the rotation (clipping in ``ỹ`` does not
-    correspond to clipping in ``x``), so :meth:`check_applicable` raises when
-    ``lower_bound`` / ``upper_bound`` are set.
+    Box bounds (since v0.5.0): the box is not axis-aligned in the eigenbasis
+    (clipping in ``ỹ`` does not correspond to clipping in ``x``), so bound
+    facets are **materialized as explicit rotated rows**: ``x_i ≤ u`` becomes
+    the unit-norm row ``+V[i,:]·ỹ ≤ u`` and ``x_i ≥ l`` becomes ``−V[i,:]·ỹ ≤
+    −l`` (rows of an orthogonal ``V`` have unit norm). This surrenders the
+    canonical solve's implicit O(1)-per-facet advantage — ``m`` grows by up to
+    ``2n`` dense rows — which is the honest cost of combining the transform
+    with a box. The inner solve then runs bound-free (``consumes_bounds``).
     """
 
     name = "eigenbasis"
 
     def check_applicable(self, problem, config) -> None:
-        if config.lower_bound is not None or config.upper_bound is not None:
-            raise ValueError(
-                "transform='eigenbasis' is incompatible with box constraints "
-                "(lower_bound / upper_bound set): the eigenbasis rotation does "
-                "not preserve per-coordinate box bounds (box-in-x is not "
-                "rotation-invariant). Use transform=None (the default) for "
-                "box-constrained problems.")
         from scipy.sparse import issparse
         if issparse(problem.A) or issparse(problem.C):
             raise ValueError(
@@ -127,6 +132,25 @@ class EigenbasisTransform(Transform):
         else:
             C_t = np.zeros((0, n), dtype=np.float64)
         d_t = np.ascontiguousarray(problem.d, dtype=np.float64)
+
+        # Materialize box facets as rotated rows (see class docstring). In the
+        # original coordinates the facet normals are ±e_i; rotated they are
+        # ±(e_i^T V) = ±V[i,:]. Frozen order matches the canonical facet
+        # convention: all lower facets 0..n-1, then all upper facets 0..n-1.
+        consumes_bounds = False
+        lo, hi = config.lower_bound, config.upper_bound
+        if lo is not None or hi is not None:
+            blocks_C, blocks_d = [C_t], [d_t]
+            if lo is not None:
+                blocks_C.append(-V)                      # rows -V[i,:]
+                blocks_d.append(np.full(n, float(lo)))   # -x_i + l <= 0
+            if hi is not None:
+                blocks_C.append(V)                       # rows +V[i,:]
+                blocks_d.append(np.full(n, -float(hi)))  # x_i - u <= 0
+            C_t = np.ascontiguousarray(np.vstack(blocks_C))
+            d_t = np.concatenate(blocks_d)
+            consumes_bounds = True
+
         x0_t = V.T @ np.asarray(x0, dtype=np.float64)
 
         a_diag = np.ascontiguousarray(w, dtype=np.float64)
@@ -139,7 +163,8 @@ class EigenbasisTransform(Transform):
             return V @ np.asarray(x_t, dtype=np.float64)
 
         return TransformContext(A=A_t, b=b_t, C=C_t, d=d_t, x0=x0_t,
-                                a_diag=a_diag, recover=recover)
+                                a_diag=a_diag, recover=recover,
+                                consumes_bounds=consumes_bounds)
 
 
 # Registry for string-named transforms (mirrors the backend-string convention).

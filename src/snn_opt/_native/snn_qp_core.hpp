@@ -12,8 +12,9 @@
 //   * all numerics reduce to plain double matvec / axpy / dot / ReLU-threshold.
 //
 // It is a faithful port of snn_opt.solver.SNNSolver._solve_euler_lean together
-// with _project_adaptive, _check_convergence, _compute_projected_gradient_norm
-// and _clip_to_bounds. Keep the two in lockstep; the golden-parity harness
+// with _project_adaptive (the v0.5 unified rows+facets sweep),
+// _check_convergence, _compute_projected_gradient_norm and
+// _joint_max_violation. Keep the two in lockstep; the golden-parity harness
 // (tests/test_c_backend_parity.py) enforces agreement.
 
 #pragma once
@@ -39,8 +40,11 @@ namespace snn_qp {
 // SNNSolver._convergence_reason (the Python string also embeds the criterion
 // values; only the category is needed for parity).
 enum ReasonCode {
-    REASON_MAX_ITERATIONS = 0,
-    REASON_CONVERGED      = 1,
+    REASON_MAX_ITERATIONS    = 0,
+    REASON_CONVERGED         = 1,
+    // Inner sweep hit its safety cap before reaching joint tolerance; the
+    // solve aborts rather than continuing from a knowingly infeasible point.
+    REASON_PROJECTION_BUDGET = 2,
 };
 
 struct Result {
@@ -135,6 +139,33 @@ inline double max_violation(const double* C, const double* d, const double* x,
     return mv;
 }
 
+// Joint GEOMETRIC infeasibility: max over row violation DISTANCES (raw residual
+// * row_scale, where row_scale[j] = 1/||c_j|| or 0 for a degenerate row) and
+// box-bound violations (already distances; unit facet normals). Mirrors
+// SNNSolver._joint_max_violation. This is the feasibility-gate quantity.
+inline double joint_max_violation(const double* C, const double* d,
+                                  const double* row_scale, const double* x,
+                                  int n, int m,
+                                  bool has_lower, double lower,
+                                  bool has_upper, double upper,
+                                  double* r_scratch, bool parallel) {
+    double mv = 0.0;
+    if (m > 0) {
+        matvec(C, x, r_scratch, m, n, parallel);
+        for (int i = 0; i < m; ++i) {
+            const double g = (r_scratch[i] + d[i]) * row_scale[i];
+            if (g > mv) mv = g;
+        }
+    }
+    if (has_lower)
+        for (int i = 0; i < n; ++i)
+            if (lower - x[i] > mv) mv = lower - x[i];
+    if (has_upper)
+        for (int i = 0; i < n; ++i)
+            if (x[i] - upper > mv) mv = x[i] - upper;
+    return mv;
+}
+
 // ----------------------------------------------------------------------------
 // Adaptive projection -- Gram-matrix (event-driven lateral-update) form
 // ----------------------------------------------------------------------------
@@ -152,49 +183,105 @@ inline double max_violation(const double* C, const double* d, const double* x,
 //
 // G is m x m, row-major, symmetric (so column j == row j); G[j][j] equals
 // c_norms_sq[j]. Modifies x in place. Returns the number of projection events.
-inline int project_adaptive(double* x,
-                             const double* C, const double* d,
-                             const double* c_norms_sq, const double* G,
-                             int n, int m,
-                             double constraint_tol, int max_projection_iters,
-                             double* r, bool parallel) {
-    if (m == 0) return 0;
+// Unified sweep: general rows and implicit box facets in ONE winner-take-all
+// candidate family, selected by NORMALIZED violation distance (raw row residual
+// * row_scale; facet violations are already distances -- unit normals). Frozen
+// candidate order for ties: rows in input order, then lower facets 0..n-1, then
+// upper facets 0..n-1; strict '>' comparisons give the first maximal index,
+// matching the Python reference exactly.
+//
+// A row spike applies the exact step k1 = g_j / ||c_j||^2 and propagates the
+// lateral update r -= k1 * G[:,j] (O(m)). A facet spike is the exact O(1)
+// single-coordinate correction to the bound and propagates r += delta * C[:,i]
+// (O(m), strided column access). Facet residuals are read off x, always fresh.
+//
+// The sweep runs until JOINT tolerance or the safety cap; on cap exhaustion
+// with the joint violation still above tolerance, *budget_exhausted is set and
+// the caller must abort the solve (v0.5 semantics: never continue the outer
+// dynamics from a knowingly infeasible point).
+//
+// Box-only problems (m == 0) use the exact vectorized box projection (the box
+// is separable, so the clip IS the metric projection); events counted per
+// clipped coordinate.
+//
+// This replaces the pre-v0.5 pair (project_adaptive + terminal clip_to_bounds),
+// whose composition was NOT a projection onto the intersection (the
+// clip-after-project defect).
+inline int project_unified(double* x,
+                           const double* C, const double* d,
+                           const double* c_norms_sq, const double* row_scale,
+                           const double* G,
+                           int n, int m,
+                           double constraint_tol, int proj_cap,
+                           bool has_lower, double lower,
+                           bool has_upper, double upper,
+                           double* r, bool parallel,
+                           bool* budget_exhausted) {
+    // Box-only fast path: exact separable projection.
+    if (m == 0) {
+        int n_events = 0;
+        if (has_lower)
+            for (int i = 0; i < n; ++i)
+                if (x[i] < lower) { x[i] = lower; ++n_events; }
+        if (has_upper)
+            for (int i = 0; i < n; ++i)
+                if (x[i] > upper) { x[i] = upper; ++n_events; }
+        return n_events;
+    }
+
     matvec(C, x, r, m, n, parallel);               // r = C x      (once)
     for (int i = 0; i < m; ++i) r[i] += d[i];      // r = C x + d
 
     int n_iters = 0;
-    for (int it = 0; it < max_projection_iters; ++it) {
-        // most-violated constraint (np.argmax: first maximal index)
+    for (int it = 0; it < proj_cap; ++it) {
+        // Winner-take-all over normalized distances, frozen candidate order.
         int j = 0;
-        double gmax = r[0];
+        int kind = 0;  // 0 = row, 1 = lower facet, 2 = upper facet
+        double best = r[0] * row_scale[0];
         for (int i = 1; i < m; ++i) {
-            if (r[i] > gmax) { gmax = r[i]; j = i; }
+            const double s = r[i] * row_scale[i];
+            if (s > best) { best = s; j = i; }
         }
-        if (gmax <= constraint_tol) break;  // all constraints satisfied
+        if (has_lower)
+            for (int i = 0; i < n; ++i) {
+                const double v = lower - x[i];
+                if (v > best) { best = v; j = i; kind = 1; }
+            }
+        if (has_upper)
+            for (int i = 0; i < n; ++i) {
+                const double v = x[i] - upper;
+                if (v > best) { best = v; j = i; kind = 2; }
+            }
+        if (best <= constraint_tol) return n_iters;  // jointly satisfied
 
-        // Degenerate constraint: re-evaluate (x and r unchanged). The outer
-        // loop is bounded by max_projection_iters so this terminates.
-        if (c_norms_sq[j] < 1e-12) continue;
-
-        const double k1 = gmax / c_norms_sq[j];
-        const double* cj = C + static_cast<std::size_t>(j) * n;
-        for (int k = 0; k < n; ++k) x[k] -= k1 * cj[k];      // primal update
-        // Lateral update: spike j propagates -k1 * G[:,j] to coupled rows.
-        const double* Gj = G + static_cast<std::size_t>(j) * m;
-        for (int i = 0; i < m; ++i) r[i] -= k1 * Gj[i];
+        if (kind == 0) {
+            // (row_scale[j] > 0 is guaranteed here: degenerate rows have
+            // scale 0, so their distance is 0 <= constraint_tol.)
+            const double k1 = r[j] / c_norms_sq[j];
+            const double* cj = C + static_cast<std::size_t>(j) * n;
+            for (int k = 0; k < n; ++k) x[k] -= k1 * cj[k];  // primal update
+            // Lateral update: spike j propagates -k1 * G[:,j] to coupled rows.
+            const double* Gj = G + static_cast<std::size_t>(j) * m;
+            for (int i = 0; i < m; ++i) r[i] -= k1 * Gj[i];
+        } else {
+            // Facet spike: exact single-coordinate correction to the bound.
+            const double delta = (kind == 1) ? best : -best;  // signed move
+            x[j] += delta;
+            // Lateral update through column j of C (row-major: stride n).
+            for (int i = 0; i < m; ++i)
+                r[i] += delta * C[static_cast<std::size_t>(i) * n + j];
+        }
         ++n_iters;
     }
-    return n_iters;
-}
 
-// ----------------------------------------------------------------------------
-// Box clipping -- mirrors SNNSolver._clip_to_bounds
-// ----------------------------------------------------------------------------
-inline void clip_to_bounds(double* x, int n,
-                           bool has_lower, double lower,
-                           bool has_upper, double upper) {
-    if (has_lower) for (int i = 0; i < n; ++i) if (x[i] < lower) x[i] = lower;
-    if (has_upper) for (int i = 0; i < n; ++i) if (x[i] > upper) x[i] = upper;
+    // Cap hit: abort-worthy only if the joint violation is still above tol.
+    // Recompute the residual fresh (not the incrementally-drifted r) so the
+    // abort decision matches the Python reference bit-for-bit.
+    const double mv = joint_max_violation(C, d, row_scale, x, n, m,
+                                          has_lower, lower, has_upper, upper,
+                                          r, parallel);
+    if (mv > constraint_tol) *budget_exhausted = true;
+    return n_iters;
 }
 
 // ----------------------------------------------------------------------------
@@ -249,10 +336,11 @@ inline double projected_gradient_norm(const double* x,
 // ----------------------------------------------------------------------------
 inline Result solve_euler(const double* A, const double* b,
                           const double* C, const double* d,
-                          const double* c_norms_sq, const double* G,
+                          const double* c_norms_sq, const double* row_scale,
+                          const double* G,
                           int n, int m,
                           double k0, double constraint_tol,
-                          int max_iterations, int max_projection_iters,
+                          int max_iterations, int proj_cap,
                           bool enable_early_stopping, int check_every,
                           int min_iterations, int window_size, int patience,
                           double obj_rel_tol, double x_rel_tol,
@@ -295,13 +383,19 @@ inline Result solve_euler(const double* A, const double* b,
         // Phase 1: gradient descent step  (gradient = A x + b)
         for (int i = 0; i < n; ++i) x[i] -= k0 * (Ax[i] + b[i]);
 
-        // Phase 2: project to feasible region
-        n_projections += project_adaptive(x.data(), C, d, c_norms_sq, G, n, m,
-                                          constraint_tol, max_projection_iters,
-                                          r.data(), parallel);
-
-        // Phase 3: clip to box constraints
-        clip_to_bounds(x.data(), n, has_lower, lower, has_upper, upper);
+        // Phase 2: unified projection sweep (rows + implicit box facets).
+        // (v0.5.0: the former Phase-3 terminal box clip is gone -- bounds are
+        // facets inside the sweep; clipping here broke rows.)
+        bool budget_exhausted = false;
+        n_projections += project_unified(x.data(), C, d, c_norms_sq, row_scale,
+                                         G, n, m, constraint_tol, proj_cap,
+                                         has_lower, lower, has_upper, upper,
+                                         r.data(), parallel, &budget_exhausted);
+        if (budget_exhausted) {
+            reason_code = REASON_PROJECTION_BUDGET;
+            iterations_used = it + 1;
+            break;
+        }
 
         // Objective for the plateau check -- reuse the A @ x needed next iter.
         apply_hessian(A, a_diag, use_diag, x.data(), Ax.data(), n, parallel);
@@ -324,8 +418,11 @@ inline Result solve_euler(const double* A, const double* b,
 
         // Feasibility gate first: if infeasible the outcome is "not converged"
         // regardless of the other criteria, so the early skip is exact.
+        // v0.5.0: JOINT geometric violation (rows as distances + box facets).
         if (require_feas &&
-            max_violation(C, d, x.data(), n, m, r.data(), parallel) > feasibility_tol) {
+            joint_max_violation(C, d, row_scale, x.data(), n, m,
+                                has_lower, lower, has_upper, upper,
+                                r.data(), parallel) > feasibility_tol) {
             patience_counter = 0;
             continue;
         }
