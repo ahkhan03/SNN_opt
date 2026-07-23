@@ -103,7 +103,7 @@ $$\alpha = \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2}$$
 
 This adaptive step eliminates $k_1$ as a hyperparameter and projects exactly onto the boundary in one step per constraint.
 
-**Neuromorphic Interpretation:** The adaptive projection is equally neuromorphic—it corresponds to a neuron that resets its membrane potential exactly to the threshold after firing, rather than decaying by a fixed amount. Both are valid integrate-and-fire models.
+**Neuromorphic Interpretation:** The adaptive projection is equally neuromorphic: it corresponds to a neuron that resets its membrane potential exactly to the threshold after firing, rather than decaying by a fixed amount. Both are valid integrate-and-fire models.
 
 ### 2.4 Algorithm Dynamics
 
@@ -499,24 +499,43 @@ Many optimization problems include simple bound constraints (box constraints):
 
 $$l_i \leq y_i \leq u_i$$
 
-While these can be expressed as linear inequalities, a more efficient and numerically stable approach is **clipping**:
+Since v0.5.0 these are handled as **implicit unit-normal facets inside the same
+projection sweep** that handles the rows of $\mathbf{C}$. A bound behaves as one
+more constraint the population can spike against; because its normal is a single
+coordinate axis, the correction is an $O(1)$ single-coordinate update with an
+$O(m)$ lateral residual refresh, rather than a general $O(n)$ projection. Bounds
+therefore cost less than encoding them as rows, without being handled by a
+separate mechanism.
 
-$$\mathbf{y} \leftarrow \text{clip}(\mathbf{y}, \mathbf{l}, \mathbf{u})$$
+> **Historical note, and a correction to earlier versions of this document.**
+> Before v0.5.0 bounds were enforced by a **terminal clip** applied *after* the
+> halfspace sweep, with nothing re-projecting behind it, and this section
+> recommended that design. **That recommendation was wrong.** Clipping onto the
+> box after projecting onto a halfspace is a sequential projection onto two sets,
+> and sequential projection onto two sets is not projection onto their
+> intersection: this is the classical POCS failure. When a bound and an
+> interacting row are simultaneously active, the clip pushes the iterate back out
+> of the halfspace, the sweep pushes it back out of the box, and the solve stalls
+> at a point that is feasible for neither. The signature is a box violation of
+> exactly $0$ next to a small but stubborn row violation, and an objective that
+> can come in *below* the true optimum, which is impossible for a feasible point.
+>
+> The previous text also claimed the two mechanisms "decouple". They do not, and
+> the case where they interact most strongly is precisely the SVM dual below,
+> where the box $0 \le \alpha_i \le C$ and the equality
+> $\mathbf{y}^\top\boldsymbol{\alpha} = 0$ are both active at the solution.
 
-applied after each gradient descent and projection step.
+**Neuromorphic interpretation:** a bound corresponds to **neuron saturation**.
+Biological neurons have natural firing-rate bounds: a neuron cannot fire at
+negative rates (lower bound) and has a maximum rate set by its refractory period
+(upper bound). Treating that saturation as one more facet the population spikes
+against keeps the interpretation while making the geometry correct.
 
-**Why clipping is better than projection for box constraints:**
-
-1. **Efficiency:** Single operation per variable vs. iterative projection
-2. **Stability:** No oscillation between box constraint boundaries
-3. **Decoupling:** Box constraints don't interfere with equality constraint projections
-
-**Neuromorphic interpretation:** Clipping corresponds directly to **neuron saturation**—biological neurons have natural firing rate bounds. A neuron cannot fire at negative rates (lower bound) and has a maximum firing rate due to refractory periods (upper bound). This is more neuromorphic than treating bounds as linear inequality constraints!
-
-**Application to SVM:** For the SVM dual problem with $0 \leq \alpha_i \leq C$:
-- Set `lower_bound=0` and `upper_bound=C`
-- Only the equality constraint $\mathbf{y}^\top \boldsymbol{\alpha} = 0$ needs projection
-- This dramatically improves convergence and stability
+**Application to SVM:** for the SVM dual with $0 \leq \alpha_i \leq C$ and the
+equality $\mathbf{y}^\top \boldsymbol{\alpha} = 0$, set `lower_bound=0` and
+`upper_bound=C` and let the unified sweep resolve the bounds and the equality
+together. On v0.5.0 or later, check `result.joint_feasible` rather than the
+row-only violation: the joint measure is the one that accounts for both.
 
 ### 7.6 Extension to Equality Constraints
 
@@ -586,7 +605,7 @@ The adaptive projection coefficient $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ **is*
 | Adaptive projection | Primal feasibility | Projects onto $\mathbf{C}\mathbf{x} + \mathbf{d} = \mathbf{0}$ |
 | $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ | Dual variable | Computed implicitly during projection |
 | Only project when $g_j > 0$ | Complementary slackness | $\lambda_j = 0$ when constraint inactive |
-| Box clipping | Box feasibility | $\mathbf{x} \in [\mathbf{l}, \mathbf{u}]$ |
+| Implicit bound facets | Box feasibility | Bounds join the same sweep, so $\mathbf{x} \in [\mathbf{l}, \mathbf{u}]$ holds *jointly* with $\mathbf{C}\mathbf{x} + \mathbf{d} \le \mathbf{0}$ (see 7.5) |
 
 **Neuromorphic Interpretation of KKT:**
 

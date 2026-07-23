@@ -1,17 +1,20 @@
-"""Figure 1 — convergence diagnostics for a representative QP.
+"""Figure 1: convergence diagnostics for a representative QP.
 
-Solves a 50-D random PSD QP with linear inequalities and plots, side by side:
+Solves a 50-D random PSD QP with 30 linear inequalities and plots, side by side:
 
-    (a) objective gap |f(x_t) - f*| vs iteration (log y),
-    (b) iterate stability ||x_{t+1} - x_t||_2 vs iteration (log y) — the
-        natural convergence metric for projected-gradient flows; for an
-        inequality-constrained problem the raw gradient norm does *not* go
-        to zero (a strictly active constraint balances it),
-    (c) maximum constraint violation vs iteration (log y).
+    (a) objective gap |f(x_t) - f*| against the EXACT optimum (log y),
+    (b) iterate stability ||x_{t+1} - x_t||_2 (log y), the natural convergence
+        metric for a projected-gradient flow: with a strictly active constraint
+        balancing it, the raw gradient norm does not go to zero,
+    (c) maximum constraint violation (log y).
 
-The reference optimum f* is taken from a high-iteration run so the gap is
-well-defined; this is the same trick used in the SNN-X papers when a
-closed-form optimum is not available.
+The reference f* comes from `qpref.solve_exact`, an active-set KKT solve, and
+NOT from a long run of `snn_opt` itself. That distinction matters: measuring the
+solver against its own fixed point cannot reveal a standing offset between that
+fixed point and the true minimiser, and on this problem there is one. The gap
+descends geometrically for roughly 1800 iterations and then settles onto an
+accuracy floor set by the step size k0. `04_accuracy_tuning.py` maps that floor
+against k0; `docs/theory.md` explains where it comes from.
 """
 
 from __future__ import annotations
@@ -26,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 import matplotlib.pyplot as plt
 
-import figstyle  # noqa: F401  (sets global rcParams on import)
-from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, ConvergenceConfig
+import figstyle
+import qpref
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 
 def random_qp(n: int, m: int, seed: int = 0):
@@ -46,13 +50,8 @@ def main() -> int:
     n, m = 50, 30
     A, b, C, d, x0 = random_qp(n, m, seed=7)
 
-    # Reference optimum: long run, tight tolerances, no early stop.
-    cfg_ref = SolverConfig(
-        max_iterations=20_000,
-        convergence=ConvergenceConfig(enable_early_stopping=False),
-    )
-    ref = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), cfg_ref).solve(x0)
-    f_star = ref.final_objective
+    # Independent reference optimum (active-set KKT, exact to ~1e-10).
+    x_star, f_star, active = qpref.solve_exact(A, b, C, d)
 
     cfg = SolverConfig(max_iterations=4_000)
     res = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), cfg).solve(x0)
@@ -64,26 +63,43 @@ def main() -> int:
     step = np.maximum(np.concatenate([[step[0]], step]), 1e-16)
     viol = np.maximum(res.constraint_violations, 1e-16)
 
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0))
+    # Past the knee the iterate alternates between two points. Report both
+    # branches of that cycle rather than a single meaningless average.
+    tail = gap[int(0.75 * len(gap)) :]
+    lo, hi = float(tail.min()), float(tail.max())
 
-    axes[0].semilogy(iters, gap, label=r"$|f(x_t) - f^\star|$")
+    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.1))
+
+    # (a) objective gap. Past the knee the iterate settles into a period-2 limit
+    # cycle, so the raw trace alternates every step and plots as a solid block.
+    # Splitting it by parity draws the two branches of the cycle instead.
+    axes[0].semilogy(
+        iters[::2], gap[::2], color=figstyle.OBJECTIVE, linewidth=1.2, label="even $t$"
+    )
+    axes[0].semilogy(
+        iters[1::2], gap[1::2], color=figstyle.PURPLE, linewidth=1.2, label="odd $t$"
+    )
     axes[0].set_xlabel("iteration $t$")
-    axes[0].set_ylabel("objective gap")
-    axes[0].set_title("(a) objective convergence")
+    axes[0].set_ylabel(r"$|f(x_t) - f^\star|$")
+    figstyle.panel_title(axes[0], "(a) objective gap vs exact optimum")
+    axes[0].legend(loc="upper right", title="limit cycle branch", title_fontsize=8.0)
 
-    axes[1].semilogy(iters, step, color=figstyle.PALETTE[1])
+    # (b) iterate stability.
+    axes[1].semilogy(iters, step, color=figstyle.STABILITY, linewidth=1.1)
     axes[1].set_xlabel("iteration $t$")
     axes[1].set_ylabel(r"$\|x_{t+1} - x_t\|_2$")
-    axes[1].set_title("(b) iterate stability")
+    figstyle.panel_title(axes[1], "(b) iterate stability")
 
-    axes[2].semilogy(iters, viol, color=figstyle.PALETTE[2])
+    # (c) feasibility.
+    axes[2].semilogy(iters, viol, color=figstyle.FEASIBILITY, linewidth=1.1)
     axes[2].set_xlabel("iteration $t$")
-    axes[2].set_ylabel("max violation")
-    axes[2].set_title("(c) feasibility")
+    axes[2].set_ylabel("max constraint violation")
+    figstyle.panel_title(axes[2], "(c) feasibility")
 
     fig.suptitle(
-        f"snn_opt convergence on a random {n}-D QP with {m} inequality constraints",
-        y=1.04,
+        f"snn_opt on a random {n}-D QP with {m} inequalities "
+        f"({len(active)} active at the optimum)",
+        y=1.03,
     )
     fig.tight_layout()
 
@@ -91,9 +107,17 @@ def main() -> int:
     plt.close(fig)
     print("wrote:", *paths, sep="\n  ")
     print(
-        f"\nDiagnostic — converged={res.converged} ({res.convergence_reason}), "
-        f"iter={res.iterations_used}, projections={res.n_projections}, "
-        f"final gap={gap[-1]:.2e}"
+        f"\nDiagnostic: converged={res.converged} ({res.convergence_reason}), "
+        f"iter={res.iterations_used}, projections={res.n_projections}"
+    )
+    print(
+        f"  exact f*            = {f_star:.12f}   (active set: {active.tolist()})\n"
+        f"  snn_opt f           = {res.final_objective:.12f}\n"
+        f"  limit cycle gap     = {lo:.3e} .. {hi:.3e} (period 2)\n"
+        f"  ||x - x*||          = {np.linalg.norm(res.final_x - x_star):.3e}\n"
+        f"  joint_feasible      = {res.joint_feasible}  "
+        f"(max row distance {res.max_distance_rows:.2e})\n"
+        f"  stationarity        = {res.stationarity_residual:.3e}"
     )
     return 0
 

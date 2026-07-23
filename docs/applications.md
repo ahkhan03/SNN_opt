@@ -8,7 +8,7 @@ print.
 
 ## Published
 
-- **Khan, Mohammed & Li (2025)** — *Portfolio Optimization: A Neurodynamic
+- **Khan, Mohammed & Li (2025)**, *Portfolio Optimization: A Neurodynamic
   Approach Based on Spiking Neural Networks.* **Biomimetics**, 10(12):808.
   [doi:10.3390/biomimetics10120808](https://doi.org/10.3390/biomimetics10120808).
   The portfolio-selection problem is recast as a constrained QP and solved
@@ -18,15 +18,15 @@ print.
   spike events.
 
 A broader survey of SNN training and hardware accompanies this work:
-**Khan et al. (2025)** — *Spiking Neural Networks: A Comprehensive Survey
+**Khan et al. (2025)**, *Spiking Neural Networks: A Comprehensive Survey
 of Training Methodologies, Hardware Implementations and Applications,*
 **Artificial Intelligence Science and Engineering**.
 [doi:10.23919/AISE.2025.000013](https://doi.org/10.23919/AISE.2025.000013).
 
 ## In preparation
 
-Additional applications of the framework — covering further classical
-ML reductions and control problems — are at various stages of preparation
+Additional applications of the framework, covering further classical
+ML reductions and control problems, are at various stages of preparation
 and review. Entries will be added here as they are accepted for
 publication.
 

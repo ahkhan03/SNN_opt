@@ -7,21 +7,20 @@ longer-form companion.
 
 ## Pages
 
-- [**Theory**](theory.md) — Full derivation of the SNN/convex-optimization
+- [**Theory**](theory.md): full derivation of the SNN/convex-optimization
   equivalence, the eigenvalue-based step-size analysis, projection
   geometry, and convergence criteria. Begins from LIF dynamics and arrives
   at the projected-gradient algorithm implemented in
   [`src/snn_opt/solver.py`](../src/snn_opt/solver.py).
-- [**Applications**](applications.md) — One-page catalogue of the SNN-X
-  publication series (PCA, Ridge, TDSVM, Norm, SVM, CF, KRR, Procrustes,
-  LinReg) and the applied projects that use this solver as their inner
-  loop (EnergyPlus MPC, SUMO traffic, image denoising).
-- [**API reference**](api.md) — Hand-curated reference for every public
+- [**Applications**](applications.md): catalogue of the published work
+  that uses this solver, with DOI links. Entries are added as the
+  corresponding work appears in print.
+- [**API reference**](api.md): hand-curated reference for every public
   symbol exported from `snn_opt`. The repository is small enough that this
   is faster than auto-generated docs.
-- [**Benchmarks**](../benchmarks/README.md) — How the convergence,
-  spike-raster, and warm-start figures embedded in the README are
-  produced; how to regenerate them; and what each one shows.
+- [**Benchmarks**](../benchmarks/README.md): how the convergence,
+  spike-raster, warm-start and accuracy-tuning figures embedded in the
+  README are produced, how to regenerate them, and what each one shows.
 
 ## Companion website
 

@@ -20,11 +20,18 @@ This shows the raw "integrate-and-fire" dynamics.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+# Shared figure style, so this figure matches the benchmark suite and the site.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+import figstyle
 from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, ConvergenceConfig
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
@@ -97,96 +104,78 @@ def main():
     print()
     
     # ===== PLOTTING =====
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # ----- Plot 1: x1, x2 vs time -----
-    ax1 = axes[0]
     t = result.t
     X = result.X
-    
-    ax1.plot(t, X[:, 0], 'b-', linewidth=1.5, label='$x_1$')
-    ax1.plot(t, X[:, 1], 'r-', linewidth=1.5, label='$x_2$')
-    
-    # Mark spike events
-    if len(result.spike_times) > 0:
-        for spike_t in result.spike_times:
-            ax1.axvline(x=spike_t, color='orange', alpha=0.3, linestyle='--', linewidth=0.8)
-    
-    # Mark analytical solution
-    ax1.axhline(y=x_analytical[0], color='b', linestyle=':', alpha=0.5, label=f'$x_1^*$ = {x_analytical[0]:.2f}')
-    ax1.axhline(y=x_analytical[1], color='r', linestyle=':', alpha=0.5, label=f'$x_2^*$ = {x_analytical[1]:.2f}')
-    
-    ax1.set_xlabel('Iteration', fontsize=12)
-    ax1.set_ylabel('Variable Value', fontsize=12)
-    ax1.set_title('State Evolution Over Time\n(orange lines = projection spikes)', fontsize=12)
-    ax1.legend(loc='upper right')
-    ax1.grid(True, alpha=0.3)
-    ax1.set_xlim([0, len(t)])
-    
-    # ----- Plot 2: x1 vs x2 with contours and constraints -----
-    ax2 = axes[1]
-    
-    # Create grid for contours
-    x1_range = np.linspace(-0.5, 2.5, 300)
-    x2_range = np.linspace(-0.5, 1.5, 300)
+    spikes = result.spike_times.astype(int)
+    spikes = spikes[spikes < len(X)]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.0, 4.0))
+
+    # ----- Panel (a): state vs iteration, with a spike rug -----
+    ax1.plot(t, X[:, 0], color=figstyle.BLUE, linewidth=1.4, label="$x_1$")
+    ax1.plot(t, X[:, 1], color=figstyle.VERMILION, linewidth=1.4, label="$x_2$")
+    ax1.axhline(x_analytical[0], color=figstyle.BLUE, linestyle=":", linewidth=1.0,
+                alpha=0.8, label=f"$x_1^\\star$ = {x_analytical[0]:.2f}")
+    ax1.axhline(x_analytical[1], color=figstyle.VERMILION, linestyle=":", linewidth=1.0,
+                alpha=0.8, label=f"$x_2^\\star$ = {x_analytical[1]:.2f}")
+
+    # A rug of projection events along the bottom. Drawing one full-height
+    # vertical line per spike (the previous version) washes the whole panel
+    # orange once there are hundreds of them and hides the traces underneath.
+    lo, hi = X.min() - 0.12, X.max() + 0.08
+    ax1.eventplot(spikes, lineoffsets=lo + 0.03, linelengths=0.05,
+                  colors=figstyle.PURPLE, linewidths=0.6, alpha=0.75)
+    ax1.annotate(f"projection spikes ({len(spikes)})", xy=(0.02, lo + 0.07),
+                 xycoords=("axes fraction", "data"), fontsize=8.0, color=figstyle.PURPLE)
+    ax1.set_ylim(lo, hi)
+    ax1.set_xlim(0, len(t))
+    ax1.set_xlabel("iteration")
+    ax1.set_ylabel("state value")
+    figstyle.panel_title(ax1, "(a) state evolution")
+    ax1.legend(loc="upper right", ncol=2)
+
+    # ----- Panel (b): trajectory in state space -----
+    x1_range = np.linspace(-0.4, 2.4, 300)
+    x2_range = np.linspace(-0.4, 1.4, 300)
     X1, X2 = np.meshgrid(x1_range, x2_range)
-    
-    # Objective function contours: f(x) = 0.5 * (x1² + x2²)
     Z = 0.5 * (X1**2 + X2**2)
-    
-    # Constraints (in standard form Cx + d <= 0)
-    # C1: -x1 - 2*x2 + 1 <= 0  =>  x1 + 2*x2 >= 1
-    # C2:  x1 - 3*x2 + 1 <= 0  =>  -x1 + 3*x2 >= 1
-    C1 = -X1 - 2*X2 + 1
-    C2 = X1 - 3*X2 + 1
-    feasible = (C1 <= 0) & (C2 <= 0)
-    
-    # Plot objective contours
-    contour_levels = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0]
-    cs = ax2.contour(X1, X2, Z, levels=contour_levels, colors='gray', alpha=0.6, linestyles='-')
-    ax2.clabel(cs, inline=True, fontsize=8, fmt='%.2f')
-    
-    # Shade feasible region
-    ax2.contourf(X1, X2, feasible.astype(float), levels=[0.5, 1.5], 
-                 colors=['lightgreen'], alpha=0.4)
-    
-    # Plot constraint boundaries (using purple and teal to avoid confusion with x1/x2 colors)
-    ax2.contour(X1, X2, C1, levels=[0], colors=['purple'], linewidths=2, linestyles=['-'])
-    ax2.contour(X1, X2, C2, levels=[0], colors=['teal'], linewidths=2, linestyles=['-'])
-    
-    # Plot trajectory
-    ax2.plot(X[:, 0], X[:, 1], 'k-', alpha=0.6, linewidth=1, label='Trajectory')
-    
-    # Mark key points
-    ax2.plot(X[0, 0], X[0, 1], 'go', markersize=12, label='Start', zorder=10)
-    ax2.plot(X[-1, 0], X[-1, 1], 'r*', markersize=15, label='End', zorder=10)
-    ax2.plot(0, 0, 'kx', markersize=12, markeredgewidth=2, label='Unconstrained min (infeasible)')
-    ax2.plot(x_analytical[0], x_analytical[1], 'b^', markersize=10, 
-             label=f'Analytical opt ({x_analytical[0]:.2f}, {x_analytical[1]:.2f})', zorder=10)
-    
-    # Mark spike locations
-    if len(result.spike_times) > 0:
-        spike_indices = result.spike_times.astype(int)
-        spike_indices = spike_indices[spike_indices < len(X)]
-        if len(spike_indices) > 0:
-            ax2.scatter(X[spike_indices, 0], X[spike_indices, 1], 
-                       c='orange', s=30, alpha=0.8, zorder=5, 
-                       edgecolors='black', linewidths=0.5, label='Spikes')
-    
-    ax2.set_xlabel('$x_1$', fontsize=12)
-    ax2.set_ylabel('$x_2$', fontsize=12)
-    ax2.set_title('Trajectory in State Space\n(contours = objective, green = feasible region)', fontsize=12)
-    ax2.legend(loc='lower right', fontsize=9)
-    ax2.set_xlim([-0.3, 2.3])
-    ax2.set_ylim([-0.3, 1.3])
-    ax2.set_aspect('equal')
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    output_path = Path(__file__).parent / 'example1_basic_2d.png'
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Figure saved to {output_path}")
-    plt.show()
+    g1 = -X1 - 2 * X2 + 1
+    g2 = X1 - 3 * X2 + 1
+    feasible = (g1 <= 0) & (g2 <= 0)
+
+    cs = ax2.contour(X1, X2, Z, levels=[0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 3.0],
+                     colors=figstyle.RULE, linewidths=0.7)
+    ax2.clabel(cs, inline=True, fontsize=7, fmt="%.2f")
+    ax2.contourf(X1, X2, feasible.astype(float), levels=[0.5, 1.5],
+                 colors=[figstyle.GREEN], alpha=0.10)
+    ax2.contour(X1, X2, g1, levels=[0], colors=[figstyle.MUTED], linewidths=1.0)
+    ax2.contour(X1, X2, g2, levels=[0], colors=[figstyle.MUTED], linewidths=1.0,
+                linestyles="--")
+
+    ax2.plot(X[:, 0], X[:, 1], color=figstyle.INK, linewidth=0.9, alpha=0.85,
+             zorder=3, label="trajectory")
+    if spikes.size:
+        ax2.scatter(X[spikes, 0], X[spikes, 1], s=14, color=figstyle.PURPLE,
+                    alpha=0.75, zorder=4, label=f"spikes ({len(spikes)})")
+    ax2.scatter(*X[0], s=44, color=figstyle.BLUE, marker="o", zorder=6, label="start")
+    ax2.scatter(0, 0, s=44, color=figstyle.MUTED, marker="x", zorder=6,
+                label="unconstrained min (infeasible)")
+    ax2.scatter(*x_analytical, s=95, color=figstyle.VERMILION, marker="*", zorder=6,
+                label=r"analytical $x^\star$")
+
+    ax2.set_xlim(-0.3, 2.3)
+    ax2.set_ylim(-0.3, 1.3)
+    ax2.set_aspect("equal")
+    ax2.set_xlabel("$x_1$")
+    ax2.set_ylabel("$x_2$")
+    figstyle.panel_title(ax2, "(b) trajectory over objective contours")
+    ax2.legend(loc="upper right", fontsize=7.5)
+
+    fig.tight_layout()
+    output_path = Path(__file__).resolve().parent / "example1_basic_2d.png"
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+    print(f"Figure saved to {output_path.relative_to(_ROOT)}")
 
 
 if __name__ == "__main__":

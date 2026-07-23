@@ -1,17 +1,20 @@
-"""Figure 3 — warm-start speedup on a sequence of related QPs.
+"""Figure 3: warm-start speedup on a sequence of related QPs.
 
-Builds a sequence of 30 small (n=5) QPs whose Hessian and constraint matrix
-are *identical*, but whose linear cost ``b_k`` drifts slowly — a stylized
-receding-horizon-control workload. Each problem is solved twice:
+Builds a sequence of 30 small (n=5) QPs whose Hessian and constraint matrix are
+*identical* but whose linear cost b_k drifts slowly, a stylised receding-horizon
+control workload. Each problem is solved twice:
 
-    1. cold-started from a fixed ``x = 0``,
+    1. cold-started from a fixed x = 0,
     2. warm-started from the previous problem's solution.
 
-Early stopping is enabled in both branches so the wall time and projection
-count reflect *time-to-convergence*, not a fixed iteration cap. The
-side-by-side plot shows that warm starting collapses both metrics — exactly
-the property an SNN solver inherits from the underlying projected-gradient
-flow, and the reason this dynamic suits MPC-style problems.
+Early stopping is enabled in both branches, so both metrics reflect
+time-to-convergence rather than a fixed iteration cap.
+
+Iteration count is the headline because it is deterministic: rerun this script
+and it reproduces exactly. Wall time is reported alongside it, as the median of
+`REPEATS` timed runs per problem, because a single timing pass picks up
+scheduler noise that has nothing to do with the solver (the previous version of
+this figure showed two such spikes and they were indistinguishable from signal).
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np
 import matplotlib.pyplot as plt
 
-import figstyle  # noqa: F401
-from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, ConvergenceConfig
+import figstyle
+from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
+
+REPEATS = 5      # timed runs per problem; the median is plotted
 
 
 def build_sequence(n: int = 5, m: int = 4, n_problems: int = 30, seed: int = 1):
@@ -44,8 +49,8 @@ def build_sequence(n: int = 5, m: int = 4, n_problems: int = 30, seed: int = 1):
     return A, C, d, bs
 
 
-def solve_one(A, b, C, d, x0):
-    cfg = SolverConfig(
+def _config() -> SolverConfig:
+    return SolverConfig(
         max_iterations=4_000,
         convergence=ConvergenceConfig(
             enable_early_stopping=True,
@@ -55,58 +60,65 @@ def solve_one(A, b, C, d, x0):
             patience=2,
         ),
     )
-    solver = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), cfg)
-    t0 = time.perf_counter()
+
+
+def solve_one(A, b, C, d, x0):
+    """Solve once for the result, then time `REPEATS` more runs and take the median."""
+    solver = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), _config())
     res = solver.solve(x0)
-    return res, time.perf_counter() - t0
+
+    times = []
+    for _ in range(REPEATS):
+        s = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), _config())
+        t0 = time.perf_counter()
+        s.solve(x0)
+        times.append(time.perf_counter() - t0)
+    return res, float(np.median(times))
 
 
 def main() -> int:
     A, C, d, bs = build_sequence()
     n = A.shape[0]
 
-    cold_t, cold_p, cold_i = [], [], []
-    warm_t, warm_p, warm_i = [], [], []
+    cold_t, cold_i, warm_t, warm_i = [], [], [], []
     cold_x0 = np.zeros(n)
     warm_x = np.zeros(n)
 
     for b in bs:
         r_c, t_c = solve_one(A, b, C, d, cold_x0)
         cold_t.append(t_c)
-        cold_p.append(r_c.n_projections)
         cold_i.append(r_c.iterations_used)
 
         r_w, t_w = solve_one(A, b, C, d, warm_x.copy())
         warm_t.append(t_w)
-        warm_p.append(r_w.n_projections)
         warm_i.append(r_w.iterations_used)
         warm_x = r_w.final_x
 
-    cold_t, warm_t = np.asarray(cold_t), np.asarray(warm_t)
+    cold_t, warm_t = np.asarray(cold_t) * 1e3, np.asarray(warm_t) * 1e3
     cold_i, warm_i = np.asarray(cold_i), np.asarray(warm_i)
     idx = np.arange(len(bs))
 
     fig, axes = plt.subplots(1, 2, figsize=(9.5, 3.2))
 
-    axes[0].plot(idx, cold_t * 1e3, marker="o", label="cold start", color=figstyle.PALETTE[0])
-    axes[0].plot(idx, warm_t * 1e3, marker="s", label="warm start", color=figstyle.PALETTE[1])
-    axes[0].set_xlabel("problem index $k$")
-    axes[0].set_ylabel("wall time (ms)")
-    axes[0].set_title("(a) per-problem solve time")
-    axes[0].legend(frameon=False)
+    for ax, cold, warm, ylabel, title in (
+        (axes[0], cold_i, warm_i, "iterations to converge", "(a) iterations, deterministic"),
+        (axes[1], cold_t, warm_t, "wall time (ms)", f"(b) wall time, median of {REPEATS}"),
+    ):
+        ax.plot(idx, cold, marker="o", markersize=3.5, color=figstyle.BLUE, label="cold start")
+        ax.plot(idx, warm, marker="s", markersize=3.5, color=figstyle.VERMILION, label="warm start")
+        ax.set_xlabel("problem index $k$")
+        ax.set_ylabel(ylabel)
+        figstyle.panel_title(ax, title)
+        ax.set_ylim(0, max(cold.max(), warm.max()) * 1.18)
+        ax.legend(loc="lower right", ncol=2)
 
-    axes[1].plot(idx, cold_i, marker="o", label="cold start", color=figstyle.PALETTE[0])
-    axes[1].plot(idx, warm_i, marker="s", label="warm start", color=figstyle.PALETTE[1])
-    axes[1].set_xlabel("problem index $k$")
-    axes[1].set_ylabel("iterations to converge")
-    axes[1].set_title("(b) per-problem iteration count")
-    axes[1].legend(frameon=False)
-
-    sp_t = cold_t.mean() / max(warm_t.mean(), 1e-9)
-    sp_i = cold_i.mean() / max(warm_i.mean(), 1e-9)
+    # Warm start pays from the second problem onward; problem 0 has nothing to
+    # reuse, so quote the speedup over the steady-state tail rather than the mean.
+    sp_i = cold_i[1:].mean() / max(warm_i[1:].mean(), 1e-9)
+    sp_t = cold_t[1:].mean() / max(warm_t[1:].mean(), 1e-9)
     fig.suptitle(
-        f"Warm-start vs cold-start on {len(bs)} drifting QPs (n={n}) — "
-        f"mean speedup: {sp_t:.1f}× time, {sp_i:.1f}× iterations",
+        f"Warm start vs cold start on {len(bs)} drifting QPs (n={n}): "
+        f"{sp_i:.1f}x fewer iterations, {sp_t:.1f}x faster from k=1 onward",
         y=1.04,
     )
     fig.tight_layout()
@@ -115,8 +127,9 @@ def main() -> int:
     plt.close(fig)
     print("wrote:", *paths, sep="\n  ")
     print(
-        f"summary — cold mean: {cold_t.mean()*1e3:.2f} ms / {cold_i.mean():.0f} iter; "
-        f"warm mean: {warm_t.mean()*1e3:.2f} ms / {warm_i.mean():.0f} iter"
+        f"summary (k>=1): cold {cold_t[1:].mean():.2f} ms / {cold_i[1:].mean():.0f} iter; "
+        f"warm {warm_t[1:].mean():.2f} ms / {warm_i[1:].mean():.0f} iter; "
+        f"speedup {sp_i:.2f}x iterations, {sp_t:.2f}x time"
     )
     return 0
 

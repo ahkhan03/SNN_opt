@@ -4,6 +4,45 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation and figures
+
+Documentation and visualisation overhaul. No solver behaviour changed; the code
+under `src/` is untouched.
+
+- **All figures regenerated against v0.5.0.** Every figure in the repository
+  predated the v0.5.0 projection rewrite by three to seven months.
+- **Benchmark reference optima are now exact.** New `benchmarks/qpref.py`
+  computes the optimum by an active-set KKT solve (NumPy only, ~1e-10). The
+  previous convention took the reference from a long run of `snn_opt` itself,
+  which measures the solver against its own fixed point and so could not reveal
+  the standing offset between that fixed point and the true minimiser. On the
+  Figure 1 problem that offset is 6.7e-4 and had been reported as ~1e-6.
+- **New Figure 4** (`04_accuracy_tuning.py`) maps the objective gap against
+  `k0_scale` at three iteration budgets.
+- **Figure 2 reworked** onto an 8-D polytope problem with genuine active-set
+  turnover. The old box problem reached its answer in about three iterations and
+  every active face then fired on every step, so the raster was solid bars.
+- **`benchmarks/run_all.py` fixed.** Each script ends in `sys.exit(main())` and
+  the runner did not catch `SystemExit`, so it stopped after the first script
+  while still exiting 0. It had been regenerating only Figure 1.
+- **`examples/example_raw_mode.py` fixed.** Its demo problem had a feasible
+  unconstrained minimiser, so no constraint ever bound and the convergence panel
+  plotted the objective *value* underflowing toward `f* = 0` (down to 1e-113),
+  which the README quoted as "30 orders of magnitude per 100 iterations". The
+  start marker also fell outside the axes and the spike markers never rendered.
+- **`docs/theory.md` §7.5 corrected.** It still recommended the terminal box
+  clip removed in v0.5.0, including the claim that bounds and row projections
+  "decouple". They do not, which is the POCS failure v0.5.0 fixed.
+- **README and `docs/api.md`** now document `joint_feasible`,
+  `stationarity_residual` and `projection_budget_exhausted`, carry a new
+  "Accuracy and tuning" section, and correct the eigenbasis transform entry
+  (v0.5.0 accepts box bounds; the docs still said it rejects them).
+- Version metadata synchronised to 0.5.0 in the README badge, the citation
+  snippet and `CITATION.cff`, all of which still said 0.4.0.
+- Em-dashes removed from public-facing documentation and figure text.
+
 ## [0.5.0] — 2026-07-15
 
 ### Fixed
