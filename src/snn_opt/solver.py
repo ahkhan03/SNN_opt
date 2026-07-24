@@ -265,12 +265,13 @@ class SolverResult:
     max_violation_box : float
         Max box-bound violation (already a distance; unit normals).
     stationarity_residual : float
-        KKT stationarity certificate: min over mu >= 0 of
-        ||grad f(x) + sum_i mu_i a_i|| with a_i the active unified (normalized)
-        constraint normals, computed by NNLS at the final point. NaN if the
-        certificate could not be computed. NOTE: `converged` detects the
-        network's fixed point; this residual quantifies how close that fixed
-        point is to a KKT point (the O(k0) floor -- see paper Sec. III).
+        eps-KKT residual at the final point: the maximum of stationarity,
+        complementarity, and primal defects on the eps-active unified
+        (normalized) constraints, with
+        eps = max(10 * constraint_tol, 3 * k0 * ||grad f(x)||). Stationarity
+        is fitted by NNLS with nonnegative multipliers. NaN if the residual
+        could not be computed. `converged` detects the network's fixed point;
+        this scale-dependent diagnostic estimates its remaining KKT defect.
     projection_budget_exhausted : bool
         True when an inner sweep hit the safety cap before reaching joint
         tolerance; the solve is aborted at that iteration with
@@ -310,7 +311,7 @@ class SolverResult:
             f"  Final objective: {self.final_objective:.6e}",
             f"  Joint feasible: {self.joint_feasible} "
             f"(rows dist={self.max_distance_rows:.2e}, box={self.max_violation_box:.2e})",
-            f"  Stationarity residual (NNLS): {self.stationarity_residual:.6e}",
+            f"  eps-KKT residual (NNLS): {self.stationarity_residual:.6e}",
             f"  Final proj. gradient norm (heuristic): {self.final_proj_grad_norm:.6e}",
             f"  Max row violation (raw): {np.max(self.constraint_violations):.6e}",
             f"  Total projections: {self.n_projections}",
@@ -477,43 +478,62 @@ class SNNSolver:
         return max(dist, box)
 
     def _stationarity_residual(self, x: np.ndarray) -> float:
-        """KKT stationarity certificate at x (host-side instrumentation).
+        """eps-KKT residual at x (host-side instrumentation).
 
-        Fits nonnegative multipliers on the ACTIVE unified normalized normals
-        (rows within active_tol of their boundary, box facets at their bound):
-        returns min_{mu >= 0} ||grad f(x) + N^T mu||_2 via NNLS. Zero (to
-        tolerance) certifies a KKT point; at the solver's fixed point this
-        quantifies the O(k0) stationarity floor. Returns ||grad|| when nothing
-        is active, NaN if the fit fails.
+        Returns max of the three KKT defects, measured on the eps-active set:
+
+            stationarity     min_{mu >= 0} ||grad f(x) + N^T mu||
+            complementarity  max_i mu_i * s_i
+            primal           max_i (-s_i)_+
+
+        with s_i the normalized slack of row i and
+
+            eps = max(10 * constraint_tol, 3 * k0 * ||grad f(x)||).
+
+        The window MUST scale with k0: between projections the iterate coasts
+        O(k0) off each facet, so a fixed window drops truly-active rows and the
+        NNLS then reports ~||grad f(x)|| regardless of solution quality (the
+        value is then flat in k0 and anti-correlated with the true error). The
+        complementarity term is what keeps the widened window honest: without
+        it the fit may load a slack row's normal and report ~0 at a point that
+        is not optimal. Returns ||grad|| when nothing is eps-active, NaN if the
+        fit fails.
         """
         grad = np.asarray(self.problem.gradient(x), dtype=float).ravel()
-        active_tol = self.config.constraint_tol * 10
         n = self.problem.n_vars
-        normals = []
+        # Detection window tied to the limit-cycle amplitude, not to a constant.
+        active_tol = max(self.config.constraint_tol * 10,
+                         3.0 * self._k0 * float(np.linalg.norm(grad)))
+        normals, slacks = [], []
         if self.problem.n_constraints > 0:
             g = np.asarray(self.problem.constraint_values(x)).ravel()
-            for j in np.nonzero(g * self._row_scale >= -active_tol)[0]:
+            dist = g * self._row_scale          # signed; > 0 means violated
+            for j in np.nonzero(dist >= -active_tol)[0]:
                 if self._c_norms[j] <= 1e-12:
                     continue
                 c_j = self.problem.C[j]
                 c_j = (np.asarray(c_j.todense()).ravel() if _issparse(c_j)
                        else np.asarray(c_j, dtype=float).ravel())
                 normals.append(c_j * self._row_scale[j])
+                slacks.append(-dist[j])
         if self.config.lower_bound is not None:
             for i in np.nonzero(self.config.lower_bound - x >= -active_tol)[0]:
                 e = np.zeros(n); e[i] = -1.0
-                normals.append(e)
+                normals.append(e); slacks.append(x[i] - self.config.lower_bound)
         if self.config.upper_bound is not None:
             for i in np.nonzero(x - self.config.upper_bound >= -active_tol)[0]:
                 e = np.zeros(n); e[i] = 1.0
-                normals.append(e)
+                normals.append(e); slacks.append(self.config.upper_bound - x[i])
         if not normals:
             return float(np.linalg.norm(grad))
         try:
             from scipy.optimize import nnls
-            N = np.asarray(normals)          # (k, n)
-            _, rnorm = nnls(N.T, -grad)      # min ||N^T mu + grad||, mu >= 0
-            return float(rnorm)
+            N = np.asarray(normals)              # (k, n)
+            s = np.asarray(slacks, dtype=float)  # (k,) signed slack, >=0 feasible
+            mu, rnorm = nnls(N.T, -grad)         # min ||N^T mu + grad||, mu >= 0
+            comp = float(np.max(mu * np.abs(s))) if mu.size else 0.0
+            prim = float(max(0.0, np.max(-s)))
+            return float(max(rnorm, comp, prim))
         except Exception:
             return float("nan")
 

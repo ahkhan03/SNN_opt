@@ -6,10 +6,20 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`stationarity_residual` now reports the intended eps-KKT residual.** Its
+  active-set window scales with `k0` so the NNLS fit retains normals from
+  facets that the iterate coasts away from between projections. The reported
+  value is the maximum of stationarity, complementarity, and primal defects;
+  the complementarity term prevents a widened window from falsely certifying
+  a point by loading a slack constraint. Regression tests cover both failure
+  modes against exact active-set QP references.
+
 ### Documentation and figures
 
-Documentation and visualisation overhaul. No solver behaviour changed; the code
-under `src/` is untouched.
+Documentation and visualisation overhaul, with the
+`stationarity_residual` correction described above.
 
 - **All figures regenerated against v0.5.0.** Every figure in the repository
   predated the v0.5.0 projection rewrite by three to seven months.

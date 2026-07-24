@@ -216,22 +216,23 @@ solver could stall at a point feasible for neither and report an objective that
 *undercuts* the true optimum. Bounds are now implicit unit-normal facets inside
 one unified projection sweep, and the terminal clip is gone.
 
-Three result fields exist to make that state visible, and they are the ones to
-check on any nontrivial problem:
+Three result fields expose feasibility, optimality diagnostics, and projection
+termination on any nontrivial problem:
 
 ```python
 result.joint_feasible            # feasibility of rows AND bounds together
-result.stationarity_residual     # NNLS KKT certificate at the final point
+result.stationarity_residual     # eps-KKT residual at the final point
 result.projection_budget_exhausted
 ```
 
 * **`joint_feasible`** is the honest feasibility flag. Pre-0.5 the convergence
   gate looked at rows only, so a box violation could not fail it.
-* **`stationarity_residual`** solves `min_{mu >= 0} ||grad f + sum mu_i a_i||`
-  over the active unified normals. `converged` tells you the network reached a
-  fixed point; this tells you how far that fixed point is from a KKT point. On
-  the Figure 1 benchmark it reads 2.35, which is the quantitative statement of
-  the limit cycle visible in that figure.
+* **`stationarity_residual`** reports the maximum stationarity,
+  complementarity, and primal defect on an eps-active set whose window scales
+  with `k0`. It estimates the final point's KKT defect, while `converged`
+  reports only the network's fixed-point test. On the Figure 1 benchmark the
+  corrected residual is 8.15e-3 at 4,000 iterations. This is an eps-KKT defect,
+  not the geometric radius of the visible limit cycle.
 * **`projection_budget_exhausted`** reports that the sweep hit its watchdog.
   `max_projection_iters` is now a safety cap (default `None`, auto-sized), and
   hitting it **aborts** the solve rather than being reported as convergence.
@@ -256,10 +257,11 @@ point, not feasibility.
 
 What to do about it, in order of usefulness:
 
-1. **Read `stationarity_residual`.** A converged-looking run with a large
-   residual is sitting at a fixed point of the network that is not a KKT point
-   of the QP. It is the cheapest signal that the answer is not as good as
-   `converged=True` suggests.
+1. **Use `stationarity_residual` as a scale-aware diagnostic.** It estimates
+   the remaining eps-KKT defect, but its active window is heuristic and its
+   magnitude is problem-scale dependent. Compare it across `k0` settings and
+   against tolerances meaningful for your QP, rather than treating one
+   universal threshold as a trust verdict.
 2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
    the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
    if the budget is large enough to arrive; at 5k iterations the same 0.02
@@ -275,8 +277,8 @@ QPs** are the harder case: the native adaptive stepping can fail to reach
 tolerance and return an infeasible point, and naive Jacobi/diagonal
 preconditioning conflicts with the adaptive step-size rule rather than fixing
 it. And note that **`converged=False` is not by itself diagnostic** of either
-issue: check `joint_feasible`, `stationarity_residual` and
-`projection_budget_exhausted` to tell them apart.
+issue: check `joint_feasible` and `projection_budget_exhausted` first, then use
+`stationarity_residual` to assess the scale of the remaining optimality defect.
 
 ## Quick start
 

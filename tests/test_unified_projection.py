@@ -10,12 +10,13 @@ discussions/agent_discussion/6_converged_spec.md):
   - budget exhaustion aborts with its own status;
   - box-only problems keep the exact vectorized projection;
   - zero-row screening; eigenbasis+box via rotated facet rows;
-  - the NNLS stationarity certificate behaves (near 0 on a benign problem).
+  - the eps-KKT residual keeps active normals and checks complementarity.
 """
 
 import numpy as np
 import pytest
 
+from benchmarks.qpref import solve_exact
 from snn_opt import (ConvergenceConfig, OptimizationProblem, SNNSolver,
                      SolverConfig)
 
@@ -170,7 +171,7 @@ class TestEigenbasisWithBox:
         assert abs(res_eig.final_objective - res_canon.final_objective) < 1e-4
 
 
-class TestStationarityCertificate:
+class TestStationarityResidual:
     def test_near_zero_on_benign_active_set(self):
         # min ||x - a||^2 s.t. x <= 0 (active box at optimum x* = 0 for a > 0)
         n = 6
@@ -189,3 +190,58 @@ class TestStationarityCertificate:
         d = np.array([-100.0])
         res = _solve(A, b, C, d)
         assert res.stationarity_residual < 1e-6  # grad ~ 0 at optimum
+
+    def test_k0_scaled_active_window_tracks_oblique_corner(self):
+        rng = np.random.default_rng(5)
+        n, m = 10, 5
+        Q = rng.standard_normal((n, n))
+        A = Q @ Q.T + 0.1 * np.eye(n)
+        b = rng.standard_normal(n)
+        C = rng.standard_normal((m, n))
+        d = -np.ones(m)
+        x0 = rng.standard_normal(n) * 0.1
+
+        x_star, f_star, _ = solve_exact(A, b, C, d)
+        problem = OptimizationProblem(A, b, C, d)
+        cfg = SolverConfig(
+            max_iterations=40_000,
+            record_trajectory=False,
+            record_spike_history=False,
+            convergence=ConvergenceConfig(enable_early_stopping=False),
+        )
+        solver = SNNSolver(problem, cfg)
+        active_window_ratio = (
+            solver._k0 * np.linalg.norm(problem.gradient(x_star))
+            / (10 * cfg.constraint_tol)
+        )
+        res = solver.solve(x0)
+
+        assert active_window_ratio > 100
+        assert np.linalg.norm(res.final_x - x_star) < 1e-3
+        assert abs(res.final_objective - f_star) < 1e-4
+        assert res.stationarity_residual < 1e-2 * solver._k0
+
+    def test_complementarity_rejects_slack_normal_fit(self):
+        # min 0.5*x^2 - x subject to x <= 0 has x*=0. At x=-0.1, a
+        # k0-scaled window includes the slack row and stationarity alone fits
+        # exactly, but mu*slack = 1.1*0.1 exposes that x is not a KKT point.
+        A = np.array([[1.0]])
+        b = np.array([-1.0])
+        C = np.array([[1.0]])
+        d = np.array([0.0])
+        x_star, _, _ = solve_exact(A, b, C, d)
+        problem = OptimizationProblem(A, b, C, d)
+        solver = SNNSolver(problem, SolverConfig())
+        x = np.array([-0.1])
+
+        grad = problem.gradient(x)
+        slack = float(-(C @ x + d)[0])
+        eps = max(
+            10 * solver.config.constraint_tol,
+            3 * solver._k0 * np.linalg.norm(grad),
+        )
+        assert np.linalg.norm(x - x_star) == pytest.approx(0.1)
+        assert 10 * solver.config.constraint_tol < slack < eps
+        assert solver._stationarity_residual(x) == pytest.approx(
+            float(-grad[0] * slack)
+        )

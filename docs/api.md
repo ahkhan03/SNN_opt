@@ -113,16 +113,18 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
 - `total_projection_distance`: sum of spike norms.
 - `summary()`: human-readable one-line-per-statistic string.
 
-### Correctness fields (v0.5.0)
+### Correctness and diagnostic fields (v0.5.0)
 
-These four report whether the answer should be trusted, and are the ones to
-check on any nontrivial problem. `converged` alone is not sufficient: it says
-the network reached a fixed point, not that the fixed point solves your QP.
+These fields separate termination, joint feasibility, and the remaining
+optimality defect. `joint_feasible` and `projection_budget_exhausted` are direct
+checks. `stationarity_residual` is a scale-dependent diagnostic rather than a
+standalone trust verdict. `converged` alone says only that the network reached
+its fixed-point criteria.
 
 | Field | Meaning |
 |---|---|
 | `joint_feasible` | Feasibility of the rows of `C` **and** the bounds together. Before v0.5.0 the convergence gate was rows-only, so a bound violation could not fail it. This is the flag to check. |
-| `stationarity_residual` | An NNLS KKT certificate, `min_{mu >= 0} ‖∇f + Σ mu_i a_i‖`, over the active unified normals at the final point. Large values mean the fixed point is far from stationary even if `converged` is `True`. |
+| `stationarity_residual` | An eps-KKT residual at the final point: the maximum of NNLS stationarity, complementarity, and primal defects on a unified active set selected with `eps = max(10 * constraint_tol, 3 * k0 * ‖∇f‖)`. Its active window is heuristic and its magnitude is problem-scale dependent, so interpret it against meaningful tolerances and across `k0` settings. |
 | `projection_budget_exhausted` | The inner sweep hit its `max_projection_iters` watchdog. The solve **aborts** with `convergence_reason='projection_budget_exhausted'` rather than reporting success from a knowingly infeasible point. |
 | `max_violation_rows_raw`, `max_distance_rows`, `max_violation_box` | The components behind `joint_feasible`: raw row residual, row residual as a Euclidean distance (`residual / ‖c_j‖`), and the worst bound violation. |
 
@@ -132,7 +134,7 @@ frozen order: rows in input order, then lower facets `0..n-1`, then upper facets
 `m + n + i`.
 
 See the README's [Accuracy and tuning](../README.md#accuracy-and-tuning) section
-for what to do when `stationarity_residual` is large.
+for how to interpret the residual and tune `k0_scale` with the iteration budget.
 
 ## Transforms
 
