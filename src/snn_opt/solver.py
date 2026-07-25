@@ -45,6 +45,16 @@ _MAX_GRAM_M = 4096
 _C_BACKENDS = frozenset({'c', 'c_serial', 'c_openmp'})
 _VALID_BACKENDS = frozenset({'python'}) | _C_BACKENDS
 
+# Canonical constant-memory projection-event stream digest. Each committed
+# event updates three unsigned 64-bit words in order: outer iteration, ordinal
+# within that projection sweep, and canonical candidate ID. Every word uses
+#     h <- (h xor (word + 1)) * prime  (mod 2^64).
+# The C++ observer uses the same constants and unsigned-wrap semantics.
+_EVENT_DIGEST_ALGORITHM = "fnv1a64-word-v2"
+_EVENT_DIGEST_OFFSET = 14695981039346656037
+_EVENT_DIGEST_PRIME = 1099511628211
+_UINT64_MASK = (1 << 64) - 1
+
 
 @dataclass
 class ConvergenceConfig:
@@ -143,6 +153,12 @@ class SolverConfig:
     # snn_opt.transforms.Transform instance opts in. Composes with any backend;
     # implies the lean result (final-state fields only). See snn_opt.transforms.
     transform: Optional[Union[str, "object"]] = None
+
+    # Constant-memory observation of committed adaptive-projection events.
+    # Default False preserves the numerical and allocation behavior of v0.5.
+    # When enabled, SolverResult reports per-row and per-coordinate counts plus
+    # a canonical event-stream digest and its first/last candidate IDs.
+    observe_projection_events: bool = False
 
 
 @dataclass
@@ -276,6 +292,34 @@ class SolverResult:
         True when an inner sweep hit the safety cap before reaching joint
         tolerance; the solve is aborted at that iteration with
         convergence_reason='projection_budget_exhausted'.
+    explicit_row_event_counts : ndarray or None
+        Per-explicit-row committed projection-event counts. None when the
+        opt-in observer is disabled.
+    implicit_lower_event_counts, implicit_upper_event_counts : ndarray or None
+        Per-coordinate implicit-bound event counts. None when disabled.
+    explicit_row_events, implicit_lower_events, implicit_upper_events : int or None
+        Totals of the corresponding count arrays.
+    projection_event_digest : int or None
+        Canonical unsigned 64-bit digest of committed candidate IDs, in event
+        order, including outer-iteration and within-sweep ordinal tokens. The
+        empty observed stream has the fixed offset-basis digest.
+    projection_event_digest_algorithm : str or None
+        Frozen digest identifier, `fnv1a64-word-v2`, when observation is on.
+    observed_total_projection_distance : float or None
+        Sum of Euclidean norms of all committed corrections, accumulated by
+        the optional observer. Distinct from the legacy
+        `total_projection_distance`, which depends on retained spike history
+        and is therefore zero on lean solves.
+    projection_first_candidate_id, projection_last_candidate_id : int or None
+        First and last canonical candidate IDs. Rows use j, implicit lower
+        facets m+i, and implicit upper facets m+n+i. None for an empty stream
+        or when observation is disabled.
+    projection_cap_rechecks : int or None
+        Number of inner projection sweeps that consumed the configured cap and
+        therefore performed a fresh joint-violation recheck. A recheck can pass
+        and allow the outer solve to continue, so this is distinct from the
+        terminal `projection_budget_exhausted` flag. None when observation is
+        disabled.
     """
     t: np.ndarray
     X: np.ndarray
@@ -300,6 +344,18 @@ class SolverResult:
     max_violation_box: float = 0.0
     stationarity_residual: float = float("nan")
     projection_budget_exhausted: bool = False
+    explicit_row_event_counts: Optional[np.ndarray] = None
+    implicit_lower_event_counts: Optional[np.ndarray] = None
+    implicit_upper_event_counts: Optional[np.ndarray] = None
+    explicit_row_events: Optional[int] = None
+    implicit_lower_events: Optional[int] = None
+    implicit_upper_events: Optional[int] = None
+    projection_event_digest: Optional[int] = None
+    projection_event_digest_algorithm: Optional[str] = None
+    observed_total_projection_distance: Optional[float] = None
+    projection_first_candidate_id: Optional[int] = None
+    projection_last_candidate_id: Optional[int] = None
+    projection_cap_rechecks: Optional[int] = None
     
     def summary(self) -> str:
         """Generate summary statistics string."""
@@ -388,6 +444,11 @@ class SNNSolver:
         # The legacy fixed-step projection predates the unified facet sweep and
         # cannot enforce box bounds correctly; fail fast rather than silently
         # reintroduce the clip-after-project defect.
+        if (self.config.observe_projection_events
+                and self.config.projection_method != 'adaptive'):
+            raise ValueError(
+                "observe_projection_events=True supports "
+                "projection_method='adaptive' only")
         if (self.config.projection_method == 'fixed'
                 and (self.config.lower_bound is not None
                      or self.config.upper_bound is not None)):
@@ -427,11 +488,104 @@ class SNNSolver:
         self._spike_deltas: List[np.ndarray] = []
         self._spike_constraints: List[np.ndarray] = []
         self._spike_violation_values: List[np.ndarray] = []
+        self._reset_projection_event_observer()
         
         # Convergence tracking
         self._converged = False
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
+
+    def _reset_projection_event_observer(self) -> None:
+        """Reset the optional constant-memory projection-event observer."""
+        if self.config.observe_projection_events:
+            self._explicit_row_event_counts = np.zeros(
+                self.problem.n_constraints, dtype=np.int64)
+            self._implicit_lower_event_counts = np.zeros(
+                self.problem.n_vars, dtype=np.int64)
+            self._implicit_upper_event_counts = np.zeros(
+                self.problem.n_vars, dtype=np.int64)
+            self._projection_event_digest = _EVENT_DIGEST_OFFSET
+            self._observed_total_projection_distance = 0.0
+            self._projection_first_candidate_id = None
+            self._projection_last_candidate_id = None
+            self._projection_cap_rechecks = 0
+        else:
+            self._explicit_row_event_counts = None
+            self._implicit_lower_event_counts = None
+            self._implicit_upper_event_counts = None
+            self._projection_event_digest = None
+            self._observed_total_projection_distance = None
+            self._projection_first_candidate_id = None
+            self._projection_last_candidate_id = None
+            self._projection_cap_rechecks = None
+
+    def _observe_projection_event(self, kind: str, index: int,
+                                  outer_iteration: int, ordinal: int,
+                                  correction_norm: float) -> None:
+        """Record one already-committed adaptive projection event."""
+        if self._explicit_row_event_counts is None:
+            return
+
+        m = self.problem.n_constraints
+        n = self.problem.n_vars
+        if kind == "row":
+            self._explicit_row_event_counts[index] += 1
+            candidate_id = index
+        elif kind == "lo":
+            self._implicit_lower_event_counts[index] += 1
+            candidate_id = m + index
+        elif kind == "hi":
+            self._implicit_upper_event_counts[index] += 1
+            candidate_id = m + n + index
+        else:  # pragma: no cover - internal invariant
+            raise AssertionError(f"unknown projection event kind {kind!r}")
+
+        if self._projection_first_candidate_id is None:
+            self._projection_first_candidate_id = int(candidate_id)
+        self._projection_last_candidate_id = int(candidate_id)
+        for word in (outer_iteration, ordinal, candidate_id):
+            self._projection_event_digest = (
+                (self._projection_event_digest ^ (int(word) + 1))
+                * _EVENT_DIGEST_PRIME
+            ) & _UINT64_MASK
+        self._observed_total_projection_distance += float(correction_norm)
+
+    def _projection_event_result_fields(self) -> dict:
+        """Return detached observer fields for SolverResult construction."""
+        if self._explicit_row_event_counts is None:
+            return {
+                "explicit_row_event_counts": None,
+                "implicit_lower_event_counts": None,
+                "implicit_upper_event_counts": None,
+                "explicit_row_events": None,
+                "implicit_lower_events": None,
+                "implicit_upper_events": None,
+                "projection_event_digest": None,
+                "projection_event_digest_algorithm": None,
+                "observed_total_projection_distance": None,
+                "projection_first_candidate_id": None,
+                "projection_last_candidate_id": None,
+                "projection_cap_rechecks": None,
+            }
+
+        row_counts = self._explicit_row_event_counts.copy()
+        lower_counts = self._implicit_lower_event_counts.copy()
+        upper_counts = self._implicit_upper_event_counts.copy()
+        return {
+            "explicit_row_event_counts": row_counts,
+            "implicit_lower_event_counts": lower_counts,
+            "implicit_upper_event_counts": upper_counts,
+            "explicit_row_events": int(row_counts.sum(dtype=np.int64)),
+            "implicit_lower_events": int(lower_counts.sum(dtype=np.int64)),
+            "implicit_upper_events": int(upper_counts.sum(dtype=np.int64)),
+            "projection_event_digest": int(self._projection_event_digest),
+            "projection_event_digest_algorithm": _EVENT_DIGEST_ALGORITHM,
+            "observed_total_projection_distance": float(
+                self._observed_total_projection_distance),
+            "projection_first_candidate_id": self._projection_first_candidate_id,
+            "projection_last_candidate_id": self._projection_last_candidate_id,
+            "projection_cap_rechecks": int(self._projection_cap_rechecks),
+        }
     
     def _clip_to_bounds(self, x: np.ndarray) -> np.ndarray:
         """
@@ -740,6 +894,7 @@ class SNNSolver:
         self._spike_deltas = []
         self._spike_constraints = []
         self._spike_violation_values = []
+        self._reset_projection_event_observer()
         self._converged = False
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
@@ -802,6 +957,15 @@ class SNNSolver:
         self._iterations_used = inner._iterations_used
         self._n_projections = inner._n_projections
         self._projection_budget_exhausted = inner._projection_budget_exhausted
+        self._explicit_row_event_counts = inner._explicit_row_event_counts
+        self._implicit_lower_event_counts = inner._implicit_lower_event_counts
+        self._implicit_upper_event_counts = inner._implicit_upper_event_counts
+        self._projection_event_digest = inner._projection_event_digest
+        self._observed_total_projection_distance = (
+            inner._observed_total_projection_distance)
+        self._projection_first_candidate_id = inner._projection_first_candidate_id
+        self._projection_last_candidate_id = inner._projection_last_candidate_id
+        self._projection_cap_rechecks = inner._projection_cap_rechecks
         return self._build_lean_result(final_x)
 
     def _solve_euler(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
@@ -830,7 +994,8 @@ class SNNSolver:
             x_current = x_current - self._k0 * gradient
             
             # Phase 2: Project to feasible region
-            x_current, n_proj, spike_info = self._project_to_feasible(x_current)
+            x_current, n_proj, spike_info = self._project_to_feasible(
+                x_current, outer_iteration=iteration)
             self._n_projections += n_proj
 
             if n_proj > 0 and self.config.record_spike_history:
@@ -940,7 +1105,8 @@ class SNNSolver:
             x_current = x_current - self._k0 * gradient
 
             # Phase 2: project to feasible region (no spike-info dicts)
-            x_current, n_proj, _ = self._project_to_feasible(x_current, build_info=False)
+            x_current, n_proj, _ = self._project_to_feasible(
+                x_current, build_info=False, outer_iteration=iteration)
             self._n_projections += n_proj
 
             # (v0.5.0: the former Phase-3 terminal box clip is gone -- bounds
@@ -1036,6 +1202,7 @@ class SNNSolver:
             max_violation_box=box_viol,
             stationarity_residual=self._stationarity_residual(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
+            **self._projection_event_result_fields(),
         )
 
     def _solve_euler_c(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
@@ -1114,6 +1281,23 @@ class SNNSolver:
 
         row_scale = np.ascontiguousarray(self._row_scale, dtype=np.float64).reshape(m)
 
+        observer_kwargs = {}
+        observer_meta = None
+        observer_distance = None
+        if self.config.observe_projection_events:
+            row_event_counts = np.zeros(m, dtype=np.int64)
+            lower_event_counts = np.zeros(n, dtype=np.int64)
+            upper_event_counts = np.zeros(n, dtype=np.int64)
+            observer_meta = np.zeros(4, dtype=np.uint64)
+            observer_distance = np.zeros(1, dtype=np.float64)
+            observer_kwargs = {
+                "row_event_counts": row_event_counts,
+                "lower_event_counts": lower_event_counts,
+                "upper_event_counts": upper_event_counts,
+                "observer_meta": observer_meta,
+                "observer_distance": observer_distance,
+            }
+
         final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
             A, b, C, d, c_norms_sq, row_scale, c_gram, x0c,
             self._k0, self.config.constraint_tol,
@@ -1128,9 +1312,23 @@ class SNNSolver:
             has_upper, float(self.config.upper_bound) if has_upper else 0.0,
             parallel=parallel,
             a_diag=a_diag_c, use_diag=use_diag,
+            **observer_kwargs,
         )
 
         self._n_projections = int(n_proj)
+        if self.config.observe_projection_events:
+            self._explicit_row_event_counts = row_event_counts
+            self._implicit_lower_event_counts = lower_event_counts
+            self._implicit_upper_event_counts = upper_event_counts
+            self._projection_event_digest = int(observer_meta[0])
+            self._observed_total_projection_distance = float(
+                observer_distance[0])
+            no_candidate = np.iinfo(np.uint64).max
+            self._projection_first_candidate_id = (
+                None if observer_meta[1] == no_candidate else int(observer_meta[1]))
+            self._projection_last_candidate_id = (
+                None if observer_meta[2] == no_candidate else int(observer_meta[2]))
+            self._projection_cap_rechecks = int(observer_meta[3])
         self._converged = bool(converged)
         self._iterations_used = int(iters)
         if reason_code == 1:
@@ -1161,10 +1359,13 @@ class SNNSolver:
         t_current = 0.0
         t_previous = -1.0
         x_current = x0
+        projection_sweep_index = 0
         
         while t_current < self.config.t_end:
             # Phase 1: Project back into feasible region
-            x_current, n_proj, spike_info = self._project_to_feasible(x_current)
+            x_current, n_proj, spike_info = self._project_to_feasible(
+                x_current, outer_iteration=projection_sweep_index)
+            projection_sweep_index += 1
             self._n_projections += n_proj
 
             if n_proj > 0 and self.config.record_spike_history:
@@ -1226,7 +1427,9 @@ class SNNSolver:
         return self._build_result()
     
     def _project_to_feasible(self, x: np.ndarray,
-                             build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
+                             build_info: bool = True,
+                             outer_iteration: int = 0
+                             ) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Project x back into feasible region using discrete corrections.
 
@@ -1242,6 +1445,9 @@ class SNNSolver:
             If True (default) build per-projection spike-event metadata. The
             lean solve path passes False to skip the dict allocations; the
             projected point and iteration count are unaffected.
+        outer_iteration : int, optional
+            Zero-based outer/sweep index included only in the optional event
+            digest. It never enters winner selection or numerical updates.
 
         Returns
         -------
@@ -1253,12 +1459,15 @@ class SNNSolver:
             Metadata for each projection applied (empty when build_info=False)
         """
         if self.config.projection_method == 'adaptive':
-            return self._project_adaptive(x, build_info=build_info)
+            return self._project_adaptive(
+                x, build_info=build_info, outer_iteration=outer_iteration)
         else:
             return self._project_fixed(x, build_info=build_info)
 
     def _project_adaptive(self, x: np.ndarray,
-                          build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
+                          build_info: bool = True,
+                          outer_iteration: int = 0
+                          ) -> Tuple[np.ndarray, int, List[dict]]:
         """
         Unified adaptive projection: exact steps onto the currently most-violated
         constraint, where "constraints" means the general rows AND the implicit
@@ -1315,6 +1524,24 @@ class SNNSolver:
                     "delta_x": deltas,
                     "violations": np.abs(deltas[changed]),
                 })
+            if changed.size and self._explicit_row_event_counts is not None:
+                # The box projection is simultaneous. Canonicalize only the
+                # observer stream as lower coordinates first, then upper
+                # coordinates, matching the frozen candidate-family order.
+                deltas = clipped - x_proj
+                lower_changed = changed[deltas[changed] > 0]
+                upper_changed = changed[deltas[changed] < 0]
+                ordinal = 0
+                for i in lower_changed:
+                    self._observe_projection_event(
+                        "lo", int(i), outer_iteration, ordinal,
+                        abs(float(deltas[i])))
+                    ordinal += 1
+                for i in upper_changed:
+                    self._observe_projection_event(
+                        "hi", int(i), outer_iteration, ordinal,
+                        abs(float(deltas[i])))
+                    ordinal += 1
             return clipped, int(changed.size), spike_info
 
         gram = self._c_gram  # None -> recompute path; else event-driven path
@@ -1359,6 +1586,7 @@ class SNNSolver:
                 if gram is not None:
                     # Spike j propagates a lateral update to coupled rows.
                     g = g - k1_adaptive * gram[j]
+                event_distance = abs(k1_adaptive) * self._c_norms[j]
                 event_id, event_viol = j, violation
             else:
                 # Facet spike: exact single-coordinate correction to the bound.
@@ -1374,8 +1602,14 @@ class SNNSolver:
                     else:
                         col = np.asarray(col).ravel()
                     g = g + delta * col
+                event_distance = abs(delta)
                 event_id = (m + j) if kind == "lo" else (m + n + j)
                 event_viol = best_val
+            # Observe only after the selected event's primal and residual
+            # updates have completed. This branch never feeds numerical state.
+            if self._explicit_row_event_counts is not None:
+                self._observe_projection_event(
+                    kind, j, outer_iteration, n_iters, event_distance)
             n_iters += 1
 
             if build_info:
@@ -1387,6 +1621,8 @@ class SNNSolver:
         else:
             # Cap hit: re-check joint violation; if still above tolerance the
             # sweep failed and the solve must abort (see the euler loops).
+            if self._projection_cap_rechecks is not None:
+                self._projection_cap_rechecks += 1
             if self._joint_max_violation(x_proj) > tol:
                 self._projection_budget_exhausted = True
 
@@ -1517,6 +1753,7 @@ class SNNSolver:
             max_violation_box=box_viol,
             stationarity_residual=self._stationarity_residual(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
+            **self._projection_event_result_fields(),
         )
 
 

@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 // Minimum matvec work (rows*cols MACs) at or above which the OpenMP-threaded
@@ -52,6 +53,68 @@ struct Result {
     int    n_projections;
     bool   converged;
     int    reason_code;
+};
+
+// Optional constant-memory observer for already-committed adaptive projection
+// events. A null pointer is the exact unobserved v0.5 path. Candidate IDs use
+// the frozen family order: row j, lower m+i, upper m+n+i. For each event the
+// digest consumes outer iteration, within-sweep ordinal, then candidate ID;
+// every unsigned 64-bit word updates as
+//   h <- (h xor (word + 1)) * prime  (mod 2^64).
+struct ProjectionObserver {
+    static constexpr std::uint64_t DIGEST_OFFSET = UINT64_C(14695981039346656037);
+    static constexpr std::uint64_t DIGEST_PRIME  = UINT64_C(1099511628211);
+
+    std::int64_t* row_counts;
+    std::int64_t* lower_counts;
+    std::int64_t* upper_counts;
+    std::uint64_t digest;
+    double total_projection_distance;
+    std::int64_t first_candidate_id;
+    std::int64_t last_candidate_id;
+    std::uint64_t projection_cap_rechecks;
+
+    ProjectionObserver(std::int64_t* rows,
+                       std::int64_t* lower,
+                       std::int64_t* upper)
+        : row_counts(rows),
+          lower_counts(lower),
+          upper_counts(upper),
+          digest(DIGEST_OFFSET),
+          total_projection_distance(0.0),
+          first_candidate_id(-1),
+          last_candidate_id(-1),
+          projection_cap_rechecks(0) {}
+
+    inline void update_digest_word(std::uint64_t word) {
+        digest = (digest ^ (word + 1U)) * DIGEST_PRIME;
+    }
+
+    inline void record(int kind, int index, int m, int n,
+                       int outer_iteration, int ordinal,
+                       double correction_norm) {
+        std::int64_t candidate_id;
+        if (kind == 0) {
+            ++row_counts[index];
+            candidate_id = index;
+        } else if (kind == 1) {
+            ++lower_counts[index];
+            candidate_id = static_cast<std::int64_t>(m) + index;
+        } else {
+            ++upper_counts[index];
+            candidate_id = static_cast<std::int64_t>(m) + n + index;
+        }
+        if (first_candidate_id < 0) first_candidate_id = candidate_id;
+        last_candidate_id = candidate_id;
+        update_digest_word(static_cast<std::uint64_t>(outer_iteration));
+        update_digest_word(static_cast<std::uint64_t>(ordinal));
+        update_digest_word(static_cast<std::uint64_t>(candidate_id));
+        total_projection_distance += correction_norm;
+    }
+
+    inline void record_projection_cap_recheck() {
+        ++projection_cap_rechecks;
+    }
 };
 
 // ----------------------------------------------------------------------------
@@ -216,16 +279,32 @@ inline int project_unified(double* x,
                            bool has_lower, double lower,
                            bool has_upper, double upper,
                            double* r, bool parallel,
-                           bool* budget_exhausted) {
+                           bool* budget_exhausted,
+                           int outer_iteration = 0,
+                           ProjectionObserver* observer = nullptr) {
     // Box-only fast path: exact separable projection.
     if (m == 0) {
         int n_events = 0;
         if (has_lower)
             for (int i = 0; i < n; ++i)
-                if (x[i] < lower) { x[i] = lower; ++n_events; }
+                if (x[i] < lower) {
+                    const double correction_norm = lower - x[i];
+                    x[i] = lower;
+                    if (observer)
+                        observer->record(1, i, m, n, outer_iteration, n_events,
+                                         correction_norm);
+                    ++n_events;
+                }
         if (has_upper)
             for (int i = 0; i < n; ++i)
-                if (x[i] > upper) { x[i] = upper; ++n_events; }
+                if (x[i] > upper) {
+                    const double correction_norm = x[i] - upper;
+                    x[i] = upper;
+                    if (observer)
+                        observer->record(2, i, m, n, outer_iteration, n_events,
+                                         correction_norm);
+                    ++n_events;
+                }
         return n_events;
     }
 
@@ -254,6 +333,7 @@ inline int project_unified(double* x,
             }
         if (best <= constraint_tol) return n_iters;  // jointly satisfied
 
+        double correction_norm;
         if (kind == 0) {
             // (row_scale[j] > 0 is guaranteed here: degenerate rows have
             // scale 0, so their distance is 0 <= constraint_tol.)
@@ -263,6 +343,7 @@ inline int project_unified(double* x,
             // Lateral update: spike j propagates -k1 * G[:,j] to coupled rows.
             const double* Gj = G + static_cast<std::size_t>(j) * m;
             for (int i = 0; i < m; ++i) r[i] -= k1 * Gj[i];
+            correction_norm = std::fabs(k1) * std::sqrt(c_norms_sq[j]);
         } else {
             // Facet spike: exact single-coordinate correction to the bound.
             const double delta = (kind == 1) ? best : -best;  // signed move
@@ -270,13 +351,19 @@ inline int project_unified(double* x,
             // Lateral update through column j of C (row-major: stride n).
             for (int i = 0; i < m; ++i)
                 r[i] += delta * C[static_cast<std::size_t>(i) * n + j];
+            correction_norm = std::fabs(delta);
         }
+        // Observe only after the selected primal and residual updates commit.
+        if (observer)
+            observer->record(kind, j, m, n, outer_iteration, n_iters,
+                             correction_norm);
         ++n_iters;
     }
 
     // Cap hit: abort-worthy only if the joint violation is still above tol.
     // Recompute the residual fresh (not the incrementally-drifted r) so the
     // abort decision matches the Python reference bit-for-bit.
+    if (observer) observer->record_projection_cap_recheck();
     const double mv = joint_max_violation(C, d, row_scale, x, n, m,
                                           has_lower, lower, has_upper, upper,
                                           r, parallel);
@@ -351,7 +438,8 @@ inline Result solve_euler(const double* A, const double* b,
                           bool has_upper, double upper,
                           const double* a_diag, bool use_diag,
                           bool parallel,
-                          const double* x0, double* x_out) {
+                          const double* x0, double* x_out,
+                          ProjectionObserver* observer = nullptr) {
     // --- one-time scratch allocation (HLS build: replace with static arrays) -
     std::vector<double> x(n), Ax(n), grad(n), pg(n);
     std::vector<double> r(m > 0 ? m : 1);
@@ -390,7 +478,8 @@ inline Result solve_euler(const double* A, const double* b,
         n_projections += project_unified(x.data(), C, d, c_norms_sq, row_scale,
                                          G, n, m, constraint_tol, proj_cap,
                                          has_lower, lower, has_upper, upper,
-                                         r.data(), parallel, &budget_exhausted);
+                                         r.data(), parallel, &budget_exhausted,
+                                         it, observer);
         if (budget_exhausted) {
             reason_code = REASON_PROJECTION_BUDGET;
             iterations_used = it + 1;

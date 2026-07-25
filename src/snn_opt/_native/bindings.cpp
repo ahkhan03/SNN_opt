@@ -8,6 +8,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 #ifdef _OPENMP
@@ -20,6 +23,11 @@ namespace py = pybind11;
 
 // C-contiguous float64 input arrays; forcecast copies/casts mismatched inputs.
 using darray = py::array_t<double, py::array::c_style | py::array::forcecast>;
+// Observer outputs deliberately do not force-cast: they must remain writable
+// views of the caller's exact float64/int64/uint64 buffers.
+using f64array = py::array_t<double, py::array::c_style>;
+using i64array = py::array_t<std::int64_t, py::array::c_style>;
+using u64array = py::array_t<std::uint64_t, py::array::c_style>;
 
 static py::tuple solve_euler_py(
         darray A, darray b, darray C, darray d, darray c_norms_sq,
@@ -33,7 +41,10 @@ static py::tuple solve_euler_py(
         bool use_obj_plateau, bool use_proj_grad, bool use_sol_stable,
         bool require_feas,
         bool has_lower, double lower, bool has_upper, double upper,
-        bool parallel, darray a_diag, bool use_diag) {
+        bool parallel, darray a_diag, bool use_diag,
+        i64array row_event_counts, i64array lower_event_counts,
+        i64array upper_event_counts, u64array observer_meta,
+        f64array observer_distance) {
     if (x0.ndim() != 1)
         throw std::invalid_argument("x0 must be a 1-D array");
     if (d.ndim() != 1)
@@ -64,7 +75,44 @@ static py::tuple solve_euler_py(
         throw std::invalid_argument(
             "a_diag must have shape (n,) when use_diag is set");
 
+    const bool observe = (row_event_counts.size() != 0
+                       || lower_event_counts.size() != 0
+                       || upper_event_counts.size() != 0
+                       || observer_meta.size() != 0
+                       || observer_distance.size() != 0);
+    if (observe) {
+        if (row_event_counts.ndim() != 1 || row_event_counts.shape(0) != m)
+            throw std::invalid_argument(
+                "row_event_counts must have shape (m,) when observation is enabled");
+        if (lower_event_counts.ndim() != 1 || lower_event_counts.shape(0) != n)
+            throw std::invalid_argument(
+                "lower_event_counts must have shape (n,) when observation is enabled");
+        if (upper_event_counts.ndim() != 1 || upper_event_counts.shape(0) != n)
+            throw std::invalid_argument(
+                "upper_event_counts must have shape (n,) when observation is enabled");
+        if (observer_meta.ndim() != 1 || observer_meta.shape(0) != 4)
+            throw std::invalid_argument(
+                "observer_meta must have shape (4,) when observation is enabled");
+        if (observer_distance.ndim() != 1 || observer_distance.shape(0) != 1)
+            throw std::invalid_argument(
+                "observer_distance must have shape (1,) when observation is enabled");
+        if (m > 0)
+            std::fill(row_event_counts.mutable_data(),
+                      row_event_counts.mutable_data() + m, std::int64_t{0});
+        if (n > 0) {
+            std::fill(lower_event_counts.mutable_data(),
+                      lower_event_counts.mutable_data() + n, std::int64_t{0});
+            std::fill(upper_event_counts.mutable_data(),
+                      upper_event_counts.mutable_data() + n, std::int64_t{0});
+        }
+    }
+
     auto x_out = darray(n);
+    snn_qp::ProjectionObserver observer(
+        observe ? row_event_counts.mutable_data() : nullptr,
+        observe ? lower_event_counts.mutable_data() : nullptr,
+        observe ? upper_event_counts.mutable_data() : nullptr);
+    snn_qp::ProjectionObserver* observer_ptr = observe ? &observer : nullptr;
 
     snn_qp::Result res;
     {
@@ -82,7 +130,23 @@ static py::tuple solve_euler_py(
             has_lower, lower, has_upper, upper,
             a_diag.data(), use_diag,
             parallel,
-            x0.data(), x_out.mutable_data());
+            x0.data(), x_out.mutable_data(), observer_ptr);
+    }
+
+    if (observe) {
+        std::uint64_t* meta = observer_meta.mutable_data();
+        const std::uint64_t no_candidate =
+            std::numeric_limits<std::uint64_t>::max();
+        meta[0] = observer.digest;
+        meta[1] = (observer.first_candidate_id < 0)
+                ? no_candidate
+                : static_cast<std::uint64_t>(observer.first_candidate_id);
+        meta[2] = (observer.last_candidate_id < 0)
+                ? no_candidate
+                : static_cast<std::uint64_t>(observer.last_candidate_id);
+        meta[3] = observer.projection_cap_rechecks;
+        observer_distance.mutable_data()[0] =
+            observer.total_projection_distance;
     }
 
     return py::make_tuple(x_out, res.iterations_used, res.n_projections,
@@ -96,7 +160,9 @@ PYBIND11_MODULE(_kernel, m) {
           "facets inside the sweep, normalized-distance WTA, no terminal clip).\n"
           "Returns (x_final, iterations_used, n_projections, converged, "
           "reason_code); reason_code: 0=max_iterations, 1=converged, "
-          "2=projection_budget_exhausted.",
+          "2=projection_budget_exhausted. Optional writable observer buffers "
+          "collect committed events and projection-cap rechecks without "
+          "changing the return tuple.",
           py::arg("A"), py::arg("b"), py::arg("C"), py::arg("d"),
           py::arg("c_norms_sq"), py::arg("row_scale"), py::arg("c_gram"),
           py::arg("x0"),
@@ -111,7 +177,12 @@ PYBIND11_MODULE(_kernel, m) {
           py::arg("has_lower"), py::arg("lower"),
           py::arg("has_upper"), py::arg("upper"),
           py::arg("parallel") = false,
-          py::arg("a_diag") = darray(0), py::arg("use_diag") = false);
+          py::arg("a_diag") = darray(0), py::arg("use_diag") = false,
+          py::arg("row_event_counts") = i64array(0),
+          py::arg("lower_event_counts") = i64array(0),
+          py::arg("upper_event_counts") = i64array(0),
+          py::arg("observer_meta") = u64array(0),
+          py::arg("observer_distance") = f64array(0));
 
     // Build-time OpenMP capability. The `'c'` auto backend reads HAS_OPENMP to
     // decide whether to request the multicore path; `'c_openmp'` raises when it
