@@ -241,6 +241,15 @@ result.projection_budget_exhausted
 fixed-step path cannot enforce bounds correctly without the clip that was
 removed.
 
+## KV260 reference implementation
+
+[`fpga/kv260_v05/`](fpga/kv260_v05/) contains the restricted fixed-horizon
+Kria K26 reference that was physically qualified for the SNN-MSRP study. It
+preserves the v0.5 unified-projection semantics, binary64 input boundary,
+fixed-point contract, 200 MHz build recipe, and exact compatibility ABI used
+by that experiment. Its README records the measured qualification surface and
+the unsupported cases. It is not a general FPGA backend for `solve_qp`.
+
 ## Accuracy and tuning
 
 The spiking dynamics converge to a fixed point of the discretised flow, not to

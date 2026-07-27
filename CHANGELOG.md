@@ -6,6 +6,14 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Added `fpga/kv260_v05/`, a restricted fixed-horizon Kria K26 reference for
+  the v0.5 unified-projection recurrence. The subtree preserves the physically
+  qualified source and build contract, records the measured support boundary,
+  and includes fast source-identity, semantic, adapter-compilation, and
+  toolchain-contract tests. It is not exposed as a general `solve_qp` backend.
+
 ### Fixed
 
 - **`stationarity_residual` now reports the intended eps-KKT residual.** Its
