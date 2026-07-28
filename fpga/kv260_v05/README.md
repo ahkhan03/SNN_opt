@@ -67,9 +67,9 @@ This release does not claim physical qualification for:
 - range-violation telemetry; or
 - arbitrary QPs outside the measured fixed-point envelope.
 
-The historical `fpga-implementation` branch predates v0.5 semantics and is
-retained only as legacy engineering history. Do not merge its kernel into
-this subtree.
+The historical `archive/fpga-implementation` branch predates v0.5 semantics
+and is retained only as legacy engineering history. Do not merge its kernel
+into this subtree.
 
 ## Build
 

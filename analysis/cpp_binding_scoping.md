@@ -5,7 +5,9 @@ wall-time comparisons against CVXPY / SciPy / OSQP measure the *algorithm*
 rather than the Python interpreter, and so the same kernel seeds the Vitis HLS
 FPGA port.
 
-Target file analysed: `src/snn_opt/solver.py` (branch `projection-neuromorphic-analysis`, 928 lines).
+Historical target analysed: `src/snn_opt/solver.py` at tag `v0.2.0`
+(`4070895`, 928 lines). The current solver has since changed substantially;
+the implementation-status section below records what was actually promoted.
 
 ---
 
@@ -300,15 +302,16 @@ binding lays real groundwork for it:
 - the HLS-readiness discipline (no STL/alloc/exceptions in the inner loop)
   transfers directly.
 
-Worth noting separately: the **single-population projection variants** (penalty,
-Heun, heavy-ball, Nesterov, exp-Euler) — held on the `future-research` branch for
-staged release, not shipped in the package — would be *easier* to port than the
-canonical adaptive solver: they are pure forward-Euler with no event-triggered
-argmax inner loop and no data-dependent control flow, which makes them both
-trivial C++ and the most HLS-friendly targets. Each is its own kernel, though;
-the current `_kernel` accelerates only the canonical adaptive solver. The planned
-single-population accelerated-solvers methods paper would benefit from the same
-compiled-backend infra at near-zero marginal cost.
+Worth noting separately: the historical **single-population outer-dynamics
+prototypes** (penalty, Heun, heavy-ball, Nesterov, and exponential Euler) are
+recoverable from tag `v0.2.0` and commits `b1c5eb0`, `ec74ddc`, and `946abda`.
+They were removed from the released package at `v0.3.0`. Their fixed schedules
+would be easier to compile than the canonical event-triggered projection, but
+the prototypes do not satisfy the current v0.5 solver contract and must not be
+ported as production code. Any revived candidate starts on an
+`experiment/<slug>` branch from current `main` and reuses the current
+compiled-backend infrastructure only after Python-level correctness is
+established.
 
 ---
 
