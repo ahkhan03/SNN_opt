@@ -83,11 +83,12 @@ is *spiking*.
 ![spike raster](figures/02_spike_raster.png)
 
 **Warm-start speedup** on a sequence of 30 drifting QPs, a stylized MPC
-workload. From the second problem onward, warm starting cuts a 261-iteration
-cold solve to 141 iterations, an essentially free 1.85x, and wall time falls in
-step (1.84x). Iterations are the headline because they are deterministic; the
-wall-time panel is the median of five timed runs per problem, since a single
-pass picks up scheduler noise indistinguishable from signal.
+workload, measured under the v0.6.0 KKT stopping criterion. From the second
+problem onward, warm starting cuts a 221-iteration cold solve to 101
+iterations, an essentially free 2.19x, and wall time falls in step (2.03x).
+Iterations are the headline because they are deterministic; the wall-time
+panel is the median of five timed runs per problem, since a single pass picks
+up scheduler noise indistinguishable from signal.
 
 ![warm start](figures/03_warm_start.png)
 
@@ -270,14 +271,14 @@ r_kkt  <=  kkt_abs_tol + kkt_rel_tol * max(‖A x‖, ‖b‖, ‖Nᵀμ‖)
 
 Both sides carry gradient units, so the decision is invariant under positive
 objective rescaling, constraint row order, row duplication, and per-row
-scaling — the same problem certifies identically at natural scale and at
+scaling: the same problem certifies identically at natural scale and at
 1e10x. The fit runs host-side on every backend: the compiled kernel advances
 the dynamics in checkpoint-sized chunks and the same Python policy evaluates
 each checkpoint, so `converged` means one thing everywhere (the FPGA
 reference is unchanged and reports fixed-horizon results, which the host can
 certify with the same function). The cheap plateau/feasibility gates are
 evaluated first, so the certificate's NNLS cost is confined to
-near-termination checkpoints — end-to-end overhead is negligible (see
+near-termination checkpoints, and end-to-end overhead is negligible (see
 `benchmarks/`).
 
 Migration: results from v0.5 remain reproducible with
@@ -319,7 +320,7 @@ What to do about it, in order of usefulness:
 1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
    scale-invariant KKT defect of the final point, comparable across problems
    and objective scalings; `converged=True` certifies it below `kkt_rel_tol`.
-   On this benchmark it reports 8.9e-4 — an honest measurement of the limit
+   On this benchmark it reports 8.9e-4, an honest measurement of the limit
    cycle, which is why the run does not certify at the default 1e-4.
 2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
    the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
@@ -338,7 +339,7 @@ preconditioning conflicts with the adaptive step-size rule rather than fixing
 it. When a run reports `converged=False`, read the diagnosis in order: check
 `joint_feasible` and `projection_budget_exhausted` first (feasibility failures
 and watchdog aborts are their own categories), then read
-`kkt_residual / kkt_scale` — since v0.6.0 that number is scale-invariant, so
+`kkt_residual / kkt_scale`; since v0.6.0 that number is scale-invariant, so
 "how far from optimal" is finally a well-posed question at any problem
 scaling.
 

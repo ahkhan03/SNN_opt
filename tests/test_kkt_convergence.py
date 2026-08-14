@@ -271,7 +271,7 @@ def test_deprecated_aliases_map_and_warn():
         warnings.simplefilter("always")
         cfg = ConvergenceConfig(proj_grad_tol=1e-5)
     assert cfg.optimality_test == "legacy_projected_gradient"
-    assert cfg.proj_grad_tol == 1e-5
+    assert cfg.legacy_proj_grad_tol == 1e-5
     assert any(issubclass(w.category, DeprecationWarning) for w in caught)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -402,3 +402,189 @@ def test_legacy_native_path_still_monolithic():
                        optimality_test="legacy_projected_gradient"))
     assert rc.converged
     assert rc.convergence_reason == "converged(c-backend)"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 additions: config round-trips, IVP semantics, sparse certification,
+# calibration-sweep lock, absolute-floor crossover, duplicate exactness,
+# transient fit failure
+# ---------------------------------------------------------------------------
+
+def test_config_replace_and_asdict_round_trips():
+    import dataclasses
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning is a failure
+        base = ConvergenceConfig()
+        r1 = dataclasses.replace(base)
+        assert r1.optimality_test == "kkt"
+        r2 = dataclasses.replace(base, check_every=25)
+        assert r2.optimality_test == "kkt" and r2.check_every == 25
+        rebuilt = ConvergenceConfig(**dataclasses.asdict(base))
+        assert rebuilt.optimality_test == "kkt"
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        legacy = ConvergenceConfig(proj_grad_tol=1e-5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        legacy2 = dataclasses.replace(legacy)  # must NOT warn or change mode
+        assert legacy2.optimality_test == "legacy_projected_gradient"
+        assert legacy2.legacy_proj_grad_tol == 1e-5
+        none_cfg = dataclasses.replace(ConvergenceConfig(optimality_test="none"))
+        assert none_cfg.optimality_test == "none"
+        custom = dataclasses.replace(ConvergenceConfig(kkt_rel_tol=1e-5))
+        assert custom.kkt_rel_tol == 1e-5
+
+
+def test_explicit_default_selector_with_alias_raises():
+    with pytest.raises(ValueError):
+        ConvergenceConfig(proj_grad_tol=1e-5, optimality_test="kkt")
+
+
+def test_post_construction_mutation_keeps_backends_in_sync():
+    """Mutating optimality_test after construction must steer BOTH backends
+    (dispatch derives from the selector, not from a cached alias)."""
+    A, b, C, d = _random_qp()
+    results = {}
+    for be in ("python",) + (("c",) if HAVE_KERNEL else ()):
+        cfg = SolverConfig(backend=be, max_iterations=1000)
+        cfg.convergence.optimality_test = "legacy_projected_gradient"
+        prob = OptimizationProblem(A=1e10 * A, b=1e10 * b, C=C, d=d - 1e3)
+        r = SNNSolver(prob, cfg).solve(np.zeros(A.shape[0]))
+        results[be] = r.converged
+        # legacy absolute test cannot fire at 1e10 gradient scale
+        assert r.converged is False, be
+    assert len(set(results.values())) == 1
+
+
+def test_ivp_stuck_at_boundary_does_not_certify():
+    """IVP stall heuristic must not report KKT convergence at a boundary
+    point with a feasible descent direction (tangential defect ~ ||g||)."""
+    A = np.eye(2)
+    b = np.array([-1.0, -1.0])
+    C = np.array([[1.0, 0.0]])
+    d = np.array([0.0])
+    prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+    r = SNNSolver(prob, SolverConfig(integration_method="ivp",
+                                     t_end=5.0)).solve(np.zeros(2))
+    if r.convergence_reason == "stuck_at_boundary":
+        assert not r.converged  # certificate fails: descent along x2 remains
+    # legacy mode preserves the historical heuristic flag
+    r2 = SNNSolver(prob, SolverConfig(
+        integration_method="ivp", t_end=5.0,
+        convergence=ConvergenceConfig(
+            optimality_test="legacy_projected_gradient"))).solve(np.zeros(2))
+    if r2.convergence_reason == "stuck_at_boundary":
+        assert r2.converged
+
+
+def test_sparse_certificate_matches_dense():
+    import scipy.sparse as sp
+    A, b, C, d = _random_qp()
+    _, r = _solve(A, b, C, d)
+    x = r.final_x
+    dense = _certificate(A, b, C, d, x)
+    prob = OptimizationProblem(A=A, b=b, C=sp.csr_matrix(C), d=d)
+    solver = SNNSolver(prob, SolverConfig())
+    sparse_cert = solver._compute_kkt_certificate(x)
+    assert sparse_cert.fit_status == "ok"
+    # LSMR-based and Lawson-Hanson fits differ at their own optimality
+    # tolerance; what matters is that the difference is far below the
+    # acceptance threshold so it can never flip the public decision.
+    assert abs(sparse_cert.residual - dense.residual) <= 0.01 * dense.tolerance
+    assert sparse_cert.passed == dense.passed
+
+
+def test_sparse_certificate_does_not_densify():
+    """A large, very sparse constraint matrix must not be densified: the
+    dense facet matrix would need ~4.8 GB; the sparse path needs ~MBs."""
+    import scipy.sparse as sp
+    n, m = 4000, 150_000
+    rng = np.random.default_rng(0)
+    A = sp.identity(n, format="csr")
+    b = -np.ones(n)
+    rows = rng.integers(0, m, size=m)
+    cols = rng.integers(0, n, size=m)
+    C = sp.csr_matrix((np.ones(m), (np.arange(m) % m, cols)), shape=(m, n))
+    d = -np.ones(m)
+    prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+    solver = SNNSolver(prob, SolverConfig())
+    cert = solver._compute_kkt_certificate(np.zeros(n))
+    assert cert.fit_status == "ok"
+    assert np.isfinite(cert.residual)
+
+
+def test_dense_certificate_size_guard_fails_closed(monkeypatch):
+    A, b, C, d = _random_qp()
+    prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+    solver = SNNSolver(prob, SolverConfig())
+    monkeypatch.setattr(SNNSolver, "_DENSE_CERT_MAX_ENTRIES", 10)
+    cert = solver._compute_kkt_certificate(np.zeros(A.shape[0]))
+    assert cert.fit_status == "too_large"
+    assert not cert.passed
+
+
+def test_calibration_sweep_decisions_locked():
+    """Lock the 8-seed sweep decisions the tolerance default was calibrated
+    on: seeds 3 and 7 (relative KKT defect above 1e-4) must refuse; the
+    others, including boundary seed 4, must certify."""
+    backend = "c" if HAVE_KERNEL else "python"
+    expected = {0: True, 1: True, 2: True, 3: False,
+                4: True, 5: True, 6: True, 7: False}
+    for seed, want in expected.items():
+        A, b, C, d = _random_qp(seed=100 + seed)
+        _, r = _solve(A, b, C, d, backend=backend)
+        assert r.converged is want, f"seed {seed}"
+
+
+def test_absolute_floor_crossover_documented_behavior():
+    """Down-scaling homogeneity holds while the relative term dominates; at
+    extreme down-scaling the kkt_abs_tol floor deliberately takes over and
+    the Boolean can flip. Both halves are the documented contract."""
+    A, b, C, d = _random_qp()
+    # 30 iterations: genuinely far from the optimum (the floor is reached
+    # around iteration ~150 on this problem).
+    _, r = _solve(A, b, C, d, max_iterations=30)
+    x = r.final_x
+    rels = []
+    for s in (1e-6, 1.0, 1e6):
+        cert = _certificate(s * A, s * b, C, d, x)
+        rels.append(cert.residual / cert.scale)
+        assert not cert.passed
+    assert max(rels) == pytest.approx(min(rels), rel=1e-9)
+    tiny = _certificate(1e-30 * A, 1e-30 * b, C, d, x)
+    assert tiny.passed  # abs floor dominates: intentional near-zero fallback
+
+
+def test_exact_duplicate_invariance():
+    """Replicating a row k times must leave the residual unchanged (the
+    total-complementarity formulation is split-invariant), up to solver
+    roundoff."""
+    A = np.array([[1.0]])
+    b = np.array([-1.0])
+    x = np.array([-0.1])
+    base = _certificate(A, b, np.array([[1.0]]), np.array([0.0]), x)
+    for k in (2, 6, 12):
+        dup = _certificate(A, b, np.ones((k, 1)), np.zeros(k), x)
+        assert dup.residual == pytest.approx(base.residual, rel=1e-9)
+
+
+def test_transient_fit_failure_resets_patience(monkeypatch):
+    """A fit failure AFTER previous passing checks must reset patience and
+    fail closed, not coast through on stale state."""
+    import scipy.optimize
+    real_nnls = scipy.optimize.nnls
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("forced transient failure")
+        return real_nnls(*a, **k)
+
+    monkeypatch.setattr(scipy.optimize, "nnls", flaky)
+    A, b, C, d = _random_qp()
+    _, r = _solve(A, b, C, d, max_iterations=2000)
+    assert not r.converged
+    assert r.kkt_fit_status == "fit_failed"

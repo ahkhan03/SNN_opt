@@ -22,7 +22,7 @@ problems (m == 0) still dispatch to the exact vectorized box projection.
 import numpy as np
 import scipy.sparse as _sp
 from scipy.integrate import solve_ivp
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from typing import Optional, Tuple, List, Callable, Union
 
 
@@ -67,11 +67,15 @@ class ConvergenceConfig:
 
         r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||).
 
-    Both residual components carry gradient units, so the test is invariant
-    under any positive rescaling of the objective (the v0.5 projected-gradient
-    test compared an absolute norm against ``1e-6`` and therefore could never
-    fire on problems with a large gradient scale, and stalled structurally at
-    constrained optima with correlated active normals).
+    Both residual components carry gradient units, so while the relative term
+    dominates the threshold the test is invariant under positive rescaling of
+    the objective (the ``kkt_abs_tol`` floor deliberately breaks exact
+    Boolean invariance once the problem is scaled down far enough that the
+    absolute term takes over -- the intentional near-zero fallback). The v0.5
+    projected-gradient test compared an absolute norm against ``1e-6`` and
+    therefore could never fire on problems with a large gradient scale, and
+    stalled structurally at constrained optima with correlated active
+    normals.
 
     The cheap criteria (objective plateau, solution stability) and the
     feasibility gate are evaluated first; the KKT fit only runs when they
@@ -84,7 +88,11 @@ class ConvergenceConfig:
     #   "kkt"                       -- scale-invariant KKT certificate (default)
     #   "legacy_projected_gradient" -- pre-v0.6 absolute projected-gradient test
     #   "none"                      -- no optimality test (cheap criteria only)
-    optimality_test: str = "kkt"
+    # None means "not explicitly chosen" and resolves to "kkt" (or to the mode
+    # implied by a deprecated alias) in __post_init__. The sentinel is what
+    # lets dataclasses.replace()/asdict() round-trips distinguish an explicit
+    # choice from the default, so a resolved config re-enters cleanly.
+    optimality_test: Optional[str] = None
 
     # KKT certificate tolerances: accept when
     # r_kkt <= kkt_abs_tol + kkt_rel_tol * scale. The relative term dominates
@@ -113,35 +121,39 @@ class ConvergenceConfig:
     use_solution_stable: bool = False   # Disabled by default (can cause false positives)
     require_feasibility: bool = True    # Require feasibility for convergence
 
-    # ------------------------------------------------------------------
-    # Deprecated constructor-only aliases (pre-v0.6 projected-gradient
-    # criterion). Explicitly supplying either selects the legacy test and
-    # warns; supplying them together with a non-default new-style criterion
-    # raises. They are resolved in __post_init__ and normalized away.
-    # ------------------------------------------------------------------
-    use_projected_gradient: Optional[bool] = None
-    proj_grad_tol: Optional[float] = None
+    # Tolerance of the legacy projected-gradient criterion (only read when
+    # optimality_test == "legacy_projected_gradient"). A regular field so it
+    # round-trips; the deprecated `proj_grad_tol` alias below writes it.
+    legacy_proj_grad_tol: float = 1e-6
 
-    def __post_init__(self):
-        valid = ("kkt", "legacy_projected_gradient", "none")
-        if self.optimality_test not in valid:
-            raise ValueError(
-                f"optimality_test must be one of {valid}, "
-                f"got {self.optimality_test!r}")
-        legacy_supplied = (self.use_projected_gradient is not None
-                          or self.proj_grad_tol is not None)
+    # ------------------------------------------------------------------
+    # Deprecated CONSTRUCTOR-ONLY aliases (pre-v0.6 projected-gradient
+    # criterion). InitVar: they exist only as __init__ parameters, are
+    # consumed by __post_init__, and are never stored -- so
+    # dataclasses.replace() / asdict() round-trips of a resolved config
+    # cannot re-trigger alias interpretation. Explicitly supplying either
+    # selects the legacy test (or "none") and warns; supplying either
+    # together with ANY explicit new-style criterion setting raises.
+    # ------------------------------------------------------------------
+    use_projected_gradient: InitVar[Optional[bool]] = None
+    proj_grad_tol: InitVar[Optional[float]] = None
+
+    def __post_init__(self, use_projected_gradient, proj_grad_tol):
+        legacy_supplied = (use_projected_gradient is not None
+                          or proj_grad_tol is not None)
         if legacy_supplied:
-            new_style_supplied = (self.optimality_test != "kkt"
-                                  or self.kkt_abs_tol != 1e-9
-                                  or self.kkt_rel_tol != 1e-4)
-            if new_style_supplied:
+            if (self.optimality_test is not None
+                    or self.kkt_abs_tol != 1e-9
+                    or self.kkt_rel_tol != 1e-4):
                 raise ValueError(
                     "deprecated projected-gradient options "
                     "(use_projected_gradient / proj_grad_tol) cannot be "
                     "combined with explicit optimality_test / kkt_* settings; "
                     "supply exactly one criterion family")
             import warnings
-            if self.use_projected_gradient is False:
+            if proj_grad_tol is not None:
+                self.legacy_proj_grad_tol = float(proj_grad_tol)
+            if use_projected_gradient is False:
                 self.optimality_test = "none"
                 warnings.warn(
                     "use_projected_gradient=False is deprecated; use "
@@ -154,10 +166,17 @@ class ConvergenceConfig:
                     "Selecting optimality_test='legacy_projected_gradient' "
                     "for backward compatibility",
                     DeprecationWarning, stacklevel=3)
-        if self.proj_grad_tol is None:
-            self.proj_grad_tol = 1e-6
-        self.use_projected_gradient = (
-            self.optimality_test == "legacy_projected_gradient")
+        if self.optimality_test is None:
+            self.optimality_test = "kkt"
+        valid = ("kkt", "legacy_projected_gradient", "none")
+        if self.optimality_test not in valid:
+            raise ValueError(
+                f"optimality_test must be one of {valid}, "
+                f"got {self.optimality_test!r}")
+        for name in ("kkt_abs_tol", "kkt_rel_tol", "legacy_proj_grad_tol"):
+            v = getattr(self, name)
+            if not (np.isfinite(v) and v >= 0.0):
+                raise ValueError(f"{name} must be finite and >= 0, got {v!r}")
 
 
 @dataclass
@@ -320,7 +339,7 @@ class KKTCertificate:
     ALL nondegenerate facets (explicit rows and box bounds, unit-normalized),
     no active-set window. ``scale = max(||A x||, ||b||, ||N^T mu||)`` and the
     acceptance threshold is ``tolerance = kkt_abs_tol + kkt_rel_tol * scale``.
-    ``fit_status`` is ``"ok"``, ``"non_finite"``, or ``"fit_failed"``; any
+    ``fit_status`` is ``"ok"``, ``"non_finite"``, ``"fit_failed"``, or ``"too_large"``; any
     non-``"ok"`` status fails the convergence gate closed.
     """
     residual: float
@@ -419,7 +438,7 @@ class SolverResult:
         Acceptance threshold kkt_abs_tol + kkt_rel_tol * kkt_scale that was
         in force at the final point.
     kkt_fit_status : str
-        "ok", "non_finite", or "fit_failed". Anything but "ok" means the
+        "ok", "non_finite", "fit_failed", or "too_large". Anything but "ok" means the
         certificate could not be evaluated and convergence failed closed.
     projection_budget_exhausted : bool
         True when an inner sweep hit the safety cap before reaching joint
@@ -850,39 +869,85 @@ class SNNSolver:
             kkt_fit_status=cert.fit_status,
         )
 
-    def _certificate_facets(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Unified unit-normalized facet family at x: (N, s).
+    # Dense-path guard for the certificate: refuse to materialize an augmented
+    # matrix beyond this many float64 entries (~400 MB) and fail the gate
+    # closed instead of risking an OOM kill. Sparse constraint matrices never
+    # hit this: they take the sparse fit path whose memory scales with nnz.
+    _DENSE_CERT_MAX_ENTRIES = 50_000_000
+
+    def _certificate_facets(self, x: np.ndarray):
+        """Unified unit-normalized facet family at x: (N, s, is_sparse).
 
         N stacks every nondegenerate facet normal as a row (explicit rows
         divided by ||c_j||, box facets as +/- e_i); s holds the matching
-        signed slacks (>= 0 feasible). Both empty when there are no facets.
+        signed slacks (>= 0 feasible). When the constraint matrix is a SciPy
+        sparse matrix, N is returned sparse (CSR) so the certificate's memory
+        stays proportional to nnz; otherwise N is a dense array. Both are
+        empty when there are no facets.
         """
         n = self.problem.n_vars
-        normals, slacks = [], []
-        if self.problem.n_constraints > 0:
+        m = self.problem.n_constraints
+        blocks, slacks = [], []
+        sparse_rows = m > 0 and _issparse(self.problem.C)
+        if m > 0:
             g = np.asarray(self.problem.constraint_values(x), dtype=float).ravel()
-            C = self.problem.C
-            for j in range(self.problem.n_constraints):
-                if self._c_norms[j] <= 1e-12:
-                    continue  # degenerate zero row; preflight owns infeasibility
-                c_j = C[j]
-                c_j = (np.asarray(c_j.todense()).ravel() if _issparse(c_j)
-                       else np.asarray(c_j, dtype=float).ravel())
-                normals.append(c_j * self._row_scale[j])
-                slacks.append(-g[j] * self._row_scale[j])
+            keep = self._c_norms > 1e-12  # degenerate rows: preflight owns them
+            if np.any(keep):
+                scale = self._row_scale[keep]
+                if sparse_rows:
+                    rows = self.problem.C.tocsr()[np.nonzero(keep)[0]]
+                    blocks.append(_sp.diags(scale) @ rows)
+                else:
+                    C = np.asarray(self.problem.C, dtype=float)
+                    blocks.append(C[keep] * scale[:, None])
+                slacks.append(-g[keep] * scale)
         if self.config.lower_bound is not None:
-            lo = float(self.config.lower_bound)
-            for i in range(n):
-                e = np.zeros(n); e[i] = -1.0
-                normals.append(e); slacks.append(x[i] - lo)
+            eye = _sp.identity(n, format="csr") if sparse_rows else np.eye(n)
+            blocks.append(-eye)
+            slacks.append(x - float(self.config.lower_bound))
         if self.config.upper_bound is not None:
-            up = float(self.config.upper_bound)
-            for i in range(n):
-                e = np.zeros(n); e[i] = 1.0
-                normals.append(e); slacks.append(up - x[i])
-        if not normals:
-            return np.empty((0, n)), np.empty((0,))
-        return np.asarray(normals, dtype=float), np.asarray(slacks, dtype=float)
+            eye = _sp.identity(n, format="csr") if sparse_rows else np.eye(n)
+            blocks.append(eye)
+            slacks.append(float(self.config.upper_bound) - x)
+        if not blocks:
+            empty = _sp.csr_matrix((0, n)) if sparse_rows else np.empty((0, n))
+            return empty, np.empty((0,)), sparse_rows
+        N = (_sp.vstack(blocks, format="csr") if sparse_rows
+             else np.vstack(blocks))
+        return N, np.concatenate(slacks), sparse_rows
+
+    def _fit_cone_multipliers(self, N, s: np.ndarray, g: np.ndarray,
+                              lx: float, tolerance: float):
+        """Solve the augmented nonnegative fit; returns mu or None on failure.
+
+        Dense facet families use Lawson-Hanson NNLS. Sparse families keep the
+        augmented matrix sparse and use the bounded least-squares path
+        (LSMR-based), with an inner tolerance far below the acceptance
+        threshold so fit inaccuracy cannot flip the public decision.
+        """
+        abs_s = np.abs(s)
+        try:
+            if _issparse(N):
+                comp_row = _sp.csr_matrix((abs_s / lx)[None, :])
+                M = _sp.vstack([N.T.tocsr(), comp_row], format="csr")
+                rhs = np.concatenate([-g, [0.0]])
+                from scipy.optimize import lsq_linear
+                res = lsq_linear(M, rhs, bounds=(0.0, np.inf),
+                                 lsq_solver="lsmr", tol=1e-12)
+                if not res.success or not np.all(np.isfinite(res.x)):
+                    return None, "fit_failed"
+                return res.x, "ok"
+            if (g.size + 1) * N.shape[0] > self._DENSE_CERT_MAX_ENTRIES:
+                return None, "too_large"
+            M = np.concatenate([N.T, (abs_s / lx)[None, :]], axis=0)
+            rhs = np.concatenate([-g, [0.0]])
+            from scipy.optimize import nnls
+            mu, _ = nnls(M, rhs)
+            if not np.all(np.isfinite(mu)):
+                return None, "fit_failed"
+            return mu, "ok"
+        except Exception:
+            return None, "fit_failed"
 
     def _compute_kkt_certificate(self, x: np.ndarray) -> KKTCertificate:
         """Scale-invariant KKT certificate at x (host-side; all backends).
@@ -915,6 +980,12 @@ class SNNSolver:
 
         def _cert(res, stat, comp, scale, status):
             tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+            # Fail closed on ANY non-finite reported scalar: a certificate
+            # whose numbers cannot be trusted must not read as "ok".
+            if status == "ok" and not all(
+                    np.isfinite(v) for v in (res, stat, comp, scale, tol)):
+                res = stat = comp = float("nan")
+                status = "non_finite"
             return KKTCertificate(residual=res, stationarity=stat,
                                   complementarity=comp, scale=scale,
                                   tolerance=tol, fit_status=status)
@@ -923,7 +994,7 @@ class SNNSolver:
             return _cert(float("nan"), float("nan"), float("nan"),
                          scale_gb, "non_finite")
 
-        N, s = self._certificate_facets(x)
+        N, s, _ = self._certificate_facets(x)
         if N.shape[0] == 0:
             gnorm = float(np.linalg.norm(g))
             return _cert(gnorm, gnorm, 0.0, scale_gb, "ok")
@@ -932,22 +1003,16 @@ class SNNSolver:
                          scale_gb, "non_finite")
 
         lx = max(1.0, float(np.linalg.norm(x)))
-        abs_s = np.abs(s)
-        M = np.concatenate([N.T, (abs_s / lx)[None, :]], axis=0)  # (n+1, p)
-        rhs = np.concatenate([-g, [0.0]])
-        try:
-            from scipy.optimize import nnls
-            mu, _ = nnls(M, rhs)
-        except Exception:
+        tol_hint = conv.kkt_abs_tol + conv.kkt_rel_tol * scale_gb
+        mu, fit_status = self._fit_cone_multipliers(N, s, g, lx, tol_hint)
+        if mu is None:
             return _cert(float("nan"), float("nan"), float("nan"),
-                         scale_gb, "fit_failed")
-        if not np.all(np.isfinite(mu)):
-            return _cert(float("nan"), float("nan"), float("nan"),
-                         scale_gb, "fit_failed")
-        stat = float(np.linalg.norm(g + N.T @ mu))
-        comp = float(abs_s @ mu / lx)
+                         scale_gb, fit_status)
+        Ntmu = np.asarray(N.T @ mu).ravel()
+        stat = float(np.linalg.norm(g + Ntmu))
+        comp = float(np.abs(s) @ mu / lx)
         resid = float(np.hypot(stat, comp))
-        scale = max(scale_gb, float(np.linalg.norm(N.T @ mu)))
+        scale = max(scale_gb, float(np.linalg.norm(Ntmu)))
         return _cert(resid, stat, comp, scale, "ok")
 
     def _compute_adaptive_k0(self) -> float:
@@ -1163,7 +1228,7 @@ class SNNSolver:
             return True, None
         if mode == "legacy_projected_gradient":
             proj_grad_norm = self._compute_projected_gradient_norm(x_curr)
-            if proj_grad_norm < conv_cfg.proj_grad_tol:
+            if proj_grad_norm < conv_cfg.legacy_proj_grad_tol:
                 return True, f"proj_grad(norm={proj_grad_norm:.2e})"
             return False, None
         cert = self._compute_kkt_certificate(x_curr)
@@ -1717,9 +1782,9 @@ class SNNSolver:
                 iterations, self._proj_cap,
                 early_stop, conv.check_every, conv.min_iterations,
                 conv.window_size, conv.patience,
-                conv.obj_rel_tol, conv.x_rel_tol, conv.proj_grad_tol,
+                conv.obj_rel_tol, conv.x_rel_tol, conv.legacy_proj_grad_tol,
                 conv.feasibility_tol,
-                conv.use_objective_plateau, conv.use_projected_gradient,
+                conv.use_objective_plateau, (conv.optimality_test == "legacy_projected_gradient"),
                 conv.use_solution_stable, conv.require_feasibility,
                 has_lower, float(self.config.lower_bound) if has_lower else 0.0,
                 has_upper, float(self.config.upper_bound) if has_upper else 0.0,
@@ -1856,9 +1921,26 @@ class SNNSolver:
         
         if not self._converged:
             self._convergence_reason = "t_end_reached"
-        
+
+        # The IVP loop's stuck-at-boundary detector is a stall heuristic, not
+        # an optimality test: integration can stall at a boundary point that
+        # still has a feasible descent direction. Under the authoritative
+        # "kkt" criterion the flag must mean the certificate passed, so
+        # certify the final state before reporting convergence (the stop
+        # REASON keeps describing why integration ended). The legacy and
+        # "none" modes keep the historical heuristic flag verbatim.
+        if (self._converged
+                and self.config.convergence.optimality_test == "kkt"):
+            conv_cfg = self.config.convergence
+            feasible = (not conv_cfg.require_feasibility
+                        or (self._joint_max_violation(x_current)
+                            <= conv_cfg.feasibility_tol))
+            cert_ok, _ = self._optimality_criterion_pass(x_current)
+            if not (feasible and cert_ok):
+                self._converged = False
+
         self._iterations_used = len(self._t_segments)
-        
+
         # Compile results
         return self._build_result()
     

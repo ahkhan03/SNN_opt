@@ -23,9 +23,19 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   `r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||Ax||, ||b||, ||N^T mu||)`
   (defaults `1e-9`, `1e-4`). The decision is invariant under positive
   objective rescaling, constraint row order, row duplication, and per-row
-  scaling. Runs that reported `converged=False` under v0.5 can legitimately
+  scaling while the relative term dominates the threshold (the
+  `kkt_abs_tol` floor deliberately takes over at near-zero gradient scale).
+  Runs that reported `converged=False` under v0.5 can legitimately
   report `converged=True` (and stop earlier) at an unchanged solution;
   reproduce old flags with `optimality_test="legacy_projected_gradient"`.
+  Sparse constraint matrices take a sparse bounded-least-squares fit path
+  (memory proportional to nnz); an oversized dense facet family fails the
+  gate closed with `kkt_fit_status="too_large"` instead of allocating. The
+  IVP integration path certifies its stuck-at-boundary stall heuristic with
+  the same certificate before reporting `converged=True` under the "kkt"
+  criterion (the flag was previously set by the stall alone, which cannot
+  distinguish a boundary stall with a remaining feasible descent
+  direction).
 - **Compiled backends are driven in checkpoint-sized chunks** with the
   stopping policy (feasibility gate, cheap window criteria, KKT certificate)
   evaluated host-side by the same implementation the Python backend uses, so
@@ -56,10 +66,17 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 ### Deprecated
 
 - `ConvergenceConfig.use_projected_gradient` and
-  `ConvergenceConfig.proj_grad_tol` are deprecated constructor-only aliases:
-  supplying either selects the legacy criterion (or `"none"`) with a
-  `DeprecationWarning`; combining them with explicit new-style settings
-  raises. They are never silently mapped onto the KKT tolerances.
+  `ConvergenceConfig.proj_grad_tol` are deprecated constructor-only aliases
+  (dataclass `InitVar`s: consumed at construction, never stored, so
+  `dataclasses.replace()`/`asdict()` round-trips of a resolved config cannot
+  re-trigger alias interpretation). Supplying either selects the legacy
+  criterion (or `"none"`) with a `DeprecationWarning`; combining them with
+  explicit new-style settings raises. They are never silently mapped onto
+  the KKT tolerances; the legacy tolerance lives in the regular
+  `legacy_proj_grad_tol` field. The warm-start benchmark and Figure 3 were
+  regenerated under the new default criterion (221 cold / 101 warm
+  iterations, 2.19x); the spike-raster benchmark pins its historical fixed
+  400-iteration horizon explicitly.
 
 ### Added (accumulated since 0.5.0, first released here)
 

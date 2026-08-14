@@ -83,9 +83,11 @@ complementarity row appended, accepted when
 r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||)
 ```
 
-Both residual components carry gradient units, so the decision is invariant
-under positive objective rescaling, constraint row order, row duplication, and
-per-row scaling. The cheap window criteria and the feasibility gate run first;
+Both residual components carry gradient units, so while the relative term
+dominates the threshold the decision is invariant under positive objective
+rescaling, constraint row order, row duplication, and per-row scaling (the
+`kkt_abs_tol` floor deliberately takes over at near-zero gradient scales:
+the intentional fallback that lets a genuinely-zero problem terminate). The cheap window criteria and the feasibility gate run first;
 the NNLS only runs when they already pass, so its cost is confined to
 near-termination checkpoints. On the compiled backends the kernel is driven in
 checkpoint-sized chunks and this certificate is evaluated host-side, so every
@@ -109,7 +111,11 @@ backend shares one stopping-policy implementation.
 | `require_feasibility` | `True` | Insist on feasibility for "converged". |
 
 **Deprecated aliases** (one compatibility release): `use_projected_gradient`
-and `proj_grad_tol` still exist as constructor-only inputs. Supplying either
+and `proj_grad_tol` are constructor-only `InitVar` parameters: they are
+consumed at construction, never stored, and therefore invisible to
+`dataclasses.replace()` / `asdict()` round-trips of a resolved config. The
+legacy criterion's tolerance lives in the regular field
+`legacy_proj_grad_tol` (default `1e-6`). Supplying either
 selects `optimality_test="legacy_projected_gradient"` (or `"none"` for
 `use_projected_gradient=False`) with a `DeprecationWarning`; combining them
 with explicit new-style settings raises `ValueError`. They are never silently
@@ -158,7 +164,7 @@ checkpoints.
 | `kkt_complementarity_residual` | `|s|ᵀμ / max(1, ‖x‖)` component (gradient units). |
 | `kkt_scale` | `max(‖A x‖, ‖b‖, ‖Nᵀμ‖)`, the relative-tolerance reference. |
 | `kkt_tolerance` | `kkt_abs_tol + kkt_rel_tol * kkt_scale` in force at the final point. |
-| `kkt_fit_status` | `"ok"`, `"non_finite"`, or `"fit_failed"`. Anything but `"ok"` fails the gate closed. |
+| `kkt_fit_status` | `"ok"`, `"non_finite"`, `"fit_failed"`, or `"too_large"` (dense facet family beyond the certificate's memory guard). Anything but `"ok"` fails the gate closed. |
 
 Interpretation caveat: a small KKT residual does not bound the solution error
 without a conditioning constant; on a nearly singular Hessian a large

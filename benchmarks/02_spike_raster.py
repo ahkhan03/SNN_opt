@@ -65,7 +65,14 @@ def main() -> int:
 
     _, f_star, active = qpref.solve_exact(A, b, C, d)
 
-    cfg = SolverConfig(max_iterations=400)
+    # Fixed 400-iteration horizon, deliberately: this figure illustrates the
+    # active-set search dynamics, not the stopping rule, and the v0.6 KKT
+    # criterion would otherwise stop the run early (~iteration 251) and
+    # change the recorded projection totals.
+    from snn_opt import ConvergenceConfig
+    cfg = SolverConfig(max_iterations=400,
+                       convergence=ConvergenceConfig(
+                           enable_early_stopping=False))
     res = SNNSolver(OptimizationProblem(A=A, b=b, C=C, d=d), cfg).solve(x0)
 
     iters = np.arange(len(res.objective_values))
