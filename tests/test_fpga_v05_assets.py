@@ -5,9 +5,20 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+# The frozen KV260 package's identity (pinned SHA-256 hashes, POSIX-relative
+# manifest paths) is defined on POSIX checkouts: a Windows checkout rewrites
+# line endings under autocrlf (changing every hash) and reports backslash
+# paths. The qualification surface itself (Vitis/XRT/KV260) is Linux-only,
+# so these identity checks are meaningless there.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="frozen FPGA package identity is defined on POSIX checkouts; "
+    "the KV260 toolchain surface is Linux-only")
 
 ROOT = Path(__file__).resolve().parents[1]
 FPGA = ROOT / "fpga" / "kv260_v05"
