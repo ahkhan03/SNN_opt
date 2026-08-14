@@ -159,7 +159,7 @@ checkpoints.
 | Field | Meaning |
 |---|---|
 | `optimality_test` | Which criterion governed `converged`. |
-| `kkt_residual` | `hypot(stationarity, complementarity)` from one augmented NNLS over all unit-normalized facets. Unique under multiplier non-uniqueness; invariant to row order, duplication, and objective scaling. |
+| `kkt_residual` | `hypot(stationarity, complementarity)` from one augmented NNLS over all unit-normalized facets. Unique under multiplier non-uniqueness and invariant to row order and duplication; the dimensional value scales WITH the objective (use `kkt_residual / kkt_scale` as the invariant normalized defect). NaN when the fit failed (see `kkt_fit_status`). |
 | `kkt_stationarity_residual` | `‖∇f(x) + Nᵀμ‖₂` component. |
 | `kkt_complementarity_residual` | `|s|ᵀμ / max(1, ‖x‖)` component (gradient units). |
 | `kkt_scale` | `max(‖A x‖, ‖b‖, ‖Nᵀμ‖)`, the relative-tolerance reference. |

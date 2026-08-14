@@ -983,9 +983,19 @@ class SNNSolver:
                 # LSMR genuinely converged AND the candidate is already in
                 # the cone; otherwise fall to the bounded solver with the
                 # same generous budget.
-                maxiter = max(2000, 5 * (M.shape[0] + M.shape[1]))
+                # Krylov budget bounded by the smaller dimension (the space
+                # LSMR actually explores), with a floor for tiny systems.
+                maxiter = max(2000, 10 * min(M.shape))
                 from scipy.sparse.linalg import lsmr
-                sol = lsmr(M, rhs, atol=1e-14, btol=1e-14, maxiter=maxiter)
+                # conlim=0 disables LSMR's condition-limit stop (istop=3):
+                # a near-collinear facet family sits exactly at that limit,
+                # and stopping there returns an inaccurate multiplier that
+                # was observed to flip the public decision vs the identical
+                # dense problem. With the limit off, the call either
+                # genuinely converges (istop 0/1/2) or exhausts maxiter
+                # (istop 7) and is rejected -- never silently degraded.
+                sol = lsmr(M, rhs, atol=1e-14, btol=1e-14,
+                           conlim=0.0, maxiter=maxiter)
                 mu_u, istop = sol[0], int(sol[1])
                 if (istop in (0, 1, 2) and np.all(np.isfinite(mu_u))
                         and np.all(mu_u >= 0.0)):
@@ -996,6 +1006,17 @@ class SNNSolver:
                                  lsmr_tol=1e-14, lsmr_maxiter=maxiter)
                 if not res.success or not np.all(np.isfinite(res.x)):
                     return None, "fit_failed"
+                # lsq_linear's unconstrained-candidate shortcut (status 3)
+                # accepts whatever its embedded LSMR returned, including a
+                # condition-limit or iteration-limit stop -- the exact hole
+                # the explicit call above closes. When the shortcut was
+                # taken, require the embedded termination to be an accepted
+                # LSMR status too; TRF-iterated results (status 1/2) carry
+                # their own convergence test and stand on it.
+                if res.status == 3:
+                    unb = getattr(res, "unbounded_sol", None)
+                    if unb is None or int(unb[1]) not in (0, 1, 2):
+                        return None, "fit_failed"
                 return res.x, "ok"
             if (g.size + 1) * N.shape[0] > self._DENSE_CERT_MAX_ENTRIES:
                 return None, "too_large"

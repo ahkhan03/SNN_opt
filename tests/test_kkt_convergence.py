@@ -704,3 +704,32 @@ def test_non_finite_constraint_row_fails_closed():
                          np.array([0.0]))
     assert cert2.fit_status == "non_finite"
     assert not cert2.passed
+
+
+def test_condition_limit_sparse_matches_dense():
+    """theta=1e-8: the facet Gram sits beyond LSMR's default condition limit
+    (istop=3). The certificate must either genuinely converge or fail
+    closed; it must not accept a condition-limit stop as ok and flip the
+    decision vs the identical dense problem."""
+    import scipy.sparse as sp
+    theta = 1e-8
+    C = np.array([[1.0, 0.0],
+                  [np.cos(theta), np.sin(theta)]])
+    A = np.eye(2)
+    d = np.zeros(2)
+    x = np.zeros(2)
+    b = -(C[0] + 0.7 * C[1])  # exact cone member: mu = (1, 0.7)
+    kw = dict(convergence=ConvergenceConfig(kkt_abs_tol=0.0,
+                                            kkt_rel_tol=1e-10))
+    dense = _certificate(A, b, C, d, x, **kw)
+    prob = OptimizationProblem(A=A, b=b, C=sp.csr_matrix(C), d=d)
+    solver = SNNSolver(prob, SolverConfig(
+        convergence=ConvergenceConfig(kkt_abs_tol=0.0, kkt_rel_tol=1e-10)))
+    sparse_cert = solver._compute_kkt_certificate(x)
+    assert dense.passed
+    if sparse_cert.fit_status == "ok":
+        assert sparse_cert.passed, (
+            f"sparse residual {sparse_cert.residual:.3e} vs tolerance "
+            f"{sparse_cert.tolerance:.3e}: unconverged fit accepted as ok")
+    else:
+        assert not sparse_cert.passed  # failing closed is acceptable
