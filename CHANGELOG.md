@@ -4,9 +4,64 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-08-15
+
+### Changed
+
+- **`converged` is now a scale-invariant KKT certificate** (breaking change in
+  meaning, not in API). The pre-0.6 criterion compared an absolute
+  projected-gradient norm against `1e-6`; it could never fire on problems with
+  a large gradient scale (rescaling the objective rescales every gradient),
+  and it was structurally nonzero at constrained optima with correlated active
+  normals because it removes per-facet gradient components independently.
+  Reported by an MPC user whose per-step QPs have ~1e10 gradient scale and
+  reproduced on vanilla well-conditioned QPs at natural scale. The new
+  criterion (`ConvergenceConfig.optimality_test="kkt"`, the default) fits
+  `-grad f(x)` onto the cone of ALL unit-normalized facet normals with one
+  augmented nonnegative least-squares (complementarity row included; no
+  active-set window) and accepts when
+  `r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||Ax||, ||b||, ||N^T mu||)`
+  (defaults `1e-9`, `1e-4`). The decision is invariant under positive
+  objective rescaling, constraint row order, row duplication, and per-row
+  scaling. Runs that reported `converged=False` under v0.5 can legitimately
+  report `converged=True` (and stop earlier) at an unchanged solution;
+  reproduce old flags with `optimality_test="legacy_projected_gradient"`.
+- **Compiled backends are driven in checkpoint-sized chunks** with the
+  stopping policy (feasibility gate, cheap window criteria, KKT certificate)
+  evaluated host-side by the same implementation the Python backend uses, so
+  `converged` means one thing on every backend. Kernel-side dynamics are
+  unchanged and chunking is bit-exact (measured overhead ~3.6 us per chunk,
+  within noise end-to-end); observer telemetry (event digests, counts,
+  candidate IDs) is chained across chunks and matches monolithic runs
+  exactly. The in-kernel convergence path is retained verbatim for the legacy
+  criterion.
+- `SolverResult.summary()` now leads with the KKT certificate; the
+  `stationarity_residual` and `final_proj_grad_norm` diagnostics are labeled
+  legacy.
 
 ### Added
+
+- `ConvergenceConfig.optimality_test` selector
+  (`"kkt" | "legacy_projected_gradient" | "none"`), with
+  `kkt_abs_tol` / `kkt_rel_tol` tolerances.
+- `SolverResult` KKT certificate fields: `optimality_test`, `kkt_residual`,
+  `kkt_stationarity_residual`, `kkt_complementarity_residual`, `kkt_scale`,
+  `kkt_tolerance`, `kkt_fit_status`. The certificate is reported on every
+  solve regardless of which criterion governed the flag, and a failed fit
+  fails the convergence gate closed (`kkt_fit_status != "ok"`).
+- Native kernel chunk support: `iter_offset`, observer resume seeding, and
+  objective/iterate window-tail export (additive, default-off parameters; the
+  frozen KV260 adapter compiles unchanged against the updated core).
+
+### Deprecated
+
+- `ConvergenceConfig.use_projected_gradient` and
+  `ConvergenceConfig.proj_grad_tol` are deprecated constructor-only aliases:
+  supplying either selects the legacy criterion (or `"none"`) with a
+  `DeprecationWarning`; combining them with explicit new-style settings
+  raises. They are never silently mapped onto the KKT tolerances.
+
+### Added (accumulated since 0.5.0, first released here)
 
 - Added `fpga/kv260_v05/`, a restricted fixed-horizon Kria K26 reference for
   the v0.5 unified-projection recurrence. The subtree preserves the physically
@@ -14,7 +69,7 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   and includes fast source-identity, semantic, adapter-compilation, and
   toolchain-contract tests. It is not exposed as a general `solve_qp` backend.
 
-### Fixed
+### Fixed (accumulated since 0.5.0)
 
 - **`stationarity_residual` now reports the intended eps-KKT residual.** Its
   active-set window scales with `k0` so the NNLS fit retains normals from

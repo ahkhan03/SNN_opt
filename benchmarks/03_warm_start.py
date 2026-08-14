@@ -54,7 +54,6 @@ def _config() -> SolverConfig:
         max_iterations=4_000,
         convergence=ConvergenceConfig(
             enable_early_stopping=True,
-            proj_grad_tol=1e-5,
             min_iterations=20,
             check_every=10,
             patience=2,

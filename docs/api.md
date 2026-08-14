@@ -74,21 +74,50 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 
 ## `ConvergenceConfig`
 
+Since v0.6.0 the authoritative optimality criterion is a **scale-invariant KKT
+certificate**: one augmented nonnegative least-squares fit of the gradient onto
+the cone of all unit-normalized facet normals (rows and box bounds), with a
+complementarity row appended, accepted when
+
+```
+r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||)
+```
+
+Both residual components carry gradient units, so the decision is invariant
+under positive objective rescaling, constraint row order, row duplication, and
+per-row scaling. The cheap window criteria and the feasibility gate run first;
+the NNLS only runs when they already pass, so its cost is confined to
+near-termination checkpoints. On the compiled backends the kernel is driven in
+checkpoint-sized chunks and this certificate is evaluated host-side, so every
+backend shares one stopping-policy implementation.
+
 | Field | Default | Meaning |
 |---|---|---|
 | `enable_early_stopping` | `True` | Master switch. |
+| `optimality_test` | `"kkt"` | `"kkt"` (scale-invariant certificate), `"legacy_projected_gradient"` (pre-v0.6 absolute test), or `"none"` (cheap criteria only). |
+| `kkt_abs_tol` | `1e-9` | Absolute floor of the certificate threshold (matters only near zero gradient scale). |
+| `kkt_rel_tol` | `1e-4` | Relative certificate tolerance. Calibrated to the O(k0) fixed-point floor of the default dynamics; it is a KKT-residual tolerance, **not** a solution-error bound. |
 | `obj_rel_tol` | `1e-8` | Relative-objective plateau over `window_size`. |
 | `x_rel_tol` | `1e-8` | Relative iterate change. |
-| `proj_grad_tol` | `1e-6` | Projected-gradient norm tolerance. |
 | `feasibility_tol` | `1e-2` | Maximum violation to count as converged. |
 | `check_every` | `50` | Stride between convergence checks. |
 | `min_iterations` | `100` | No early-stop before this. |
 | `window_size` | `10` | Plateau-detection window. |
 | `patience` | `3` | Consecutive passing checks needed. |
 | `use_objective_plateau` | `True` | Enable plateau criterion. |
-| `use_projected_gradient` | `True` | Enable projected-gradient criterion. |
 | `use_solution_stable` | `False` | Off by default, prone to false positives. |
 | `require_feasibility` | `True` | Insist on feasibility for "converged". |
+
+**Deprecated aliases** (one compatibility release): `use_projected_gradient`
+and `proj_grad_tol` still exist as constructor-only inputs. Supplying either
+selects `optimality_test="legacy_projected_gradient"` (or `"none"` for
+`use_projected_gradient=False`) with a `DeprecationWarning`; combining them
+with explicit new-style settings raises `ValueError`. They are never silently
+mapped onto the KKT tolerances, because the two quantities have different
+semantics. The legacy criterion compares an absolute projected-gradient norm
+against `proj_grad_tol`, which cannot fire on large-gradient-scale problems
+and is structurally nonzero at constrained optima with correlated active
+normals; it is retained verbatim for reproducing pre-v0.6 runs.
 
 ## `SNNSolver(problem, config=None)`
 
@@ -113,18 +142,40 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
 - `total_projection_distance`: sum of spike norms.
 - `summary()`: human-readable one-line-per-statistic string.
 
+### KKT certificate fields (v0.6.0)
+
+Every solve reports the scale-invariant certificate at the final point,
+regardless of which `optimality_test` governed the flag. With the default
+`optimality_test="kkt"`, `converged=True` **means** this certificate passed
+(together with feasibility and the cheap criteria) at `patience` consecutive
+checkpoints.
+
+| Field | Meaning |
+|---|---|
+| `optimality_test` | Which criterion governed `converged`. |
+| `kkt_residual` | `hypot(stationarity, complementarity)` from one augmented NNLS over all unit-normalized facets. Unique under multiplier non-uniqueness; invariant to row order, duplication, and objective scaling. |
+| `kkt_stationarity_residual` | `‖∇f(x) + Nᵀμ‖₂` component. |
+| `kkt_complementarity_residual` | `|s|ᵀμ / max(1, ‖x‖)` component (gradient units). |
+| `kkt_scale` | `max(‖A x‖, ‖b‖, ‖Nᵀμ‖)`, the relative-tolerance reference. |
+| `kkt_tolerance` | `kkt_abs_tol + kkt_rel_tol * kkt_scale` in force at the final point. |
+| `kkt_fit_status` | `"ok"`, `"non_finite"`, or `"fit_failed"`. Anything but `"ok"` fails the gate closed. |
+
+Interpretation caveat: a small KKT residual does not bound the solution error
+without a conditioning constant; on a nearly singular Hessian a large
+displacement along a weak-curvature direction leaves the residual small. Use
+`kkt_residual / kkt_scale` as the comparable cross-problem quantity.
+
 ### Correctness and diagnostic fields (v0.5.0)
 
 These fields separate termination, joint feasibility, and the remaining
 optimality defect. `joint_feasible` and `projection_budget_exhausted` are direct
-checks. `stationarity_residual` is a scale-dependent diagnostic rather than a
-standalone trust verdict. `converged` alone says only that the network reached
-its fixed-point criteria.
+checks.
 
 | Field | Meaning |
 |---|---|
 | `joint_feasible` | Feasibility of the rows of `C` **and** the bounds together. Before v0.5.0 the convergence gate was rows-only, so a bound violation could not fail it. This is the flag to check. |
-| `stationarity_residual` | An eps-KKT residual at the final point: the maximum of NNLS stationarity, complementarity, and primal defects on a unified active set selected with `eps = max(10 * constraint_tol, 3 * k0 * ‖∇f‖)`. Its active window is heuristic and its magnitude is problem-scale dependent, so interpret it against meaningful tolerances and across `k0` settings. |
+| `stationarity_residual` | LEGACY (pre-v0.6) eps-KKT diagnostic: the maximum of NNLS stationarity, complementarity, and primal defects on an eps-active set. Its three terms carry different units and its value can depend on constraint row order at rank-deficient active sets; retained for one compatibility release. Prefer `kkt_residual`. |
+| `final_proj_grad_norm` | LEGACY heuristic: per-facet independent gradient projection. Structurally nonzero at constrained optima with correlated active normals; not an optimality measure. |
 | `projection_budget_exhausted` | The inner sweep hit its `max_projection_iters` watchdog. The solve **aborts** with `convergence_reason='projection_budget_exhausted'` rather than reporting success from a knowingly infeasible point. |
 | `max_violation_rows_raw`, `max_distance_rows`, `max_violation_box` | The components behind `joint_feasible`: raw row residual, row residual as a Euclidean distance (`residual / ‖c_j‖`), and the worst bound violation. |
 

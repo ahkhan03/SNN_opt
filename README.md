@@ -4,7 +4,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.5.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.6.0-informational.svg)](CHANGELOG.md)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
 [![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
@@ -62,8 +62,12 @@ iterate settles into a **period-2 limit cycle**: it alternates between two
 points whose gaps are 3.0e-4 and 6.7e-4, which is why the two branches in panel
 (a) are drawn separately and why panel (b) flatlines rather than decaying. The
 run is jointly feasible throughout (max row distance 8.2e-7) and reports
-`converged=False` at the 4000-iteration cap. See
-[Accuracy and tuning](#accuracy-and-tuning) for where that floor comes from.
+`converged=False` at the 4000-iteration cap: the scale-invariant KKT
+certificate (v0.6.0) measures the limit cycle's relative optimality defect at
+8.9e-4, above the default `kkt_rel_tol = 1e-4`, and the value is a true floor
+(unchanged at 40k iterations). Loosen `kkt_rel_tol`, or shrink the floor
+itself with `k0_scale`, to certify on this problem. See
+[Accuracy and tuning](#accuracy-and-tuning) for where the floor comes from.
 
 ![convergence](figures/01_convergence.png)
 
@@ -221,18 +225,19 @@ termination on any nontrivial problem:
 
 ```python
 result.joint_feasible            # feasibility of rows AND bounds together
-result.stationarity_residual     # eps-KKT residual at the final point
+result.kkt_residual              # scale-invariant KKT certificate (v0.6.0)
 result.projection_budget_exhausted
 ```
 
 * **`joint_feasible`** is the honest feasibility flag. Pre-0.5 the convergence
   gate looked at rows only, so a box violation could not fail it.
-* **`stationarity_residual`** reports the maximum stationarity,
-  complementarity, and primal defect on an eps-active set whose window scales
-  with `k0`. It estimates the final point's KKT defect, while `converged`
-  reports only the network's fixed-point test. On the Figure 1 benchmark the
-  corrected residual is 8.15e-3 at 4,000 iterations. This is an eps-KKT defect,
-  not the geometric radius of the visible limit cycle.
+* **`kkt_residual`** is the scale-invariant KKT certificate at the final
+  point (see the next section); with the default settings, `converged=True`
+  means exactly that this certificate passed, together with feasibility and
+  the plateau criterion, at three consecutive checkpoints. The older
+  `stationarity_residual` diagnostic is retained for one compatibility
+  release but mixes units and can depend on constraint row order; prefer
+  `kkt_residual`.
 * **`projection_budget_exhausted`** reports that the sweep hit its watchdog.
   `max_projection_iters` is now a safety cap (default `None`, auto-sized), and
   hitting it **aborts** the solve rather than being reported as convergence.
@@ -240,6 +245,51 @@ result.projection_budget_exhausted
 `projection_method='fixed'` combined with bounds now raises, because the legacy
 fixed-step path cannot enforce bounds correctly without the clip that was
 removed.
+
+## Scale-invariant convergence certification (v0.6.0)
+
+Before v0.6.0, `converged` required an **absolute** projected-gradient norm
+below `1e-6`. That test had two structural defects, found when an MPC user ran
+QPs whose gradient scale is ~1e10: (a) rescaling the objective rescales every
+gradient, so on large-scale problems the flag could never fire at any solution
+quality; and (b) the projected-gradient heuristic removes each active facet's
+gradient component independently, so at a constrained optimum with correlated
+active normals it stalls at a cross-term residue and is structurally nonzero
+even at the exact optimum. `converged=False` therefore said nothing about
+solution quality; solves on perfectly solvable problems ran to their iteration
+cap by construction.
+
+The v0.6.0 criterion is a **KKT-cone certificate**: one nonnegative
+least-squares fit of `-∇f(x)` onto the cone of all unit-normalized facet
+normals, augmented with a complementarity row so slack facets cannot absorb
+the gradient, accepted when
+
+```
+r_kkt  <=  kkt_abs_tol + kkt_rel_tol * max(‖A x‖, ‖b‖, ‖Nᵀμ‖)
+```
+
+Both sides carry gradient units, so the decision is invariant under positive
+objective rescaling, constraint row order, row duplication, and per-row
+scaling — the same problem certifies identically at natural scale and at
+1e10x. The fit runs host-side on every backend: the compiled kernel advances
+the dynamics in checkpoint-sized chunks and the same Python policy evaluates
+each checkpoint, so `converged` means one thing everywhere (the FPGA
+reference is unchanged and reports fixed-horizon results, which the host can
+certify with the same function). The cheap plateau/feasibility gates are
+evaluated first, so the certificate's NNLS cost is confined to
+near-termination checkpoints — end-to-end overhead is negligible (see
+`benchmarks/`).
+
+Migration: results from v0.5 remain reproducible with
+`ConvergenceConfig(optimality_test="legacy_projected_gradient")`, which
+preserves the old test verbatim. `converged=False` runs from v0.5 can
+legitimately become `converged=True` (or stop ~100x earlier) under the new
+criterion; nothing about the dynamics changed, only the stopping decision.
+The default `kkt_rel_tol = 1e-4` is calibrated to the O(k0) fixed-point floor
+of the default step size: it certifies the quality the dynamics genuinely
+reach, roughly 1e-3 relative solution error on well-conditioned problems. It
+is a residual tolerance, not an error bound: on a nearly singular Hessian a
+small residual can coexist with a larger solution displacement.
 
 ## KV260 reference implementation
 
@@ -266,11 +316,11 @@ point, not feasibility.
 
 What to do about it, in order of usefulness:
 
-1. **Use `stationarity_residual` as a scale-aware diagnostic.** It estimates
-   the remaining eps-KKT defect, but its active window is heuristic and its
-   magnitude is problem-scale dependent. Compare it across `k0` settings and
-   against tolerances meaningful for your QP, rather than treating one
-   universal threshold as a trust verdict.
+1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
+   scale-invariant KKT defect of the final point, comparable across problems
+   and objective scalings; `converged=True` certifies it below `kkt_rel_tol`.
+   On this benchmark it reports 8.9e-4 — an honest measurement of the limit
+   cycle, which is why the run does not certify at the default 1e-4.
 2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
    the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
    if the budget is large enough to arrive; at 5k iterations the same 0.02
@@ -285,9 +335,12 @@ Two known limitations are worth stating plainly. **Ill-conditioned or stiff
 QPs** are the harder case: the native adaptive stepping can fail to reach
 tolerance and return an infeasible point, and naive Jacobi/diagonal
 preconditioning conflicts with the adaptive step-size rule rather than fixing
-it. And note that **`converged=False` is not by itself diagnostic** of either
-issue: check `joint_feasible` and `projection_budget_exhausted` first, then use
-`stationarity_residual` to assess the scale of the remaining optimality defect.
+it. When a run reports `converged=False`, read the diagnosis in order: check
+`joint_feasible` and `projection_budget_exhausted` first (feasibility failures
+and watchdog aborts are their own categories), then read
+`kkt_residual / kkt_scale` — since v0.6.0 that number is scale-invariant, so
+"how far from optimal" is finally a well-posed question at any problem
+scaling.
 
 ## Quick start
 
@@ -364,7 +417,7 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
   author  = {Khan, Ameer Hamza and Li, Shuai},
   title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
   year    = {2026},
-  version = {0.5.0},
+  version = {0.6.0},
   url     = {https://github.com/ahkhan03/SNN_opt},
   license = {Apache-2.0},
 }
