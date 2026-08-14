@@ -718,17 +718,26 @@ def test_condition_limit_sparse_matches_dense():
     d = np.zeros(2)
     x = np.zeros(2)
     b = -(C[0] + 0.7 * C[1])  # exact cone member: mu = (1, 0.7)
-    kw = dict(convergence=ConvergenceConfig(kkt_abs_tol=0.0,
-                                            kkt_rel_tol=1e-10))
-    dense = _certificate(A, b, C, d, x, **kw)
+    # NOTE on the tolerance: at cond ~ 1e8 the least-squares accuracy floor
+    # is ~eps * cond ~ 1e-8, and scipy's dense NNLS accuracy at that floor
+    # varies across scipy versions. The contract under test is therefore NOT
+    # "certifies at 1e-10" (below the conditioning-limited floor) but the
+    # representation invariant: dense and sparse must reach the SAME public
+    # decision, or the sparse fit must fail closed -- never a silent
+    # representation-dependent flip (the observed defect accepted an
+    # unconverged inner solve as ok on one side only).
+    kw = ConvergenceConfig(kkt_abs_tol=0.0, kkt_rel_tol=1e-10)
+    dense = _certificate(A, b, C, d, x, convergence=kw)
     prob = OptimizationProblem(A=A, b=b, C=sp.csr_matrix(C), d=d)
     solver = SNNSolver(prob, SolverConfig(
         convergence=ConvergenceConfig(kkt_abs_tol=0.0, kkt_rel_tol=1e-10)))
     sparse_cert = solver._compute_kkt_certificate(x)
-    assert dense.passed
+    assert dense.fit_status == "ok"
     if sparse_cert.fit_status == "ok":
-        assert sparse_cert.passed, (
-            f"sparse residual {sparse_cert.residual:.3e} vs tolerance "
-            f"{sparse_cert.tolerance:.3e}: unconverged fit accepted as ok")
+        assert sparse_cert.passed == dense.passed, (
+            f"representation flipped the decision: dense "
+            f"(r={dense.residual:.3e}, passed={dense.passed}) vs sparse "
+            f"(r={sparse_cert.residual:.3e}, passed={sparse_cert.passed}) "
+            f"at tolerance {sparse_cert.tolerance:.3e}")
     else:
         assert not sparse_cert.passed  # failing closed is acceptable
