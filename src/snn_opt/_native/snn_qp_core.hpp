@@ -439,7 +439,22 @@ inline Result solve_euler(const double* A, const double* b,
                           const double* a_diag, bool use_diag,
                           bool parallel,
                           const double* x0, double* x_out,
-                          ProjectionObserver* observer = nullptr) {
+                          ProjectionObserver* observer = nullptr,
+                          // Chunked-execution support (v0.6.0): the host may
+                          // drive the kernel in fixed chunks ending at each
+                          // convergence checkpoint and evaluate the stopping
+                          // policy itself (the KKT certificate lives host-side
+                          // only). iter_offset makes observer event tokens
+                          // absolute across chunks; the tail buffers export
+                          // the last min(window, iterations) objective values
+                          // (and iterates, when use_sol_stable) so the host
+                          // can evaluate the cheap window criteria without a
+                          // second in-kernel implementation.
+                          int iter_offset = 0,
+                          double* obj_tail_out = nullptr,
+                          int* obj_tail_len_out = nullptr,
+                          double* x_tail_out = nullptr,
+                          int* x_tail_len_out = nullptr) {
     // --- one-time scratch allocation (HLS build: replace with static arrays) -
     std::vector<double> x(n), Ax(n), grad(n), pg(n);
     std::vector<double> r(m > 0 ? m : 1);
@@ -479,7 +494,7 @@ inline Result solve_euler(const double* A, const double* b,
                                          G, n, m, constraint_tol, proj_cap,
                                          has_lower, lower, has_upper, upper,
                                          r.data(), parallel, &budget_exhausted,
-                                         it, observer);
+                                         iter_offset + it, observer);
         if (budget_exhausted) {
             reason_code = REASON_PROJECTION_BUDGET;
             iterations_used = it + 1;
@@ -567,6 +582,31 @@ inline Result solve_euler(const double* A, const double* b,
     }
 
     for (int i = 0; i < n; ++i) x_out[i] = x[i];
+
+    // Export the window tails for host-side (chunked) convergence policy:
+    // the last min(W, count) ring entries, oldest -> newest.
+    if (obj_tail_out != nullptr) {
+        const int cnt = obj_count < W ? obj_count : W;
+        for (int i = 0; i < cnt; ++i) {
+            const int idx = ((obj_head - cnt + i) % W + W) % W;
+            obj_tail_out[i] = obj_ring[idx];
+        }
+        if (obj_tail_len_out != nullptr) *obj_tail_len_out = cnt;
+    }
+    if (x_tail_out != nullptr && use_sol_stable) {
+        const int cnt = x_count < W ? x_count : W;
+        for (int s = 0; s < cnt; ++s) {
+            const int idx = ((x_head - cnt + s) % W + W) % W;
+            const double* slot = x_ring.data()
+                               + static_cast<std::size_t>(idx) * n;
+            double* out = x_tail_out + static_cast<std::size_t>(s) * n;
+            for (int i = 0; i < n; ++i) out[i] = slot[i];
+        }
+        if (x_tail_len_out != nullptr) *x_tail_len_out = cnt;
+    } else if (x_tail_len_out != nullptr) {
+        *x_tail_len_out = 0;
+    }
+
     Result res;
     res.iterations_used = iterations_used;
     res.n_projections   = n_projections;

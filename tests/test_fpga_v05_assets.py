@@ -136,7 +136,7 @@ def test_canonical_adapter_compiles_against_current_v05_core(
     adapter = (SRC / "canonical_solve.hpp").read_text(encoding="utf-8")
     assert '#include "../../../src/snn_opt/_native/snn_qp_core.hpp"' in adapter
     assert _sha256(ROOT / "src/snn_opt/_native/snn_qp_core.hpp") == (
-        "5c1931a848dd096b7d11e331b1b1e43dbea8869b2bd8ee86a3d4eceb1389d0cf"
+        "16704b2c646286e5c4ce5ee8ce023ba521bd889787a544df1eea772213900a4f"
     )
     unit = tmp_path / "adapter.cpp"
     unit.write_text(

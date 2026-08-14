@@ -44,7 +44,10 @@ static py::tuple solve_euler_py(
         bool parallel, darray a_diag, bool use_diag,
         i64array row_event_counts, i64array lower_event_counts,
         i64array upper_event_counts, u64array observer_meta,
-        f64array observer_distance) {
+        f64array observer_distance,
+        int iter_offset, bool resume_observer,
+        f64array obj_tail_out, i64array obj_tail_len_out,
+        f64array x_tail_out, i64array x_tail_len_out) {
     if (x0.ndim() != 1)
         throw std::invalid_argument("x0 must be a 1-D array");
     if (d.ndim() != 1)
@@ -96,15 +99,41 @@ static py::tuple solve_euler_py(
         if (observer_distance.ndim() != 1 || observer_distance.shape(0) != 1)
             throw std::invalid_argument(
                 "observer_distance must have shape (1,) when observation is enabled");
-        if (m > 0)
-            std::fill(row_event_counts.mutable_data(),
-                      row_event_counts.mutable_data() + m, std::int64_t{0});
-        if (n > 0) {
-            std::fill(lower_event_counts.mutable_data(),
-                      lower_event_counts.mutable_data() + n, std::int64_t{0});
-            std::fill(upper_event_counts.mutable_data(),
-                      upper_event_counts.mutable_data() + n, std::int64_t{0});
+        // Chunked resume keeps the caller's accumulated counts; a fresh solve
+        // zeroes them exactly as before.
+        if (!resume_observer) {
+            if (m > 0)
+                std::fill(row_event_counts.mutable_data(),
+                          row_event_counts.mutable_data() + m, std::int64_t{0});
+            if (n > 0) {
+                std::fill(lower_event_counts.mutable_data(),
+                          lower_event_counts.mutable_data() + n, std::int64_t{0});
+                std::fill(upper_event_counts.mutable_data(),
+                          upper_event_counts.mutable_data() + n, std::int64_t{0});
+            }
         }
+    }
+
+    // Optional window-tail export buffers for host-side (chunked) policy.
+    const int W = window_size;
+    const bool want_obj_tail = (obj_tail_out.size() != 0);
+    if (want_obj_tail) {
+        if (obj_tail_out.ndim() != 1 || obj_tail_out.shape(0) < W)
+            throw std::invalid_argument(
+                "obj_tail_out must be a 1-D array of at least window_size");
+        if (obj_tail_len_out.ndim() != 1 || obj_tail_len_out.shape(0) != 1)
+            throw std::invalid_argument(
+                "obj_tail_len_out must have shape (1,)");
+    }
+    const bool want_x_tail = (x_tail_out.size() != 0);
+    if (want_x_tail) {
+        if (x_tail_out.ndim() != 2 || x_tail_out.shape(0) < W
+                || x_tail_out.shape(1) != n)
+            throw std::invalid_argument(
+                "x_tail_out must have shape (window_size, n)");
+        if (x_tail_len_out.ndim() != 1 || x_tail_len_out.shape(0) != 1)
+            throw std::invalid_argument(
+                "x_tail_len_out must have shape (1,)");
     }
 
     auto x_out = darray(n);
@@ -112,8 +141,26 @@ static py::tuple solve_euler_py(
         observe ? row_event_counts.mutable_data() : nullptr,
         observe ? lower_event_counts.mutable_data() : nullptr,
         observe ? upper_event_counts.mutable_data() : nullptr);
+    if (observe && resume_observer) {
+        // Seed the observer from the caller's accumulated meta so a chunked
+        // run produces the identical digest / candidate IDs / totals a
+        // monolithic run would (iteration tokens are made absolute by
+        // iter_offset inside the kernel).
+        const std::uint64_t* meta = observer_meta.data();
+        const std::uint64_t no_candidate =
+            std::numeric_limits<std::uint64_t>::max();
+        observer.digest = meta[0];
+        observer.first_candidate_id = (meta[1] == no_candidate)
+            ? -1 : static_cast<std::int64_t>(meta[1]);
+        observer.last_candidate_id = (meta[2] == no_candidate)
+            ? -1 : static_cast<std::int64_t>(meta[2]);
+        observer.projection_cap_rechecks = meta[3];
+        observer.total_projection_distance = observer_distance.data()[0];
+    }
     snn_qp::ProjectionObserver* observer_ptr = observe ? &observer : nullptr;
 
+    int obj_tail_len = 0;
+    int x_tail_len = 0;
     snn_qp::Result res;
     {
         // The kernel touches no Python objects -- release the GIL so a
@@ -130,8 +177,17 @@ static py::tuple solve_euler_py(
             has_lower, lower, has_upper, upper,
             a_diag.data(), use_diag,
             parallel,
-            x0.data(), x_out.mutable_data(), observer_ptr);
+            x0.data(), x_out.mutable_data(), observer_ptr,
+            iter_offset,
+            want_obj_tail ? obj_tail_out.mutable_data() : nullptr,
+            want_obj_tail ? &obj_tail_len : nullptr,
+            want_x_tail ? x_tail_out.mutable_data() : nullptr,
+            want_x_tail ? &x_tail_len : nullptr);
     }
+    if (want_obj_tail)
+        obj_tail_len_out.mutable_data()[0] = obj_tail_len;
+    if (want_x_tail)
+        x_tail_len_out.mutable_data()[0] = x_tail_len;
 
     if (observe) {
         std::uint64_t* meta = observer_meta.mutable_data();
@@ -182,7 +238,20 @@ PYBIND11_MODULE(_kernel, m) {
           py::arg("lower_event_counts") = i64array(0),
           py::arg("upper_event_counts") = i64array(0),
           py::arg("observer_meta") = u64array(0),
-          py::arg("observer_distance") = f64array(0));
+          py::arg("observer_distance") = f64array(0),
+          // Chunked-execution support (v0.6.0): host-driven fixed chunks with
+          // the stopping policy (KKT certificate) evaluated in Python between
+          // chunks. iter_offset makes observer tokens absolute;
+          // resume_observer seeds the observer from the caller's accumulated
+          // meta instead of resetting; the tail buffers export the last
+          // min(window_size, iterations) objective values / iterates for the
+          // host's cheap window criteria.
+          py::arg("iter_offset") = 0,
+          py::arg("resume_observer") = false,
+          py::arg("obj_tail_out") = f64array(0),
+          py::arg("obj_tail_len_out") = i64array(0),
+          py::arg("x_tail_out") = f64array(0),
+          py::arg("x_tail_len_out") = i64array(0));
 
     // Build-time OpenMP capability. The `'c'` auto backend reads HAS_OPENMP to
     // decide whether to request the multicore path; `'c_openmp'` raises when it

@@ -58,27 +58,106 @@ _UINT64_MASK = (1 << 64) - 1
 
 @dataclass
 class ConvergenceConfig:
-    """Configuration for convergence detection."""
+    """Configuration for convergence detection.
+
+    Since v0.6.0 the authoritative optimality criterion is a scale-invariant
+    KKT certificate (``optimality_test="kkt"``): a nonnegative least-squares
+    fit of the gradient onto the cone of all facet normals, augmented with a
+    complementarity row, accepted when
+
+        r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||).
+
+    Both residual components carry gradient units, so the test is invariant
+    under any positive rescaling of the objective (the v0.5 projected-gradient
+    test compared an absolute norm against ``1e-6`` and therefore could never
+    fire on problems with a large gradient scale, and stalled structurally at
+    constrained optima with correlated active normals).
+
+    The cheap criteria (objective plateau, solution stability) and the
+    feasibility gate are evaluated first; the KKT fit only runs when they
+    already pass, so its cost is confined to near-termination checkpoints.
+    """
     # Enable/disable early stopping
     enable_early_stopping: bool = True
-    
-    # Tolerances
+
+    # Authoritative optimality criterion:
+    #   "kkt"                       -- scale-invariant KKT certificate (default)
+    #   "legacy_projected_gradient" -- pre-v0.6 absolute projected-gradient test
+    #   "none"                      -- no optimality test (cheap criteria only)
+    optimality_test: str = "kkt"
+
+    # KKT certificate tolerances: accept when
+    # r_kkt <= kkt_abs_tol + kkt_rel_tol * scale. The relative term dominates
+    # at every practical scale; the absolute floor only matters for problems
+    # whose gradient scale is ~0. kkt_rel_tol=1e-4 is calibrated to the O(k0)
+    # fixed-point floor of the default dynamics (k0_scale=0.5): it certifies
+    # the residual the solver genuinely reaches, roughly 1e-3 relative
+    # solution error; it is a KKT-residual tolerance, not an error bound.
+    kkt_abs_tol: float = 1e-9
+    kkt_rel_tol: float = 1e-4
+
+    # Tolerances (cheap criteria)
     obj_rel_tol: float = 1e-8          # Relative objective change over window
     x_rel_tol: float = 1e-8            # Relative solution change
-    proj_grad_tol: float = 1e-6        # Projected gradient norm tolerance
     feasibility_tol: float = 1e-2      # Max constraint violation for convergence (default: relaxed)
-    
+
     # Timing control
     check_every: int = 50              # Check convergence every N iterations
     min_iterations: int = 100          # Minimum iterations before checking
     window_size: int = 10              # Window size for objective plateau detection
     patience: int = 3                  # Consecutive converged checks needed
-    
-    # Which criteria to use (require ALL enabled criteria to be satisfied)
+
+    # Which cheap criteria to use (ALL enabled criteria must be satisfied,
+    # together with the selected optimality test)
     use_objective_plateau: bool = True
-    use_projected_gradient: bool = True
     use_solution_stable: bool = False   # Disabled by default (can cause false positives)
     require_feasibility: bool = True    # Require feasibility for convergence
+
+    # ------------------------------------------------------------------
+    # Deprecated constructor-only aliases (pre-v0.6 projected-gradient
+    # criterion). Explicitly supplying either selects the legacy test and
+    # warns; supplying them together with a non-default new-style criterion
+    # raises. They are resolved in __post_init__ and normalized away.
+    # ------------------------------------------------------------------
+    use_projected_gradient: Optional[bool] = None
+    proj_grad_tol: Optional[float] = None
+
+    def __post_init__(self):
+        valid = ("kkt", "legacy_projected_gradient", "none")
+        if self.optimality_test not in valid:
+            raise ValueError(
+                f"optimality_test must be one of {valid}, "
+                f"got {self.optimality_test!r}")
+        legacy_supplied = (self.use_projected_gradient is not None
+                          or self.proj_grad_tol is not None)
+        if legacy_supplied:
+            new_style_supplied = (self.optimality_test != "kkt"
+                                  or self.kkt_abs_tol != 1e-9
+                                  or self.kkt_rel_tol != 1e-4)
+            if new_style_supplied:
+                raise ValueError(
+                    "deprecated projected-gradient options "
+                    "(use_projected_gradient / proj_grad_tol) cannot be "
+                    "combined with explicit optimality_test / kkt_* settings; "
+                    "supply exactly one criterion family")
+            import warnings
+            if self.use_projected_gradient is False:
+                self.optimality_test = "none"
+                warnings.warn(
+                    "use_projected_gradient=False is deprecated; use "
+                    "optimality_test='none'", DeprecationWarning, stacklevel=3)
+            else:
+                self.optimality_test = "legacy_projected_gradient"
+                warnings.warn(
+                    "use_projected_gradient / proj_grad_tol are deprecated; "
+                    "the scale-invariant default is optimality_test='kkt'. "
+                    "Selecting optimality_test='legacy_projected_gradient' "
+                    "for backward compatibility",
+                    DeprecationWarning, stacklevel=3)
+        if self.proj_grad_tol is None:
+            self.proj_grad_tol = 1e-6
+        self.use_projected_gradient = (
+            self.optimality_test == "legacy_projected_gradient")
 
 
 @dataclass
@@ -228,6 +307,37 @@ class OptimizationProblem:
 
 
 @dataclass
+class KKTCertificate:
+    """Scale-invariant KKT residual at a point (see ``optimality_test="kkt"``).
+
+    ``residual = hypot(stationarity, complementarity)`` where both components
+    carry gradient units:
+
+        stationarity     ||grad f(x) + N^T mu||_2
+        complementarity  |s|^T mu / max(1, ||x||_2)
+
+    with ``mu >= 0`` fitted by one augmented nonnegative least-squares over
+    ALL nondegenerate facets (explicit rows and box bounds, unit-normalized),
+    no active-set window. ``scale = max(||A x||, ||b||, ||N^T mu||)`` and the
+    acceptance threshold is ``tolerance = kkt_abs_tol + kkt_rel_tol * scale``.
+    ``fit_status`` is ``"ok"``, ``"non_finite"``, or ``"fit_failed"``; any
+    non-``"ok"`` status fails the convergence gate closed.
+    """
+    residual: float
+    stationarity: float
+    complementarity: float
+    scale: float
+    tolerance: float
+    fit_status: str
+
+    @property
+    def passed(self) -> bool:
+        return (self.fit_status == "ok"
+                and np.isfinite(self.residual)
+                and self.residual <= self.tolerance)
+
+
+@dataclass
 class SolverResult:
     """
     Results from optimization solve.
@@ -281,13 +391,36 @@ class SolverResult:
     max_violation_box : float
         Max box-bound violation (already a distance; unit normals).
     stationarity_residual : float
-        eps-KKT residual at the final point: the maximum of stationarity,
-        complementarity, and primal defects on the eps-active unified
-        (normalized) constraints, with
-        eps = max(10 * constraint_tol, 3 * k0 * ||grad f(x)||). Stationarity
-        is fitted by NNLS with nonnegative multipliers. NaN if the residual
-        could not be computed. `converged` detects the network's fixed point;
-        this scale-dependent diagnostic estimates its remaining KKT defect.
+        LEGACY diagnostic (pre-v0.6): max of stationarity, complementarity,
+        and primal defects on an eps-active set with
+        eps = max(10 * constraint_tol, 3 * k0 * ||grad f(x)||). The three
+        terms carry different units and the value can depend on constraint
+        row order at rank-deficient active sets, so it is NOT the
+        convergence criterion; see kkt_residual for the authoritative
+        certificate. Retained for one compatibility release.
+    optimality_test : str
+        Which optimality criterion governed the `converged` flag:
+        "kkt" (default), "legacy_projected_gradient", or "none".
+    kkt_residual : float
+        Scale-invariant KKT certificate at the final point:
+        hypot(kkt_stationarity_residual, kkt_complementarity_residual), from
+        one augmented NNLS over ALL unit-normalized facets (no active-set
+        window). Unique under multiplier non-uniqueness; invariant to
+        constraint row order, row duplication, and positive objective
+        scaling. NaN when the fit failed (see kkt_fit_status).
+    kkt_stationarity_residual : float
+        ||grad f(x) + N^T mu||_2 component of the certificate.
+    kkt_complementarity_residual : float
+        |s|^T mu / max(1, ||x||) component (gradient units).
+    kkt_scale : float
+        Scale reference max(||A x||, ||b||, ||N^T mu||) used by the
+        acceptance threshold.
+    kkt_tolerance : float
+        Acceptance threshold kkt_abs_tol + kkt_rel_tol * kkt_scale that was
+        in force at the final point.
+    kkt_fit_status : str
+        "ok", "non_finite", or "fit_failed". Anything but "ok" means the
+        certificate could not be evaluated and convergence failed closed.
     projection_budget_exhausted : bool
         True when an inner sweep hit the safety cap before reaching joint
         tolerance; the solve is aborted at that iteration with
@@ -344,6 +477,17 @@ class SolverResult:
     max_violation_box: float = 0.0
     stationarity_residual: float = float("nan")
     projection_budget_exhausted: bool = False
+    # --- v0.6.0 scale-invariant KKT certificate at the final point ---------
+    # Always computed at the final iterate regardless of optimality_test, so
+    # every solve reports the same authoritative optimality diagnostic. The
+    # convergence FLAG uses it only when optimality_test="kkt".
+    optimality_test: str = "kkt"
+    kkt_residual: float = float("nan")
+    kkt_stationarity_residual: float = float("nan")
+    kkt_complementarity_residual: float = float("nan")
+    kkt_scale: float = float("nan")
+    kkt_tolerance: float = float("nan")
+    kkt_fit_status: str = "not_computed"
     explicit_row_event_counts: Optional[np.ndarray] = None
     implicit_lower_event_counts: Optional[np.ndarray] = None
     implicit_upper_event_counts: Optional[np.ndarray] = None
@@ -367,8 +511,11 @@ class SolverResult:
             f"  Final objective: {self.final_objective:.6e}",
             f"  Joint feasible: {self.joint_feasible} "
             f"(rows dist={self.max_distance_rows:.2e}, box={self.max_violation_box:.2e})",
-            f"  eps-KKT residual (NNLS): {self.stationarity_residual:.6e}",
-            f"  Final proj. gradient norm (heuristic): {self.final_proj_grad_norm:.6e}",
+            f"  KKT certificate: residual={self.kkt_residual:.6e} "
+            f"(tol={self.kkt_tolerance:.2e}, scale={self.kkt_scale:.2e}, "
+            f"status={self.kkt_fit_status})",
+            f"  eps-KKT residual (legacy NNLS): {self.stationarity_residual:.6e}",
+            f"  Final proj. gradient norm (legacy heuristic): {self.final_proj_grad_norm:.6e}",
             f"  Max row violation (raw): {np.max(self.constraint_violations):.6e}",
             f"  Total projections: {self.n_projections}",
             f"  Total spikes recorded: {len(self.spike_times)}",
@@ -691,6 +838,118 @@ class SNNSolver:
         except Exception:
             return float("nan")
 
+    def _kkt_result_fields(self, final_x: np.ndarray) -> dict:
+        """KKT-certificate result fields at the final point (all backends)."""
+        cert = self._compute_kkt_certificate(np.asarray(final_x, dtype=float))
+        return dict(
+            kkt_residual=cert.residual,
+            kkt_stationarity_residual=cert.stationarity,
+            kkt_complementarity_residual=cert.complementarity,
+            kkt_scale=cert.scale,
+            kkt_tolerance=cert.tolerance,
+            kkt_fit_status=cert.fit_status,
+        )
+
+    def _certificate_facets(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Unified unit-normalized facet family at x: (N, s).
+
+        N stacks every nondegenerate facet normal as a row (explicit rows
+        divided by ||c_j||, box facets as +/- e_i); s holds the matching
+        signed slacks (>= 0 feasible). Both empty when there are no facets.
+        """
+        n = self.problem.n_vars
+        normals, slacks = [], []
+        if self.problem.n_constraints > 0:
+            g = np.asarray(self.problem.constraint_values(x), dtype=float).ravel()
+            C = self.problem.C
+            for j in range(self.problem.n_constraints):
+                if self._c_norms[j] <= 1e-12:
+                    continue  # degenerate zero row; preflight owns infeasibility
+                c_j = C[j]
+                c_j = (np.asarray(c_j.todense()).ravel() if _issparse(c_j)
+                       else np.asarray(c_j, dtype=float).ravel())
+                normals.append(c_j * self._row_scale[j])
+                slacks.append(-g[j] * self._row_scale[j])
+        if self.config.lower_bound is not None:
+            lo = float(self.config.lower_bound)
+            for i in range(n):
+                e = np.zeros(n); e[i] = -1.0
+                normals.append(e); slacks.append(x[i] - lo)
+        if self.config.upper_bound is not None:
+            up = float(self.config.upper_bound)
+            for i in range(n):
+                e = np.zeros(n); e[i] = 1.0
+                normals.append(e); slacks.append(up - x[i])
+        if not normals:
+            return np.empty((0, n)), np.empty((0,))
+        return np.asarray(normals, dtype=float), np.asarray(slacks, dtype=float)
+
+    def _compute_kkt_certificate(self, x: np.ndarray) -> KKTCertificate:
+        """Scale-invariant KKT certificate at x (host-side; all backends).
+
+        One augmented NNLS over ALL nondegenerate facets:
+
+            mu = argmin_{mu >= 0} || [N^T; |s|^T/lx] mu - [-g; 0] ||_2,
+            lx = max(1, ||x||_2)
+
+        The appended complementarity row makes loading a slack facet's normal
+        expensive inside the fit itself, so no active-set window is needed
+        and the residual is independent of the integrator step k0. The
+        components are
+
+            stationarity     = ||g + N^T mu||_2      (gradient units)
+            complementarity  = |s|^T mu / lx          (gradient units)
+            residual         = hypot(stationarity, complementarity)
+
+        residual is unique even when mu is not (the projected augmented
+        vector is unique), so constraint row order and duplicated rows cannot
+        change the convergence decision. With no facets the residual reduces
+        to ||g||. Failures (non-finite data, NNLS failure) return fit_status
+        != "ok" and the convergence gate fails closed.
+        """
+        conv = self.config.convergence
+        g = np.asarray(self.problem.gradient(x), dtype=float).ravel()
+        b = np.asarray(self.problem.b, dtype=float).ravel()
+        Ax = g - b
+        scale_gb = max(float(np.linalg.norm(Ax)), float(np.linalg.norm(b)))
+
+        def _cert(res, stat, comp, scale, status):
+            tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+            return KKTCertificate(residual=res, stationarity=stat,
+                                  complementarity=comp, scale=scale,
+                                  tolerance=tol, fit_status=status)
+
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(g)):
+            return _cert(float("nan"), float("nan"), float("nan"),
+                         scale_gb, "non_finite")
+
+        N, s = self._certificate_facets(x)
+        if N.shape[0] == 0:
+            gnorm = float(np.linalg.norm(g))
+            return _cert(gnorm, gnorm, 0.0, scale_gb, "ok")
+        if not np.all(np.isfinite(s)):
+            return _cert(float("nan"), float("nan"), float("nan"),
+                         scale_gb, "non_finite")
+
+        lx = max(1.0, float(np.linalg.norm(x)))
+        abs_s = np.abs(s)
+        M = np.concatenate([N.T, (abs_s / lx)[None, :]], axis=0)  # (n+1, p)
+        rhs = np.concatenate([-g, [0.0]])
+        try:
+            from scipy.optimize import nnls
+            mu, _ = nnls(M, rhs)
+        except Exception:
+            return _cert(float("nan"), float("nan"), float("nan"),
+                         scale_gb, "fit_failed")
+        if not np.all(np.isfinite(mu)):
+            return _cert(float("nan"), float("nan"), float("nan"),
+                         scale_gb, "fit_failed")
+        stat = float(np.linalg.norm(g + N.T @ mu))
+        comp = float(abs_s @ mu / lx)
+        resid = float(np.hypot(stat, comp))
+        scale = max(scale_gb, float(np.linalg.norm(N.T @ mu)))
+        return _cert(resid, stat, comp, scale, "ok")
+
     def _compute_adaptive_k0(self) -> float:
         """
         Compute adaptive step size based on Lipschitz constant of the gradient.
@@ -741,12 +1000,17 @@ class SNNSolver:
         """
         Compute norm of gradient projected onto feasible descent directions.
         
-        At the constrained optimum, the projected gradient is zero because:
-        - For active constraints, the gradient component that would violate is zeroed
-        - What remains is the feasible descent direction, which is zero at optimum
-        
-        This is the gold standard for constrained optimization convergence.
-        
+        LEGACY heuristic diagnostic (pre-v0.6 convergence criterion; still
+        drives optimality_test="legacy_projected_gradient"). It removes each
+        near-active facet's gradient component INDEPENDENTLY (no joint fit),
+        so at a constrained optimum with correlated active normals the
+        cross-terms leave an O(mu * cos-angle) residue: the value is
+        structurally nonzero at valid optima unless the active normals are
+        mutually orthogonal, and it scales with the objective. Use the
+        scale-invariant KKT certificate (kkt_residual) as the optimality
+        measure; this quantity is retained for diagnostics and backward
+        compatibility only.
+
         Mathematical basis:
         - Constraint: c_j · x + d_j ≤ 0
         - At boundary: c_j · x + d_j = 0
@@ -819,53 +1083,95 @@ class SNNSolver:
         if iteration % conv_cfg.check_every != 0:
             return False, "", False  # Not a check iteration
         
-        reasons_met = []
-        
-        # 1. Objective plateau over window (not just single step)
-        if conv_cfg.use_objective_plateau and len(obj_history) >= conv_cfg.window_size:
-            window = obj_history[-conv_cfg.window_size:]
-            obj_range = max(window) - min(window)
-            obj_scale = max(abs(window[-1]), 1e-10)
-            obj_rel_change = obj_range / obj_scale
-            
-            if obj_rel_change < conv_cfg.obj_rel_tol:
-                reasons_met.append(f"obj_plateau(range={obj_rel_change:.2e})")
-        
-        # 2. Projected gradient norm (most reliable for constrained)
-        if conv_cfg.use_projected_gradient:
-            proj_grad_norm = self._compute_projected_gradient_norm(x_curr)
-            if proj_grad_norm < conv_cfg.proj_grad_tol:
-                reasons_met.append(f"proj_grad(norm={proj_grad_norm:.2e})")
-        
-        # 3. Solution stable over window
-        if conv_cfg.use_solution_stable and len(x_history) >= conv_cfg.window_size:
-            # Check that all recent solutions are close to current
-            recent = x_history[-conv_cfg.window_size:]
-            x_norm = max(np.linalg.norm(x_curr), 1e-10)
-            max_dist = max(np.linalg.norm(x - x_curr) for x in recent)
-            x_rel_change = max_dist / x_norm
-            
-            if x_rel_change < conv_cfg.x_rel_tol:
-                reasons_met.append(f"x_stable(range={x_rel_change:.2e})")
-        
-        # 4. Check feasibility (if required) -- JOINT: rows (as distances) + box.
+        # 1. Feasibility gate first (if required) -- JOINT: rows + box. When
+        # infeasible, the outcome is "not converged" regardless of the other
+        # criteria, so nothing else needs evaluating.
         if conv_cfg.require_feasibility:
             max_viol = self._joint_max_violation(x_curr)
             if max_viol > conv_cfg.feasibility_tol:
                 return False, "still_infeasible", True  # Check happened but failed
-        
-        # Count how many criteria are enabled
-        n_enabled = sum([
-            conv_cfg.use_objective_plateau,
-            conv_cfg.use_projected_gradient,
-            conv_cfg.use_solution_stable
-        ])
-        
-        # Require ALL enabled criteria to be met
-        if len(reasons_met) >= n_enabled and n_enabled > 0:
-            return True, f"converged({'; '.join(reasons_met)})", True
-        
-        return False, "", True  # This was a check iteration, but criteria not met
+
+        # 2. Cheap criteria (objective plateau, solution stability). ALL
+        # enabled cheap criteria must pass BEFORE the optimality test runs, so
+        # the NNLS certificate is a near-termination cost, not an
+        # every-checkpoint cost.
+        cheap_ok, reasons_met = self._cheap_criteria_pass(x_curr, obj_history,
+                                                          x_history)
+        if not cheap_ok:
+            return False, "", True
+
+        # 3. Authoritative optimality test.
+        opt_ok, opt_reason = self._optimality_criterion_pass(x_curr)
+        if not opt_ok:
+            return False, "", True
+        if opt_reason:
+            reasons_met = [opt_reason] + reasons_met
+
+        if not reasons_met:
+            # Nothing is enabled at all: never report convergence.
+            return False, "", True
+        return True, f"converged({'; '.join(reasons_met)})", True
+
+    def _cheap_criteria_pass(self, x_curr: np.ndarray,
+                             obj_history: List[float],
+                             x_history: List[np.ndarray]
+                             ) -> Tuple[bool, List[str]]:
+        """Evaluate the enabled cheap criteria. Returns (all_pass, reasons).
+
+        A criterion whose window is not yet filled counts as failed (matching
+        the historical behavior of requiring the full window).
+        """
+        conv_cfg = self.config.convergence
+        reasons: List[str] = []
+
+        if conv_cfg.use_objective_plateau:
+            if len(obj_history) < conv_cfg.window_size:
+                return False, reasons
+            window = obj_history[-conv_cfg.window_size:]
+            obj_range = max(window) - min(window)
+            obj_scale = max(abs(window[-1]), 1e-10)
+            obj_rel_change = obj_range / obj_scale
+            if obj_rel_change >= conv_cfg.obj_rel_tol:
+                return False, reasons
+            reasons.append(f"obj_plateau(range={obj_rel_change:.2e})")
+
+        if conv_cfg.use_solution_stable:
+            if len(x_history) < conv_cfg.window_size:
+                return False, reasons
+            recent = x_history[-conv_cfg.window_size:]
+            x_norm = max(np.linalg.norm(x_curr), 1e-10)
+            max_dist = max(np.linalg.norm(x - x_curr) for x in recent)
+            x_rel_change = max_dist / x_norm
+            if x_rel_change >= conv_cfg.x_rel_tol:
+                return False, reasons
+            reasons.append(f"x_stable(range={x_rel_change:.2e})")
+
+        return True, reasons
+
+    def _optimality_criterion_pass(self, x_curr: np.ndarray
+                                   ) -> Tuple[bool, Optional[str]]:
+        """Evaluate the configured optimality test at x_curr.
+
+        Returns (passed, reason-fragment). "none" always passes with no
+        fragment; "kkt" runs the scale-invariant certificate (fails closed on
+        fit failure); "legacy_projected_gradient" reproduces the pre-v0.6
+        absolute projected-gradient test.
+        """
+        conv_cfg = self.config.convergence
+        mode = conv_cfg.optimality_test
+        if mode == "none":
+            return True, None
+        if mode == "legacy_projected_gradient":
+            proj_grad_norm = self._compute_projected_gradient_norm(x_curr)
+            if proj_grad_norm < conv_cfg.proj_grad_tol:
+                return True, f"proj_grad(norm={proj_grad_norm:.2e})"
+            return False, None
+        cert = self._compute_kkt_certificate(x_curr)
+        self._last_kkt_certificate = cert
+        if cert.passed:
+            return True, (f"kkt(residual={cert.residual:.2e}"
+                          f"<=tol={cert.tolerance:.2e})")
+        return False, None
     
     def solve(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
@@ -896,6 +1202,8 @@ class SNNSolver:
         self._spike_violation_values = []
         self._reset_projection_event_observer()
         self._converged = False
+        self._last_kkt_certificate = None
+        self._chunked_reason = None
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
         self._projection_budget_exhausted = False
@@ -1201,9 +1509,106 @@ class SNNSolver:
             max_distance_rows=dist_rows,
             max_violation_box=box_viol,
             stationarity_residual=self._stationarity_residual(final_x),
+            optimality_test=self.config.convergence.optimality_test,
+            **self._kkt_result_fields(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
             **self._projection_event_result_fields(),
         )
+
+    def _drive_chunked_kernel(self, kernel_call, x0c: np.ndarray):
+        """Drive the compiled kernel in checkpoint-sized chunks (kkt mode).
+
+        The kernel advances the dynamics with early stopping disabled; between
+        chunks the host applies EXACTLY the same convergence policy as the
+        Python backend (feasibility gate, cheap window criteria via
+        :meth:`_cheap_criteria_pass`, KKT certificate via
+        :meth:`_optimality_criterion_pass`, and the patience counter), so the
+        two backends share one stopping-policy implementation. Chunk
+        boundaries land on the iterations the Python loop would check
+        (iteration >= min_iterations and iteration % check_every == 0), and
+        the kernel exports its objective / iterate window tails so windowed
+        criteria see the same history a monolithic run would. Observer
+        telemetry is chained across chunks (absolute iteration tokens, seeded
+        digest), producing the identical event stream to a monolithic run.
+
+        Returns the same tuple shape as a monolithic ``solve_euler`` call:
+        (final_x, iterations_used, n_projections, converged, reason_code).
+        """
+        conv = self.config.convergence
+        max_it = self.config.max_iterations
+        ce = max(1, conv.check_every)
+        W = max(1, conv.window_size)
+        n = self.problem.n_vars
+
+        # First checkpoint: smallest k >= min_iterations with k % ce == 0.
+        k1 = ((max(conv.min_iterations, 0) + ce - 1) // ce) * ce
+        boundaries = list(range(k1, max_it, ce))
+
+        obj_tail = np.zeros(W, dtype=np.float64)
+        obj_tail_len = np.zeros(1, dtype=np.int64)
+        tails = {"obj_tail_out": obj_tail, "obj_tail_len_out": obj_tail_len}
+        want_x = conv.use_solution_stable
+        if want_x:
+            x_tail = np.zeros((W, n), dtype=np.float64)
+            x_tail_len = np.zeros(1, dtype=np.int64)
+            tails.update({"x_tail_out": x_tail, "x_tail_len_out": x_tail_len})
+
+        x_cur = np.asarray(x0c, dtype=np.float64)
+        abs_iter = 0
+        n_proj_total = 0
+        patience_counter = 0
+        obj_hist: List[float] = []
+        x_hist: List[np.ndarray] = []
+
+        def run(length):
+            nonlocal x_cur, abs_iter, n_proj_total, obj_hist, x_hist
+            fx, iters, n_proj, _, reason_code = kernel_call(
+                x_cur, length, early_stop=False,
+                iter_offset=abs_iter, resume=(abs_iter > 0), extra=tails)
+            x_cur = np.asarray(fx, dtype=np.float64)
+            abs_iter += int(iters)
+            n_proj_total += int(n_proj)
+            cnt = int(obj_tail_len[0])
+            obj_hist = (obj_hist + [float(v) for v in obj_tail[:cnt]])[-W:]
+            if want_x:
+                xcnt = int(x_tail_len[0])
+                x_hist = (x_hist + [x_tail[i].copy()
+                                    for i in range(xcnt)])[-W:]
+            return int(reason_code)
+
+        for kb in boundaries:
+            reason_code = run(kb + 1 - abs_iter)
+            if reason_code == 2:  # projection budget exhausted mid-chunk
+                return x_cur, abs_iter, n_proj_total, False, 2
+
+            # --- host-side convergence policy (same helpers as backend='python')
+            if (conv.require_feasibility
+                    and self._joint_max_violation(x_cur) > conv.feasibility_tol):
+                patience_counter = 0
+                continue
+            cheap_ok, reasons = self._cheap_criteria_pass(x_cur, obj_hist,
+                                                          x_hist)
+            passed = False
+            if cheap_ok:
+                opt_ok, opt_reason = self._optimality_criterion_pass(x_cur)
+                if opt_ok and (reasons or opt_reason):
+                    if opt_reason:
+                        reasons = [opt_reason] + reasons
+                    passed = True
+            if passed:
+                patience_counter += 1
+                if patience_counter >= conv.patience:
+                    self._chunked_reason = f"converged({'; '.join(reasons)})"
+                    return x_cur, kb + 1, n_proj_total, True, 1
+            else:
+                patience_counter = 0
+
+        # No stop: run out the remaining iterations (no further checkpoints).
+        if abs_iter < max_it:
+            reason_code = run(max_it - abs_iter)
+            if reason_code == 2:
+                return x_cur, abs_iter, n_proj_total, False, 2
+        return x_cur, max_it, n_proj_total, False, 0
 
     def _solve_euler_c(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
@@ -1298,22 +1703,49 @@ class SNNSolver:
                 "observer_distance": observer_distance,
             }
 
-        final_x, iters, n_proj, converged, reason_code = _kernel.solve_euler(
-            A, b, C, d, c_norms_sq, row_scale, c_gram, x0c,
-            self._k0, self.config.constraint_tol,
-            self.config.max_iterations, self._proj_cap,
-            conv.enable_early_stopping, conv.check_every, conv.min_iterations,
-            conv.window_size, conv.patience,
-            conv.obj_rel_tol, conv.x_rel_tol, conv.proj_grad_tol,
-            conv.feasibility_tol,
-            conv.use_objective_plateau, conv.use_projected_gradient,
-            conv.use_solution_stable, conv.require_feasibility,
-            has_lower, float(self.config.lower_bound) if has_lower else 0.0,
-            has_upper, float(self.config.upper_bound) if has_upper else 0.0,
-            parallel=parallel,
-            a_diag=a_diag_c, use_diag=use_diag,
-            **observer_kwargs,
-        )
+        def kernel_call(x_start, iterations, *, early_stop, iter_offset=0,
+                        resume=False, extra=None):
+            kwargs = dict(observer_kwargs)
+            if resume and observer_kwargs:
+                kwargs["resume_observer"] = True
+            if extra:
+                kwargs.update(extra)
+            return _kernel.solve_euler(
+                A, b, C, d, c_norms_sq, row_scale, c_gram,
+                np.ascontiguousarray(x_start, dtype=np.float64),
+                self._k0, self.config.constraint_tol,
+                iterations, self._proj_cap,
+                early_stop, conv.check_every, conv.min_iterations,
+                conv.window_size, conv.patience,
+                conv.obj_rel_tol, conv.x_rel_tol, conv.proj_grad_tol,
+                conv.feasibility_tol,
+                conv.use_objective_plateau, conv.use_projected_gradient,
+                conv.use_solution_stable, conv.require_feasibility,
+                has_lower, float(self.config.lower_bound) if has_lower else 0.0,
+                has_upper, float(self.config.upper_bound) if has_upper else 0.0,
+                parallel=parallel,
+                a_diag=a_diag_c, use_diag=use_diag,
+                iter_offset=iter_offset,
+                **kwargs,
+            )
+
+        # The KKT certificate is host-side policy shared by every backend, so
+        # the compiled kernel is driven in fixed chunks ending at each
+        # convergence checkpoint; the host evaluates the same feasibility /
+        # cheap-criteria / certificate gates the Python backend uses (kernel
+        # early stopping stays off). The legacy projected-gradient and "none"
+        # criteria still run monolithically with the in-kernel checks, which
+        # preserves the pre-v0.6 native behavior exactly.
+        chunked = (conv.enable_early_stopping
+                   and conv.optimality_test == "kkt"
+                   and self.config.max_iterations > 0)
+        if not chunked:
+            final_x, iters, n_proj, converged, reason_code = kernel_call(
+                x0c, self.config.max_iterations,
+                early_stop=conv.enable_early_stopping)
+        else:
+            final_x, iters, n_proj, converged, reason_code = (
+                self._drive_chunked_kernel(kernel_call, x0c))
 
         self._n_projections = int(n_proj)
         if self.config.observe_projection_events:
@@ -1332,7 +1764,11 @@ class SNNSolver:
         self._converged = bool(converged)
         self._iterations_used = int(iters)
         if reason_code == 1:
-            self._convergence_reason = "converged(c-backend)"
+            # The chunked (host-policy) driver supplies the same reason string
+            # the Python backend produces; the monolithic legacy path keeps
+            # its historical label.
+            self._convergence_reason = (self._chunked_reason
+                                        or "converged(c-backend)")
         elif reason_code == 2:
             self._convergence_reason = "projection_budget_exhausted"
             self._projection_budget_exhausted = True
@@ -1752,6 +2188,8 @@ class SNNSolver:
             max_distance_rows=dist_rows,
             max_violation_box=box_viol,
             stationarity_residual=self._stationarity_residual(final_x),
+            optimality_test=self.config.convergence.optimality_test,
+            **self._kkt_result_fields(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
             **self._projection_event_result_fields(),
         )
