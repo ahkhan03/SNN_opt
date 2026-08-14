@@ -87,7 +87,13 @@ Both residual components carry gradient units, so while the relative term
 dominates the threshold the decision is invariant under positive objective
 rescaling, constraint row order, row duplication, and per-row scaling (the
 `kkt_abs_tol` floor deliberately takes over at near-zero gradient scales:
-the intentional fallback that lets a genuinely-zero problem terminate). The cheap window criteria and the feasibility gate run first;
+the intentional fallback that lets a genuinely-zero problem terminate). A
+second practical limit: certification at tolerances below the facet family's
+conditioning floor (~machine epsilon times the condition number of the
+active normals) is limited by the accuracy of the least-squares fit itself,
+which varies with the SciPy version and the dense/sparse code path; the
+shipped default sits orders of magnitude above that floor for any reasonably
+conditioned family. The cheap window criteria and the feasibility gate run first;
 the NNLS only runs when they already pass, so its cost is confined to
 near-termination checkpoints. On the compiled backends the kernel is driven in
 checkpoint-sized chunks and this certificate is evaluated host-side, so every
