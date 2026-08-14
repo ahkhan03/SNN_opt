@@ -588,3 +588,119 @@ def test_transient_fit_failure_resets_patience(monkeypatch):
     _, r = _solve(A, b, C, d, max_iterations=2000)
     assert not r.converged
     assert r.kkt_fit_status == "fit_failed"
+
+
+# ---------------------------------------------------------------------------
+# Round-3 additions: sparse fit convergence at near-collinear facets,
+# pre-allocation guard, IVP master switch, sentinel conflict detection,
+# invalid-selector dispatch, non-finite facet data
+# ---------------------------------------------------------------------------
+
+def test_near_collinear_sparse_matches_dense_at_tight_tolerance():
+    """Exact-KKT point with nearly collinear active normals: the sparse fit
+    must genuinely converge (not stop at LSMR's default iteration limit) so
+    matrix representation cannot flip the public decision."""
+    import scipy.sparse as sp
+    theta = 1e-4
+    C = np.array([[1.0, 0.0],
+                  [np.cos(theta), np.sin(theta)]])
+    A = np.eye(2)
+    d = np.zeros(2)
+    x = np.zeros(2)
+    b = -(C[0] + 0.7 * C[1])  # exact cone member: mu = (1, 0.7)
+    cfg = dict(convergence=ConvergenceConfig(kkt_abs_tol=0.0,
+                                             kkt_rel_tol=1e-6))
+    dense = _certificate(A, b, C, d, x, **cfg)
+    prob = OptimizationProblem(A=A, b=b, C=sp.csr_matrix(C), d=d)
+    solver = SNNSolver(prob, SolverConfig(
+        convergence=ConvergenceConfig(kkt_abs_tol=0.0, kkt_rel_tol=1e-6)))
+    sparse_cert = solver._compute_kkt_certificate(x)
+    assert dense.passed
+    assert sparse_cert.passed, (
+        f"sparse residual {sparse_cert.residual:.3e} vs tolerance "
+        f"{sparse_cert.tolerance:.3e}: inner solver did not converge")
+    assert abs(sparse_cert.residual - dense.residual) <= dense.tolerance
+
+
+def test_box_dominated_family_uses_sparse_blocks():
+    """Dense-C-free problem with huge n and bounds: the certificate must not
+    allocate dense identity blocks (would be ~2 GB at n=16000 with two
+    bounds); it silently switches to sparse facets and certifies."""
+    n = 16000
+    import scipy.sparse as sp
+    A = sp.identity(n, format="csr")
+    b = -np.ones(n)
+    prob = OptimizationProblem(A=A, b=b, C=np.zeros((0, n)), d=np.zeros(0))
+    solver = SNNSolver(prob, SolverConfig(lower_bound=-1.0, upper_bound=1.0))
+    cert = solver._compute_kkt_certificate(np.ones(n))  # optimum: upper active
+    assert cert.fit_status == "ok"
+    assert cert.passed
+
+
+def test_oversized_dense_rows_fail_closed_without_allocation():
+    """When the dense ROW block alone exceeds the guard, the certificate
+    fails closed before building facets (no MemoryError propagation)."""
+    A, b, C, d = _random_qp()
+    prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+    solver = SNNSolver(prob, SolverConfig())
+    original = SNNSolver._DENSE_CERT_MAX_ENTRIES
+    try:
+        SNNSolver._DENSE_CERT_MAX_ENTRIES = 10  # every dense family too big
+        cert = solver._compute_kkt_certificate(np.zeros(A.shape[0]))
+    finally:
+        SNNSolver._DENSE_CERT_MAX_ENTRIES = original
+    assert cert.fit_status == "too_large"
+    assert not cert.passed
+
+
+def test_ivp_respects_master_early_stopping_switch():
+    """A KKT-accepted IVP stall must still report converged=False when
+    enable_early_stopping=False (parity with the euler/native paths)."""
+    A = np.eye(2)
+    b = np.array([-1.0, -1.0])
+    C = np.array([[1.0, 0.0]])
+    d = np.array([0.0])
+    prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+    # Lax tolerance so the certificate itself passes; only the switch blocks.
+    r = SNNSolver(prob, SolverConfig(
+        integration_method="ivp", t_end=5.0,
+        convergence=ConvergenceConfig(enable_early_stopping=False,
+                                      kkt_abs_tol=2.0,
+                                      kkt_rel_tol=0.0))).solve(np.zeros(2))
+    assert not r.converged
+
+
+def test_alias_with_explicit_default_new_settings_raises():
+    for kwargs in (dict(proj_grad_tol=1e-5, kkt_abs_tol=1e-9),
+                   dict(proj_grad_tol=1e-5, kkt_rel_tol=1e-4),
+                   dict(use_projected_gradient=True,
+                        kkt_abs_tol=1e-9, kkt_rel_tol=1e-4),
+                   dict(proj_grad_tol=1e-5, legacy_proj_grad_tol=2e-6)):
+        with pytest.raises(ValueError):
+            ConvergenceConfig(**kwargs)
+
+
+def test_mutated_invalid_selector_raises_at_solve_time():
+    A, b, C, d = _random_qp()
+    for bogus in ("bogus", None):
+        for be in ("python",) + (("c",) if HAVE_KERNEL else ()):
+            cfg = SolverConfig(backend=be, max_iterations=300)
+            cfg.convergence.optimality_test = bogus
+            prob = OptimizationProblem(A=A, b=b, C=C, d=d)
+            with pytest.raises(ValueError):
+                SNNSolver(prob, cfg).solve(np.zeros(A.shape[0]))
+
+
+def test_non_finite_constraint_row_fails_closed():
+    """A NaN row must not be silently dropped by the degeneracy screen and
+    certified around."""
+    cert = _certificate(np.array([[1.0]]), np.array([0.0]),
+                        np.array([[np.nan]]), np.array([-1.0]),
+                        np.array([0.0]))
+    assert cert.fit_status == "non_finite"
+    assert not cert.passed
+    cert2 = _certificate(np.array([[1.0]]), np.array([0.0]),
+                         np.array([[0.0]]), np.array([np.nan]),
+                         np.array([0.0]))
+    assert cert2.fit_status == "non_finite"
+    assert not cert2.passed

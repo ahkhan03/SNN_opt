@@ -54,6 +54,12 @@ def _config() -> SolverConfig:
         max_iterations=4_000,
         convergence=ConvergenceConfig(
             enable_early_stopping=True,
+            # Pin the criterion and both tolerances explicitly so a future
+            # default change cannot silently rewrite this figure's numbers
+            # (v0.6.0 record: KKT certificate, 221 cold / 101 warm).
+            optimality_test="kkt",
+            kkt_abs_tol=1e-9,
+            kkt_rel_tol=1e-4,
             min_iterations=20,
             check_every=10,
             patience=2,

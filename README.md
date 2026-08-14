@@ -269,10 +269,12 @@ the gradient, accepted when
 r_kkt  <=  kkt_abs_tol + kkt_rel_tol * max(‖A x‖, ‖b‖, ‖Nᵀμ‖)
 ```
 
-Both sides carry gradient units, so the decision is invariant under positive
-objective rescaling, constraint row order, row duplication, and per-row
-scaling: the same problem certifies identically at natural scale and at
-1e10x. The fit runs host-side on every backend: the compiled kernel advances
+Both sides carry gradient units, so while the relative term dominates the
+threshold the decision is invariant under positive objective rescaling,
+constraint row order, row duplication, and per-row scaling: the same problem
+certifies identically at natural scale and at 1e10x. (The `kkt_abs_tol`
+floor deliberately takes over at near-zero gradient scales, the intentional
+fallback that lets a genuinely-zero problem terminate.) The fit runs host-side on every backend: the compiled kernel advances
 the dynamics in checkpoint-sized chunks and the same Python policy evaluates
 each checkpoint, so `converged` means one thing everywhere (the FPGA
 reference is unchanged and reports fixed-horizon results, which the host can

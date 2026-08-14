@@ -101,8 +101,12 @@ class ConvergenceConfig:
     # fixed-point floor of the default dynamics (k0_scale=0.5): it certifies
     # the residual the solver genuinely reaches, roughly 1e-3 relative
     # solution error; it is a KKT-residual tolerance, not an error bound.
-    kkt_abs_tol: float = 1e-9
-    kkt_rel_tol: float = 1e-4
+    # None = "not explicitly chosen" (resolved to 1e-9 / 1e-4 in
+    # __post_init__): the sentinel lets alias-conflict detection see EVERY
+    # explicitly supplied new-style setting, including one that happens to
+    # equal the default.
+    kkt_abs_tol: Optional[float] = None
+    kkt_rel_tol: Optional[float] = None
 
     # Tolerances (cheap criteria)
     obj_rel_tol: float = 1e-8          # Relative objective change over window
@@ -124,7 +128,8 @@ class ConvergenceConfig:
     # Tolerance of the legacy projected-gradient criterion (only read when
     # optimality_test == "legacy_projected_gradient"). A regular field so it
     # round-trips; the deprecated `proj_grad_tol` alias below writes it.
-    legacy_proj_grad_tol: float = 1e-6
+    # None = unset, resolved to 1e-6 (same sentinel rationale as above).
+    legacy_proj_grad_tol: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Deprecated CONSTRUCTOR-ONLY aliases (pre-v0.6 projected-gradient
@@ -143,13 +148,15 @@ class ConvergenceConfig:
                           or proj_grad_tol is not None)
         if legacy_supplied:
             if (self.optimality_test is not None
-                    or self.kkt_abs_tol != 1e-9
-                    or self.kkt_rel_tol != 1e-4):
+                    or self.kkt_abs_tol is not None
+                    or self.kkt_rel_tol is not None
+                    or self.legacy_proj_grad_tol is not None):
                 raise ValueError(
                     "deprecated projected-gradient options "
                     "(use_projected_gradient / proj_grad_tol) cannot be "
-                    "combined with explicit optimality_test / kkt_* settings; "
-                    "supply exactly one criterion family")
+                    "combined with explicit optimality_test / kkt_* / "
+                    "legacy_proj_grad_tol settings; supply exactly one "
+                    "criterion family")
             import warnings
             if proj_grad_tol is not None:
                 self.legacy_proj_grad_tol = float(proj_grad_tol)
@@ -168,6 +175,21 @@ class ConvergenceConfig:
                     DeprecationWarning, stacklevel=3)
         if self.optimality_test is None:
             self.optimality_test = "kkt"
+        if self.kkt_abs_tol is None:
+            self.kkt_abs_tol = 1e-9
+        if self.kkt_rel_tol is None:
+            self.kkt_rel_tol = 1e-4
+        if self.legacy_proj_grad_tol is None:
+            self.legacy_proj_grad_tol = 1e-6
+        self.validate()
+
+    def validate(self):
+        """Validate the resolved criterion settings.
+
+        Called from __post_init__ and again at solve time, so a config whose
+        fields were mutated after construction (dataclasses are not frozen)
+        is still checked before it can steer a backend dispatch.
+        """
         valid = ("kkt", "legacy_projected_gradient", "none")
         if self.optimality_test not in valid:
             raise ValueError(
@@ -175,7 +197,7 @@ class ConvergenceConfig:
                 f"got {self.optimality_test!r}")
         for name in ("kkt_abs_tol", "kkt_rel_tol", "legacy_proj_grad_tol"):
             v = getattr(self, name)
-            if not (np.isfinite(v) and v >= 0.0):
+            if v is None or not (np.isfinite(v) and v >= 0.0):
                 raise ValueError(f"{name} must be finite and >= 0, got {v!r}")
 
 
@@ -424,9 +446,11 @@ class SolverResult:
         Scale-invariant KKT certificate at the final point:
         hypot(kkt_stationarity_residual, kkt_complementarity_residual), from
         one augmented NNLS over ALL unit-normalized facets (no active-set
-        window). Unique under multiplier non-uniqueness; invariant to
-        constraint row order, row duplication, and positive objective
-        scaling. NaN when the fit failed (see kkt_fit_status).
+        window). Unique under multiplier non-uniqueness and invariant to
+        constraint row order and row duplication; the dimensional value
+        scales with the objective (kkt_residual / kkt_scale is the
+        invariant normalized defect). NaN when the fit failed (see
+        kkt_fit_status).
     kkt_stationarity_residual : float
         ||grad f(x) + N^T mu||_2 component of the certificate.
     kkt_complementarity_residual : float
@@ -875,27 +899,44 @@ class SNNSolver:
     # hit this: they take the sparse fit path whose memory scales with nnz.
     _DENSE_CERT_MAX_ENTRIES = 50_000_000
 
-    def _certificate_facets(self, x: np.ndarray):
+    def _certificate_facet_count(self) -> int:
+        """Number of certificate facets WITHOUT building anything."""
+        n = self.problem.n_vars
+        p = 0
+        if self.problem.n_constraints > 0:
+            p += int(np.count_nonzero(self._c_norms > 1e-12))
+        if self.config.lower_bound is not None:
+            p += n
+        if self.config.upper_bound is not None:
+            p += n
+        return p
+
+    def _certificate_facets(self, x: np.ndarray, force_sparse: bool = False):
         """Unified unit-normalized facet family at x: (N, s, is_sparse).
 
         N stacks every nondegenerate facet normal as a row (explicit rows
         divided by ||c_j||, box facets as +/- e_i); s holds the matching
-        signed slacks (>= 0 feasible). When the constraint matrix is a SciPy
-        sparse matrix, N is returned sparse (CSR) so the certificate's memory
-        stays proportional to nnz; otherwise N is a dense array. Both are
+        signed slacks (>= 0 feasible). N is sparse (CSR) when the constraint
+        matrix is a SciPy sparse matrix or when ``force_sparse`` is set (used
+        for box-dominated families whose dense identity blocks would be the
+        biggest allocation of the whole solve); otherwise dense. Both are
         empty when there are no facets.
         """
         n = self.problem.n_vars
         m = self.problem.n_constraints
         blocks, slacks = [], []
-        sparse_rows = m > 0 and _issparse(self.problem.C)
+        sparse_rows = force_sparse or (m > 0 and _issparse(self.problem.C))
         if m > 0:
             g = np.asarray(self.problem.constraint_values(x), dtype=float).ravel()
             keep = self._c_norms > 1e-12  # degenerate rows: preflight owns them
             if np.any(keep):
                 scale = self._row_scale[keep]
                 if sparse_rows:
-                    rows = self.problem.C.tocsr()[np.nonzero(keep)[0]]
+                    if _issparse(self.problem.C):
+                        rows = self.problem.C.tocsr()[np.nonzero(keep)[0]]
+                    else:
+                        rows = _sp.csr_matrix(
+                            np.asarray(self.problem.C, dtype=float)[keep])
                     blocks.append(_sp.diags(scale) @ rows)
                 else:
                     C = np.asarray(self.problem.C, dtype=float)
@@ -931,9 +972,28 @@ class SNNSolver:
                 comp_row = _sp.csr_matrix((abs_s / lx)[None, :])
                 M = _sp.vstack([N.T.tocsr(), comp_row], format="csr")
                 rhs = np.concatenate([-g, [0.0]])
+                # Generous inner budget: LSMR's default maxiter, min(m, n),
+                # is routinely insufficient on near-collinear facet families,
+                # and lsq_linear can report success from its
+                # unconstrained-candidate shortcut even when the embedded
+                # LSMR stopped at its iteration limit -- which was observed
+                # to flip the public decision relative to the identical
+                # dense problem. So: solve the unconstrained system first
+                # with an explicit convergence status, accept it only when
+                # LSMR genuinely converged AND the candidate is already in
+                # the cone; otherwise fall to the bounded solver with the
+                # same generous budget.
+                maxiter = max(2000, 5 * (M.shape[0] + M.shape[1]))
+                from scipy.sparse.linalg import lsmr
+                sol = lsmr(M, rhs, atol=1e-14, btol=1e-14, maxiter=maxiter)
+                mu_u, istop = sol[0], int(sol[1])
+                if (istop in (0, 1, 2) and np.all(np.isfinite(mu_u))
+                        and np.all(mu_u >= 0.0)):
+                    return mu_u, "ok"
                 from scipy.optimize import lsq_linear
                 res = lsq_linear(M, rhs, bounds=(0.0, np.inf),
-                                 lsq_solver="lsmr", tol=1e-12)
+                                 lsq_solver="lsmr", tol=1e-12,
+                                 lsmr_tol=1e-14, lsmr_maxiter=maxiter)
                 if not res.success or not np.all(np.isfinite(res.x)):
                     return None, "fit_failed"
                 return res.x, "ok"
@@ -993,8 +1053,43 @@ class SNNSolver:
         if not np.all(np.isfinite(x)) or not np.all(np.isfinite(g)):
             return _cert(float("nan"), float("nan"), float("nan"),
                          scale_gb, "non_finite")
+        # Raw facet data must be validated BEFORE degeneracy screening: a
+        # NaN/inf constraint row makes its norm non-finite, and a
+        # `norm > 1e-12` keep-test would silently DROP such a row as if it
+        # were degenerate and then certify without it.
+        if self.problem.n_constraints > 0:
+            d_vec = np.asarray(self.problem.d, dtype=float).ravel()
+            if (not np.all(np.isfinite(self._c_norms))
+                    or not np.all(np.isfinite(d_vec))):
+                return _cert(float("nan"), float("nan"), float("nan"),
+                             scale_gb, "non_finite")
 
-        N, s, _ = self._certificate_facets(x)
+        # Choose the facet representation from the COUNT, before building
+        # anything: a box-dominated family (e.g. n=10^4 with bounds) would
+        # otherwise allocate dense identity blocks bigger than the guard is
+        # trying to prevent. Dense C rows that alone exceed the guard fail
+        # closed without any allocation at all.
+        n_vars = self.problem.n_vars
+        p = self._certificate_facet_count()
+        rows_sparse = (self.problem.n_constraints > 0
+                       and _issparse(self.problem.C))
+        force_sparse = False
+        if not rows_sparse and (n_vars + 1) * p > self._DENSE_CERT_MAX_ENTRIES:
+            kept_rows = p
+            if self.config.lower_bound is not None:
+                kept_rows -= n_vars
+            if self.config.upper_bound is not None:
+                kept_rows -= n_vars
+            if (n_vars + 1) * kept_rows > self._DENSE_CERT_MAX_ENTRIES:
+                return _cert(float("nan"), float("nan"), float("nan"),
+                             scale_gb, "too_large")
+            force_sparse = True  # box blocks dominate: build them sparse
+
+        try:
+            N, s, _ = self._certificate_facets(x, force_sparse=force_sparse)
+        except MemoryError:
+            return _cert(float("nan"), float("nan"), float("nan"),
+                         scale_gb, "too_large")
         if N.shape[0] == 0:
             gnorm = float(np.linalg.norm(g))
             return _cert(gnorm, gnorm, 0.0, scale_gb, "ok")
@@ -1231,6 +1326,11 @@ class SNNSolver:
             if proj_grad_norm < conv_cfg.legacy_proj_grad_tol:
                 return True, f"proj_grad(norm={proj_grad_norm:.2e})"
             return False, None
+        if mode != "kkt":
+            # Defense in depth: solve() validates the selector up front, so
+            # this only fires on mid-solve mutation. Never fall through to a
+            # catch-all criterion.
+            raise ValueError(f"unknown optimality_test {mode!r}")
         cert = self._compute_kkt_certificate(x_curr)
         self._last_kkt_certificate = cert
         if cert.passed:
@@ -1266,6 +1366,10 @@ class SNNSolver:
         self._spike_constraints = []
         self._spike_violation_values = []
         self._reset_projection_event_observer()
+        # Re-validate criterion settings at solve time: the config dataclass
+        # is not frozen, and a mutated-invalid selector must fail loudly here
+        # rather than silently steering the two backends differently.
+        self.config.convergence.validate()
         self._converged = False
         self._last_kkt_certificate = None
         self._chunked_reason = None
@@ -1932,12 +2036,19 @@ class SNNSolver:
         if (self._converged
                 and self.config.convergence.optimality_test == "kkt"):
             conv_cfg = self.config.convergence
-            feasible = (not conv_cfg.require_feasibility
-                        or (self._joint_max_violation(x_current)
-                            <= conv_cfg.feasibility_tol))
-            cert_ok, _ = self._optimality_criterion_pass(x_current)
-            if not (feasible and cert_ok):
+            if not conv_cfg.enable_early_stopping:
+                # The stall still TERMINATES integration (it cannot make
+                # progress), but with the master switch off no path is
+                # allowed to report early convergence -- the euler and
+                # native fixed-horizon paths already behave this way.
                 self._converged = False
+            else:
+                feasible = (not conv_cfg.require_feasibility
+                            or (self._joint_max_violation(x_current)
+                                <= conv_cfg.feasibility_tol))
+                cert_ok, _ = self._optimality_criterion_pass(x_current)
+                if not (feasible and cert_ok):
+                    self._converged = False
 
         self._iterations_used = len(self._t_segments)
 

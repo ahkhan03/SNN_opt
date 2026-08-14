@@ -575,8 +575,10 @@ carries gradient units in both components and is accepted when
 $$r_{\mathrm{kkt}} \le \epsilon_{\mathrm{abs}} + \epsilon_{\mathrm{rel}} \cdot
 \max(\|Ax\|_2, \|b\|_2, \|N^\top\hat\mu\|_2)$$
 
-so the decision is invariant under positive objective rescaling, constraint
-row order, and row duplication. It is evaluated host-side on every backend.
+so while the relative term dominates the threshold the decision is
+invariant under positive objective rescaling, constraint row order, and row
+duplication (the $\epsilon_{\mathrm{abs}}$ floor deliberately takes over at
+near-zero gradient scales). It is evaluated host-side on every backend.
 
 *Historical note.* Through v0.5 the optimality test was a per-facet
 independent gradient projection,
