@@ -26,10 +26,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 import figstyle
+import matplotlib.pyplot as plt
+import numpy as np
+
 from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 REPEATS = 5      # timed runs per problem; the median is plotted

@@ -15,12 +15,13 @@ The SVM dual problem:
 where Q_ij = y_i y_j K(x_i, x_j) is the label-weighted kernel matrix.
 """
 
-import numpy as np
-import sys
 import os
+import sys
+
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-from snn_opt import SNNSolver, SolverConfig, OptimizationProblem
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 
 def rbf_kernel(X, gamma=1.0):
@@ -74,9 +75,9 @@ def main():
     ])
     d_eq = np.array([0.0, 0.0])
     
-    print(f"\nProblem dimensions:")
+    print("\nProblem dimensions:")
     print(f"  Variables: {n}")
-    print(f"  Equality constraints: 1 (y^T alpha = 0)")
+    print("  Equality constraints: 1 (y^T alpha = 0)")
     print(f"  Box constraints: 0 <= alpha <= {C} (handled by clipping)")
     
     # Create problem
@@ -103,7 +104,7 @@ def main():
     # Results
     alpha = result.final_x
     
-    print(f"\n--- Results ---")
+    print("\n--- Results ---")
     print(f"Final objective: {result.final_objective:.4f}")
     print(f"Converged: {result.converged}")
     print(f"Convergence reason: {result.convergence_reason}")
@@ -114,7 +115,7 @@ def main():
     # Check constraints
     eq_violation = abs(y @ alpha)
     box_violations = np.sum(alpha < -1e-6) + np.sum(alpha > C + 1e-6)
-    print(f"\nConstraint satisfaction:")
+    print("\nConstraint satisfaction:")
     print(f"  |y^T alpha| = {eq_violation:.6f}")
     print(f"  Box violations: {box_violations}")
     
@@ -122,7 +123,7 @@ def main():
     sv_mask = alpha > 1e-5
     free_sv_mask = (alpha > 1e-5) & (alpha < C - 1e-5)
     
-    print(f"\nSupport vectors:")
+    print("\nSupport vectors:")
     print(f"  Total: {np.sum(sv_mask)}")
     print(f"  Free (0 < alpha < C): {np.sum(free_sv_mask)}")
     print(f"  Bounded (alpha = C): {np.sum(alpha > C - 1e-5)}")

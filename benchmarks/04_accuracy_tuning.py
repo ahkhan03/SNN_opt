@@ -31,15 +31,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
-
-import figstyle
-import qpref
-from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
-
 # Reuse Figure 1's problem so the two figures describe the same solver run.
 from importlib import import_module
+
+import figstyle
+import matplotlib.pyplot as plt
+import numpy as np
+import qpref
+
+from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 random_qp = import_module("01_convergence").random_qp
 

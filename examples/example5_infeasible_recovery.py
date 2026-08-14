@@ -7,9 +7,11 @@ projects them back to feasibility before optimization.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
+
 from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 # Simple 2D problem with tight constraints
@@ -75,7 +77,7 @@ print("Detailed analysis for x0 = [2.0, 2.0]:")
 x0 = np.array([2.0, 2.0])
 print(f"  Initial point: {x0}")
 print(f"  Initial feasibility: {problem.is_feasible(x0)}")
-print(f"  Initial constraint values:")
+print("  Initial constraint values:")
 g0 = problem.constraint_values(x0)
 constraint_names = ["x1+x2<=1", "-x1+x2<=1", "x1-x2<=1", "-x1-x2<=1"]
 for name, g in zip(constraint_names, g0):
@@ -86,11 +88,11 @@ print()
 solver = SNNSolver(problem, config)
 result = solver.solve(x0, verbose=False)
 
-print(f"  After projection phase:")
+print("  After projection phase:")
 print(f"    Projections needed: {result.n_projections}")
 print(f"  Final solution: {result.final_x}")
 print(f"  Final objective: {result.final_objective:.6e}")
-print(f"  Final constraint values:")
+print("  Final constraint values:")
 gf = problem.constraint_values(result.final_x)
 for name, g in zip(constraint_names, gf):
     status = "✓" if g <= 1e-6 else "✗"
@@ -99,6 +101,6 @@ for name, g in zip(constraint_names, gf):
 
 # The optimal solution for this problem is x = [0, 0]
 print()
-print(f"Expected optimal solution: [0, 0]")
+print("Expected optimal solution: [0, 0]")
 print(f"Solution error: {np.linalg.norm(result.final_x):.6e}")
 

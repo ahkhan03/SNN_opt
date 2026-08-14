@@ -7,9 +7,11 @@ This corresponds to example2.m in the MATLAB implementation.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
+
 from snn_opt import solve_qp
 
 # Problem: minimize (1/2) x^T x subject to:
@@ -34,9 +36,9 @@ x0 = np.array([1.0, 1.0])
 print("=" * 60)
 print("Example 1: Simple 2D QP")
 print("=" * 60)
-print(f"Problem: minimize ||x||^2")
-print(f"Subject to: x1 + 2*x2 <= 1")
-print(f"           -x1 + 3*x2 <= 1")
+print("Problem: minimize ||x||^2")
+print("Subject to: x1 + 2*x2 <= 1")
+print("           -x1 + 3*x2 <= 1")
 print(f"Initial guess: {x0}")
 print()
 

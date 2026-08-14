@@ -30,11 +30,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 import figstyle
+import matplotlib.pyplot as plt
+import numpy as np
 import qpref
+
 from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 # Iterations shown. The run goes to 400; past ~60 the raster is unchanging,

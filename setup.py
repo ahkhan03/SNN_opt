@@ -21,7 +21,6 @@ Build in place for development with::
 
 import contextlib
 import os
-import sys
 import tempfile
 
 from setuptools import setup

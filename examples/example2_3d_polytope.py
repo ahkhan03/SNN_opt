@@ -7,9 +7,11 @@ This corresponds to example1.m in the MATLAB implementation.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
+
 from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 # Problem: minimize (1/2) x^T x subject to 4 linear constraints
@@ -65,7 +67,7 @@ for i, g_i in enumerate(g_final):
     satisfied = "✓" if g_i <= 1e-6 else "✗"
     print(f"  Constraint {i+1}: {g_i:+.6e}  [{status}] {satisfied}")
 
-print(f"\nSolution components:")
+print("\nSolution components:")
 for i, x_i in enumerate(result.final_x):
     print(f"  x[{i+1}] = {x_i:.6f}")
 

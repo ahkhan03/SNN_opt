@@ -7,9 +7,11 @@ Demonstrates LP solving by setting A = 0 (no quadratic term).
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
+
 from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 # Problem: minimize b^T x subject to constraints
@@ -41,9 +43,9 @@ x0 = np.array([0.0, 0.0, 0.0])
 print("=" * 60)
 print("Example 3: Linear Program")
 print("=" * 60)
-print(f"Problem: minimize b^T x")
+print("Problem: minimize b^T x")
 print(f"Cost vector b: {b}")
-print(f"Box constraints: -1 <= x_i <= 2 for i=1,2,3")
+print("Box constraints: -1 <= x_i <= 2 for i=1,2,3")
 print(f"Initial guess: {x0}")
 print()
 
@@ -72,7 +74,7 @@ print()
 print("Active constraints at solution:")
 g_final = problem.constraint_values(result.final_x)
 constraint_names = ["x1 <= 2", "x2 <= 2", "x3 <= 2", "x1 >= -1", "x2 >= -1", "x3 >= -1"]
-for i, (g_i, name) in enumerate(zip(g_final, constraint_names)):
+for g_i, name in zip(g_final, constraint_names):
     if abs(g_i) < 1e-3:
         print(f"  {name}: ACTIVE (g = {g_i:.6e})")
 

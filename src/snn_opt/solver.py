@@ -19,11 +19,12 @@ infeasible point whose objective can undercut the true optimum. Box-only
 problems (m == 0) still dispatch to the exact vectorized box projection.
 """
 
+from dataclasses import InitVar, dataclass, field, replace
+from typing import List, Optional, Tuple, Union
+
 import numpy as np
 import scipy.sparse as _sp
 from scipy.integrate import solve_ivp
-from dataclasses import InitVar, dataclass, field, replace
-from typing import Optional, Tuple, List, Callable, Union
 
 
 def _issparse(x):
@@ -862,12 +863,16 @@ class SNNSolver:
                 slacks.append(-dist[j])
         if self.config.lower_bound is not None:
             for i in np.nonzero(self.config.lower_bound - x >= -active_tol)[0]:
-                e = np.zeros(n); e[i] = -1.0
-                normals.append(e); slacks.append(x[i] - self.config.lower_bound)
+                e = np.zeros(n)
+                e[i] = -1.0
+                normals.append(e)
+                slacks.append(x[i] - self.config.lower_bound)
         if self.config.upper_bound is not None:
             for i in np.nonzero(x - self.config.upper_bound >= -active_tol)[0]:
-                e = np.zeros(n); e[i] = 1.0
-                normals.append(e); slacks.append(self.config.upper_bound - x[i])
+                e = np.zeros(n)
+                e[i] = 1.0
+                normals.append(e)
+                slacks.append(self.config.upper_bound - x[i])
         if not normals:
             return float(np.linalg.norm(grad))
         try:

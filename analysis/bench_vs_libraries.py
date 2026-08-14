@@ -46,16 +46,18 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import cvxpy as cp
 import numpy as np
+import osqp
 import scipy.sparse as sp
 from scipy.optimize import minimize
 
-import cvxpy as cp
-import osqp
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from snn_opt import (  # noqa: E402
-    ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig,
+    ConvergenceConfig,
+    OptimizationProblem,
+    SNNSolver,
+    SolverConfig,
 )
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"

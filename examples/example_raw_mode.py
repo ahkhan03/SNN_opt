@@ -30,10 +30,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # the repository and on the website reads as one visual system.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 import figstyle
+import matplotlib.pyplot as plt
+import numpy as np
+
 from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 _ROOT = Path(__file__).resolve().parent.parent

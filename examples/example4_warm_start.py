@@ -8,11 +8,14 @@ This mimics the manipulator control scenario.
 
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import numpy as np
-from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 import time
+
+import numpy as np
+
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 
 # Simulate a control scenario where the constraint moves over time
 n = 2
@@ -27,8 +30,8 @@ print("=" * 60)
 print("Example 4: Warm Starting (Receding Horizon)")
 print("=" * 60)
 print("Simulating time-varying constraint scenario")
-print(f"Base problem: minimize ||x||^2")
-print(f"Constraint moves: x1 + x2 <= 1 + 0.1*k (k = timestep)")
+print("Base problem: minimize ||x||^2")
+print("Constraint moves: x1 + x2 <= 1 + 0.1*k (k = timestep)")
 print()
 
 # Simulation parameters
@@ -85,7 +88,7 @@ print()
 # Verify warm starting benefit
 print("Warm starting analysis:")
 print(f"  First solve (cold start): {solve_times[0]:.3f} ms, {iterations[0]} projections")
-print(f"  Later solves benefit from warm start:")
+print("  Later solves benefit from warm start:")
 for k in range(1, min(4, n_steps)):
     print(f"    Step {k}: {solve_times[k]:.3f} ms, {iterations[k]} projections")
 print()

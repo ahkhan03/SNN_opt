@@ -8,9 +8,7 @@ parity suite retains its existing tolerance policy for BLAS versus C loops.
 import numpy as np
 import pytest
 
-from snn_opt import (ConvergenceConfig, OptimizationProblem, SNNSolver,
-                     SolverConfig)
-
+from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 pytest.importorskip(
     "snn_opt._kernel",

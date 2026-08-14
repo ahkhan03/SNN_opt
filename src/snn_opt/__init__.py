@@ -36,7 +36,7 @@ from .solver import (
     SolverResult,
     solve_qp,
 )
-from .transforms import Transform, EigenbasisTransform
+from .transforms import EigenbasisTransform, Transform
 
 # Keep in sync with the version in pyproject.toml and CITATION.cff.
 __version__ = "0.6.0"

@@ -15,7 +15,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from snn_opt import (  # noqa: E402
-    OptimizationProblem, SNNSolver, SolverConfig, EigenbasisTransform,
+    EigenbasisTransform,
+    OptimizationProblem,
+    SNNSolver,
+    SolverConfig,
 )
 
 # 'c_openmp' only when the compiled kernel has OpenMP; 'c'/'c_serial' need the

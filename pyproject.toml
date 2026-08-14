@@ -59,4 +59,11 @@ target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N"]
-ignore = ["E501"]
+# E501: line length is advisory here (line-length=100 above).
+# N803/N806: mathematical naming (A, C, N, mu, ...) IS the domain notation of
+#   a QP solver; renaming to lowercase would hurt correspondence with the
+#   papers and docs.
+# UP006/UP007/UP035/UP045: typing modernizations whose autofixes are
+#   runtime-fragile while target-version is py39 without a blanket
+#   `from __future__ import annotations`.
+ignore = ["E501", "N803", "N806", "UP006", "UP007", "UP035", "UP045"]

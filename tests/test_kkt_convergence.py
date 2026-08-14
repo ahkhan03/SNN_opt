@@ -504,7 +504,6 @@ def test_sparse_certificate_does_not_densify():
     rng = np.random.default_rng(0)
     A = sp.identity(n, format="csr")
     b = -np.ones(n)
-    rows = rng.integers(0, m, size=m)
     cols = rng.integers(0, n, size=m)
     C = sp.csr_matrix((np.ones(m), (np.arange(m) % m, cols)), shape=(m, n))
     d = -np.ones(m)

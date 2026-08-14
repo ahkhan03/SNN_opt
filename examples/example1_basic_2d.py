@@ -25,11 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 # Shared figure style, so this figure matches the benchmark suite and the site.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "benchmarks"))
 
-import numpy as np
-import matplotlib.pyplot as plt
-
 import figstyle
-from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, ConvergenceConfig
+import matplotlib.pyplot as plt
+import numpy as np
+
+from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -57,9 +57,9 @@ def main():
     print("=" * 70)
     print("Example 1 Basic: Raw SNN Solver (Inverted Constraints)")
     print("=" * 70)
-    print(f"Problem: minimize ||x||²")
-    print(f"Subject to:  x1 + 2*x2 >= 1  (origin is OUTSIDE feasible region)")
-    print(f"            -x1 + 3*x2 >= 1")
+    print("Problem: minimize ||x||²")
+    print("Subject to:  x1 + 2*x2 >= 1  (origin is OUTSIDE feasible region)")
+    print("            -x1 + 3*x2 >= 1")
     print(f"Initial guess: {x0}")
     print()
     

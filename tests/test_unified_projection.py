@@ -17,8 +17,7 @@ import numpy as np
 import pytest
 
 from benchmarks.qpref import solve_exact
-from snn_opt import (ConvergenceConfig, OptimizationProblem, SNNSolver,
-                     SolverConfig)
+from snn_opt import ConvergenceConfig, OptimizationProblem, SNNSolver, SolverConfig
 
 
 def _markowitz(n=40, seed=0):
