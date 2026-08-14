@@ -17,8 +17,8 @@ Design rules this module encodes:
   a coloured mark always means "this is one of several things".
 * **Chrome is recessive.** Hairline spines, dotted low-contrast grid, no top or
   right spine, no chartjunk.
-* **No em-dashes in any user-visible string.** These figures ship in a public
-  repository and on the website; titles and labels use commas or colons.
+* **Consistent typography in user-visible strings.** Titles and labels
+  punctuate with commas or colons, matching the documentation style.
 
 Importing the module applies the style. Call :func:`apply` again after any
 local rcParams override.

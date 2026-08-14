@@ -51,5 +51,5 @@ Or invoke the scripts directly from a clean checkout (each one bootstraps
   reports wall-clock time, so its timing panel varies slightly between machines
   while its iteration panel does not.
 
-- **No em-dashes** in titles, labels or captions. These figures ship in a public
-  repository and on the website.
+- **Typography**: titles, labels and captions punctuate with commas, colons or
+  parentheses, matching the style used across the documentation.

@@ -131,7 +131,7 @@ Documentation and visualisation overhaul, with the
   (v0.5.0 accepts box bounds; the docs still said it rejects them).
 - Version metadata synchronised to 0.5.0 in the README badge, the citation
   snippet and `CITATION.cff`, all of which still said 0.4.0.
-- Em-dashes removed from public-facing documentation and figure text.
+- Typography normalized across documentation and figure text.
 
 ## [0.5.0] — 2026-07-15
 
