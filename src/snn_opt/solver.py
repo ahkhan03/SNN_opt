@@ -560,7 +560,7 @@ class SolverResult:
             f"status={self.kkt_fit_status})",
             f"  eps-KKT residual (legacy NNLS): {self.stationarity_residual:.6e}",
             f"  Final proj. gradient norm (legacy heuristic): {self.final_proj_grad_norm:.6e}",
-            f"  Max row violation (raw): {np.max(self.constraint_violations):.6e}",
+            f"  Max row violation at final point (raw): {self.max_violation_rows_raw:.6e}",
             f"  Total projections: {self.n_projections}",
             f"  Total spikes recorded: {len(self.spike_times)}",
         ]
@@ -1425,7 +1425,8 @@ class SNNSolver:
         """Solve via an explicit problem transform (the transform axis).
 
         Resolves ``config.transform``, checks applicability (e.g. eigenbasis
-        rejects box constraints), rewrites the problem into transformed
+        requires a symmetric-PSD Hessian; box bounds are materialized as
+        explicit rotated rows), rewrites the problem into transformed
         coordinates, solves the equivalent system with the canonical dynamics on
         the chosen backend (using the diagonal Hessian fast path when the
         transform diagonalizes A), then maps the solution back. Always returns

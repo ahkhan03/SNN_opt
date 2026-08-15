@@ -127,9 +127,13 @@ $$\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}^\top \mathbb{1}_{\mathbf{g}(
 where $\mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}$ is an indicator vector for violated constraints.
 
 **Adaptive Step (improved):**
-Project onto the most violated constraint with exact step:
-$$j = \arg\max_i g_i(\mathbf{y})$$
+Project onto the most violated constraint, where "most violated" is measured by
+the *normalized* (geometric) distance so differently scaled rows compete fairly,
+with an exact step:
+$$j = \arg\max_i \frac{g_i(\mathbf{y})}{\|\mathbf{c}_i\|}$$
 $$\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2} \mathbf{c}_j$$
+Since v0.5.0 box bounds participate in the same sweep as implicit unit-normal
+facets, competing on the same normalized distance.
 
 Repeat until all constraints satisfied.
 
@@ -175,8 +179,8 @@ for iter = 1 to max_iter:
     # Phase 2: Adaptive projection (spike phase)
     while true:
         g ← C*y + d                    # Constraint values (membrane voltages)
-        j ← argmax(g)                  # Most violated constraint
-        if g[j] ≤ tol: break           # All satisfied
+        j ← argmax(g / ‖c‖)            # Most violated by normalized distance
+        if g[j]/‖c_j‖ ≤ tol: break     # All satisfied (geometric tolerance)
         
         # Exact projection onto constraint boundary (spike)
         k_adaptive ← g[j] / ||c_j||²
@@ -582,7 +586,8 @@ near-zero gradient scales). It is evaluated host-side on every backend.
 
 *Historical note.* Through v0.5 the optimality test was a per-facet
 independent gradient projection,
-$\nabla_{\text{proj}} f = \nabla f - \sum_{j \in \text{active}} ( \nabla f \cdot \mathbf{c}_j / \|\mathbf{c}_j\|^2 ) \mathbf{c}_j$,
+$\nabla_{\text{proj}} f = \nabla f - \sum_{j \in \text{active}} \min(0, \nabla f \cdot \mathbf{c}_j / \|\mathbf{c}_j\|^2) \, \mathbf{c}_j$
+(only components whose removal blocks descent into the facet are subtracted),
 compared against an *absolute* tolerance. That quantity is structurally
 nonzero at constrained optima whose active normals are correlated (the
 independent removals leave an $O(\mu \cos\theta)$ cross-term), and an absolute
@@ -593,9 +598,10 @@ diagnostic.
 **Objective Plateau Detection:**
 Convergence is also indicated when the objective value stabilizes:
 
-$$\frac{|f(x^{(k)}) - f(x^{(k-w)})|}{|f(x^{(k-w)})|} < \epsilon_{\text{obj}}$$
+$$\frac{\max_{i \in W} f(x^{(i)}) - \min_{i \in W} f(x^{(i)})}{\max(|f(x^{(k)})|, 10^{-10})} < \epsilon_{\text{obj}}$$
 
-over a window of $w$ iterations.
+where $W$ is the trailing window of $w$ iterations: the objective's range over
+the window, normalized by the latest value.
 
 **Feasibility Requirement:**
 Early stopping only triggers when the solution is feasible (max constraint violation below threshold).

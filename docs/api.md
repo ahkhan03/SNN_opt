@@ -31,7 +31,7 @@ Convenience function that wraps `OptimizationProblem` + `SolverConfig` +
 | `integration_method` | `'euler'` (default) or `'ivp'` | |
 | `projection_method` | `'adaptive'` (default) or `'fixed'` | Adaptive eliminates `k1`. |
 | `k0_scale` | `float` | Conservatism factor on auto step. Default `0.5`. |
-| `lower_bound`, `upper_bound` | `float` or `None` | Box clipping (e.g. SVM dual). |
+| `lower_bound`, `upper_bound` | `float` or `None` | Box bounds, enforced as implicit facets of the unified projection sweep (e.g. SVM dual). |
 | `enable_early_stopping` | `bool` | Convergence-based termination, default on. |
 | `record_trajectory` | `bool` | Keep the full iterate trajectory + spike events (default `True`). `False` runs the lean path; the compiled backends imply `False`. |
 | `backend` | `str` | `'python'` (default), `'c'` (auto), `'c_serial'`, or `'c_openmp'`. See [`SolverConfig`](#solverconfig). |
@@ -61,15 +61,17 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 | `t_end` | `100.0` | IVP mode horizon. |
 | `max_step` | `0.1` | IVP mode max ODE step. |
 | `constraint_tol` | `1e-6` | Tolerance for "constraint violated". |
-| `max_projection_iters` | `100` | Per-iteration projection cap. |
+| `max_projection_iters` | `None` | Safety watchdog on the inner projection sweep; `None` auto-sizes it to `max(1000, 10 * (m + #box facets))`. Hitting it **aborts** the solve with `convergence_reason='projection_budget_exhausted'`; it is not routine truncation. |
 | `integration_method` | `'euler'` | `'euler'` or `'ivp'`. |
 | `max_iterations` | `2000` | Outer-iteration cap (Euler). |
 | `projection_method` | `'adaptive'` | `'adaptive'` or `'fixed'`. |
 | `k1` | `0.05` | Projection step (only used when `projection_method='fixed'`). |
-| `lower_bound`, `upper_bound` | `None` | Box clipping. |
+| `lower_bound`, `upper_bound` | `None` | Box bounds (implicit facets of the projection sweep). |
 | `record_trajectory` | `True` | Store the full iterate trajectory + per-spike events. `False` runs the lean solve (final state only); the compiled backends always run lean. |
 | `backend` | `'python'` | Solve backend. `'python'` is the NumPy reference. The compiled pybind11 kernel (dense + `projection_method='adaptive'` only) comes in three numerically identical variants differing only in matvec threading: `'c'` (auto: OpenMP multicore when the wheel was built with it *and* the problem is large enough to amortize it, else single-thread), `'c_serial'` (forced single-thread), `'c_openmp'` (forced multicore; raises if the build lacks OpenMP). Only the matvec is parallel; the Euler recurrence + greedy projection are serial. Honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` / `max_threads()` report the build's capability. |
 | `transform` | `None` | Optional problem transform (the *transform axis*). `None` = canonical solve. A name (`'eigenbasis'`) or a `Transform` instance opts in; the problem is solved in transformed coordinates and mapped back. Composes with any backend; implies the lean result. See [Transforms](#transforms). |
+| `record_spike_history` | `True` | Keep per-spike arrays (`spike_times`, `spike_deltas`, ...). `False` drops them to bound memory on large projection budgets. |
+| `observe_projection_events` | `False` | Opt-in constant-memory observer of committed projection events; populates the observer fields below. Default off preserves v0.5 numerical and allocation behavior. |
 | `convergence` | `ConvergenceConfig()` | See below. |
 
 ## `ConvergenceConfig`
@@ -153,6 +155,23 @@ Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
   the projection-spike raster (see [`02_spike_raster.py`](../benchmarks/02_spike_raster.py)).
 - `total_projection_distance`: sum of spike norms.
 - `summary()`: human-readable one-line-per-statistic string.
+
+### Projection-event observer fields (v0.6.0, opt-in)
+
+With `SolverConfig(observe_projection_events=True)`, the result additionally
+carries a constant-memory record of every *committed* projection event (all
+`None` when the observer is off):
+
+| Field | Meaning |
+|---|---|
+| `explicit_row_event_counts` | Per-explicit-row committed event counts, `(m,)`. |
+| `implicit_lower_event_counts`, `implicit_upper_event_counts` | Per-coordinate implicit-bound event counts, `(n,)`. |
+| `explicit_row_events`, `implicit_lower_events`, `implicit_upper_events` | Totals of the three count arrays. |
+| `projection_event_digest` | Canonical unsigned 64-bit digest of committed candidate IDs in event order (outer-iteration and within-sweep ordinal tokens included); the empty stream has the fixed offset-basis value. Chained across compiled-kernel chunks, so it matches monolithic runs exactly. |
+| `projection_event_digest_algorithm` | Frozen digest identifier (`fnv1a64-word-v2`). |
+| `observed_total_projection_distance` | Sum of Euclidean norms of all committed corrections. Unlike the legacy `total_projection_distance` it does not depend on retained spike history, so it is meaningful on lean solves. |
+| `projection_first_candidate_id`, `projection_last_candidate_id` | First/last canonical candidate IDs (rows `j`, lower facets `m+i`, upper facets `m+n+i`); `None` for an empty stream. |
+| `projection_cap_rechecks` | Inner sweeps that consumed the projection cap and performed a fresh joint-violation recheck. |
 
 ### KKT certificate fields (v0.6.0)
 

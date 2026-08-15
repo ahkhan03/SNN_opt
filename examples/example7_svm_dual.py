@@ -4,7 +4,7 @@ Example 7: SVM Dual Problem
 Demonstrates the SNN solver on a Support Vector Machine dual optimization problem.
 This showcases:
 - Auto k0 computation from Hessian eigenvalue
-- Box constraint clipping (0 <= alpha <= C)
+- Box bounds as implicit facets of the projection sweep (0 <= alpha <= C)
 - Equality constraint handling (y^T alpha = 0)
 
 The SVM dual problem:
@@ -67,7 +67,7 @@ def main():
     # SVM dual: minimize (1/2) alpha^T Q alpha - 1^T alpha
     b = -np.ones(n)
     
-    # Only equality constraint as linear inequality (box handled by clipping)
+    # Only equality constraint as linear inequality (box handled as implicit facets)
     # y^T alpha = 0 converted to: y^T alpha <= 0 AND -y^T alpha <= 0
     C_eq = np.vstack([
         y.reshape(1, -1),
@@ -78,12 +78,12 @@ def main():
     print("\nProblem dimensions:")
     print(f"  Variables: {n}")
     print("  Equality constraints: 1 (y^T alpha = 0)")
-    print(f"  Box constraints: 0 <= alpha <= {C} (handled by clipping)")
+    print(f"  Box constraints: 0 <= alpha <= {C} (implicit facets of the projection sweep)")
     
     # Create problem
     problem = OptimizationProblem(A=Q, b=b, C=C_eq, d=d_eq)
     
-    # Configure solver with auto k0 and box clipping
+    # Configure solver with auto k0 and box bounds
     config = SolverConfig(
         k0=None,           # Auto-compute from Hessian eigenvalue
         k0_scale=0.5,      # Conservative scaling
@@ -109,7 +109,8 @@ def main():
     print(f"Converged: {result.converged}")
     print(f"Convergence reason: {result.convergence_reason}")
     print(f"Iterations used: {result.iterations_used} / {config.max_iterations}")
-    print(f"Projected gradient norm: {result.final_proj_grad_norm:.2e}")
+    print(f"KKT residual: {result.kkt_residual:.2e} (tol {result.kkt_tolerance:.2e}, scale {result.kkt_scale:.2e})")
+    print(f"Projected gradient norm (legacy): {result.final_proj_grad_norm:.2e}")
     print(f"Total projections: {result.n_projections}")
     
     # Check constraints
@@ -144,7 +145,7 @@ def main():
         print(f"\nTraining accuracy: {accuracy:.1f}%")
     
     print("\n" + "=" * 60)
-    print("SVM dual solved successfully with auto k0 + box clipping!")
+    print("SVM dual solved successfully with auto k0 + implicit box facets!")
     print("=" * 60)
 
 

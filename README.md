@@ -19,7 +19,7 @@ $$
 \quad\text{subject to}\quad C x + d \le 0,
 $$
 
-by alternating gradient descent, which plays the role of leaky-integrate membrane drift, with discrete projection events that clamp the trajectory to the constraint boundary, the optimization analogue of an integrate-and-fire **spike**. The construction follows Mancoo, Boerlin and Machens ([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html)) and is the canonical solver underlying the **SNN-X** research program, a series of classical machine-learning problems recast as constrained convex programs and solved by these dynamics (see [Applications](#applications)).
+by alternating gradient descent, which plays the role of leaky-integrate membrane drift, with discrete projection events that clamp the trajectory to the constraint boundary, the optimization analogue of an integrate-and-fire **spike**. The construction follows Mancoo, Keemink and Machens ([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html)) and is the canonical solver underlying the **SNN-X** research program, a series of classical machine-learning problems recast as constrained convex programs and solved by these dynamics (see [Applications](#applications)).
 
 This repository is intended both as a **research artifact**, since every published SNN-X paper can be reproduced from the code here, and as a **teaching resource** for students entering the area: it ships with annotated examples, a self-contained mathematical writeup, and a benchmark suite that visualizes convergence, projection dynamics, and the solver's accuracy limits.
 
@@ -189,7 +189,7 @@ small/medium problems and only spins up threads on large ones. Multithreading
 honours `OMP_NUM_THREADS`; `snn_opt._kernel.HAS_OPENMP` and
 `snn_opt._kernel.max_threads()` report the build's capability.
 
-All backends are kept in lockstep by the parity test suite (`tests/test_c_backend_parity.py`). The C kernel supports dense problems with `projection_method='adaptive'`; sparse and non-adaptive paths transparently use Python. The same kernel source is HLS-compatible and is the basis for the FPGA deployment track. When the precompiled kernel is unavailable on your platform (rare), the `'c*'` backends raise a clear error and the Python backend continues to work.
+All backends are kept in lockstep by the parity test suite (`tests/test_c_backend_parity.py`). The C kernel supports dense problems with `projection_method='adaptive'` and up to 4096 constraint rows (the Gram precompute cap); sparse inputs, other projection methods, and larger constraint sets are rejected with a clear error rather than silently falling back, so select `backend='python'` for those. The same kernel source is HLS-compatible and is the basis for the FPGA deployment track. When the precompiled kernel is unavailable on your platform (rare), the `'c*'` backends raise a clear error and the Python backend continues to work.
 
 ### Problem transforms (eigenbasis)
 
@@ -378,10 +378,10 @@ All scripts live under [`examples/`](examples/) and are runnable as plain `pytho
 | 1c | [`example1_advanced_2d.py`](examples/example1_advanced_2d.py) | Shifted feasible region, infeasible start | Spike raster + violation plot |
 | 2 | [`example2_3d_polytope.py`](examples/example2_3d_polytope.py) | 3D QP with 4 hyperplanes | Multiple active constraints, vertex solution |
 | 3 | [`example3_linear_program.py`](examples/example3_linear_program.py) | Box-constrained LP ($A=0$) | LP via the same machinery |
-| 4 | [`example4_warm_start.py`](examples/example4_warm_start.py) | Sequence of related QPs | Receding-horizon / MPC pattern; spikes drop $30 \to 0$ |
+| 4 | [`example4_warm_start.py`](examples/example4_warm_start.py) | Sequence of related QPs | Receding-horizon / MPC pattern; warm starts eliminate the projection events (see Figure 3 for the quantitative benchmark) |
 | 5 | [`example5_infeasible_recovery.py`](examples/example5_infeasible_recovery.py) | Infeasible initializations | Automatic projection to feasibility |
 | 6 | [`example6_equality_constraint.py`](examples/example6_equality_constraint.py) | Equality via a sandwiched band | $x_1 = a$ as a tight $\pm \varepsilon$ inequality pair |
-| 7 | [`example7_svm_dual.py`](examples/example7_svm_dual.py) | SVM dual with kernel | Box clipping + auto step size on a real ML task |
+| 7 | [`example7_svm_dual.py`](examples/example7_svm_dual.py) | SVM dual with kernel | Implicit box facets + auto step size on a real ML task |
 | . | [`example_raw_mode.py`](examples/example_raw_mode.py) | Bypass auto-config | Compares raw vs. optimized solver settings |
 
 Run them all in sequence:
@@ -426,7 +426,7 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
 }
 
 @inproceedings{mancoo2020understanding,
-  author    = {Mancoo, Allan and Boerlin, Martin and Machens, Christian K.},
+  author    = {Mancoo, Allan and Keemink, Sander and Machens, Christian K.},
   title     = {Understanding Spiking Networks Through Convex Optimization},
   booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
   year      = {2020},
@@ -443,4 +443,4 @@ Apache-2.0, see [`LICENSE`](LICENSE). Permissive, with an explicit patent grant;
 
 Developed at the **School of Artificial Intelligence, Taizhou University**.
 
-This codebase implements the SNN-QP research program led by **Prof. Shuai Li** (IEEE Fellow; Faculty of Information Technology and Electrical Engineering, University of Oulu, Finland), whose work on neurodynamic optimization originated this line of inquiry. The mathematical framework follows Mancoo, Boerlin and Machens (NeurIPS 2020) and the broader projection-neural-network lineage (Hopfield–Tank, Kennedy–Chua, Xia–Wang, Liu–Wang). Pull requests, bug reports, and citations of the SNN-X papers in your own work are all warmly welcomed.
+This codebase implements the SNN-QP research program led by **Prof. Shuai Li** (IEEE Fellow; Faculty of Information Technology and Electrical Engineering, University of Oulu, Finland), whose work on neurodynamic optimization originated this line of inquiry. The mathematical framework follows Mancoo, Keemink and Machens (NeurIPS 2020) and the broader projection-neural-network lineage (Hopfield–Tank, Kennedy–Chua, Xia–Wang, Liu–Wang). Pull requests, bug reports, and citations of the SNN-X papers in your own work are all warmly welcomed.

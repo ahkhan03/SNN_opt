@@ -4,6 +4,45 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Corrected the NeurIPS 2020 attribution** in `README.md`, `CITATION.cff`
+  and the package docstring: the paper is by Mancoo, **Keemink** and Machens.
+  "Boerlin" was a conflation with the separate 2013 Boerlin/Machens/Deneve
+  paper, which `docs/theory.md` already cited correctly.
+- `SolverResult.summary()` reported the maximum raw row violation over the
+  whole trajectory labelled as if it were a final-point quantity; it now
+  prints the documented final-point field `max_violation_rows_raw`. On any
+  infeasible-start problem the old line showed the initial violation (for
+  example `2.0`) directly under `Joint feasible: True`.
+- `benchmarks/01_convergence.py` now prints the v0.6.0 KKT certificate
+  (`kkt_residual`, scale, relative defect) instead of the legacy
+  `stationarity_residual`, making the README's quoted `8.9e-4` relative
+  defect reproducible from the script. `examples/example7_svm_dual.py`
+  likewise prints the certificate and labels the projected-gradient norm
+  legacy.
+
+### Documentation
+
+- `docs/api.md`: corrected the `max_projection_iters` default (`None`,
+  auto-sized watchdog; exhaustion aborts), replaced the stale "box clipping"
+  wording (bounds are implicit facets since v0.5.0), and documented the
+  projection-event observer fields and `record_spike_history`.
+- `docs/theory.md`: the adaptive-projection winner rule now shows the
+  normalized-distance selection the solver actually performs (v0.5.0), the
+  plateau criterion shows the range-over-window form, and the legacy
+  projected-gradient formula notes that only descent-blocking components are
+  removed.
+- `README.md`: removed the claim that sparse/non-adaptive problems
+  "transparently use Python" under `backend='c'` (they are rejected with a
+  clear error), and refreshed the stale example-table insights.
+- `examples/README.md`: listed all runnable scripts, corrected the
+  warm-start insight (1 -> 0 projection events on the toy; the quantitative
+  benchmark is Figure 3), and updated the diagnostics list to the KKT
+  certificate fields.
+
 ## [0.6.0] - 2026-08-15
 
 ### Changed
@@ -73,13 +112,17 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   criterion (or `"none"`) with a `DeprecationWarning`; combining them with
   explicit new-style settings raises. They are never silently mapped onto
   the KKT tolerances; the legacy tolerance lives in the regular
-  `legacy_proj_grad_tol` field. The warm-start benchmark and Figure 3 were
-  regenerated under the new default criterion (221 cold / 101 warm
-  iterations, 2.19x); the spike-raster benchmark pins its historical fixed
-  400-iteration horizon explicitly.
+  `legacy_proj_grad_tol` field.
 
 ### Added (accumulated since 0.5.0, first released here)
 
+- **Opt-in projection-event observer** (`SolverConfig.observe_projection_events`,
+  default off): constant-memory per-row / per-coordinate committed-event
+  counts, a canonical order-sensitive event-stream digest
+  (`fnv1a64-word-v2`) with first/last candidate IDs, an observed total
+  projection distance that works on lean solves, and a cap-recheck counter.
+  Identical semantics on the Python and compiled backends (digests chained
+  across kernel chunks). See `docs/api.md` for the field reference.
 - Added `fpga/kv260_v05/`, a restricted fixed-horizon Kria K26 reference for
   the v0.5 unified-projection recurrence. The subtree preserves the physically
   qualified source and build contract, records the measured support boundary,
@@ -99,7 +142,10 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 ### Documentation and figures
 
 Documentation and visualisation overhaul, with the
-`stationarity_residual` correction described above.
+`stationarity_residual` correction described above. The warm-start benchmark
+and Figure 3 were regenerated under the new default criterion (221 cold / 101
+warm iterations, 2.19x); the spike-raster benchmark pins its historical fixed
+400-iteration horizon explicitly.
 
 - **All figures regenerated against v0.5.0.** Every figure in the repository
   predated the v0.5.0 projection rewrite by three to seven months.

@@ -19,9 +19,9 @@ abstract: >
   snn_opt is a Python implementation of a spiking neural network (SNN) inspired
   solver for constrained convex optimization. It targets quadratic and linear
   programs of the form min (1/2) x^T A x + b^T x subject to C x + d <= 0, by
-  alternating gradient descent steps with discrete boundary projections — the
+  alternating gradient descent steps with discrete boundary projections, the
   optimization equivalent of leaky integrate-and-fire dynamics with constraint
-  spikes. The framework follows Mancoo, Boerlin and Machens (NeurIPS 2020).
+  spikes. The framework follows Mancoo, Keemink and Machens (NeurIPS 2020).
 keywords:
   - "spiking neural networks"
   - "convex optimization"
@@ -52,8 +52,8 @@ references:
     authors:
       - family-names: "Mancoo"
         given-names: "Allan"
-      - family-names: "Boerlin"
-        given-names: "Martin"
+      - family-names: "Keemink"
+        given-names: "Sander"
       - family-names: "Machens"
         given-names: "Christian K."
     collection-title: "Advances in Neural Information Processing Systems"

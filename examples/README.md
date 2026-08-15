@@ -9,12 +9,15 @@ From the project root directory:
 ```bash
 # Run individual examples
 python examples/example1_simple_2d.py
+python examples/example1_basic_2d.py
 python examples/example1_advanced_2d.py
 python examples/example2_3d_polytope.py
 python examples/example3_linear_program.py
 python examples/example4_warm_start.py
 python examples/example5_infeasible_recovery.py
 python examples/example6_equality_constraint.py
+python examples/example7_svm_dual.py
+python examples/example_raw_mode.py
 
 # Run all examples in sequence
 python examples/run_all_examples.py
@@ -36,6 +39,13 @@ python example1_simple_2d.py
 - **Features**: Basic QP, constraint satisfaction checking
 - **Output**: Solution, objective value, constraint status
 - **Use Case**: Understanding the solver basics
+
+### Example 1 (Basic figure): 2D trajectory + spikes (`example1_basic_2d.py`)
+**Problem**: The canonical 2-D QP, run in fixed-projection mode for illustration
+- **Difficulty**: Beginner
+- **Features**: Fixed-step projection (`projection_method='fixed'`), spike-pattern plotting
+- **Output**: `example1_basic_2d.png`, the trajectory-with-spikes figure used in the README
+- **Use Case**: The reference spike-pattern illustration for figures and slides
 
 ### Example 1 (Advanced): Diagnostics in 2D (`example1_advanced_2d.py`)
 **Problem**: Same QP as Example 1 with the feasible region shifted to exclude the unconstrained minimizer
@@ -64,7 +74,7 @@ python example1_simple_2d.py
 - **Features**: Warm starting, receding horizon control simulation
 - **Output**: Solve times, projection counts, convergence statistics
 - **Use Case**: Model predictive control, real-time optimization
-- **Key Insight**: Warm starting dramatically reduces projections (30 → 0)
+- **Key Insight**: Warm starting removes the projection work entirely on this toy (1 → 0 events) and cuts solve time roughly 2-3x; the quantitative MPC-style benchmark is [`benchmarks/03_warm_start.py`](../benchmarks/03_warm_start.py) (221 → 101 iterations, 2.19x)
 
 ### Example 5: Infeasible Recovery (`example5_infeasible_recovery.py`)
 **Problem**: Starting from various infeasible points
@@ -83,21 +93,28 @@ python example1_simple_2d.py
 ### Example 7: SVM Dual Problem (`example7_svm_dual.py`)
 **Problem**: Support Vector Machine dual optimization with kernel trick
 - **Difficulty**: Advanced
-- **Features**: **Auto k0**, **box constraint clipping**, equality constraint (y^T alpha = 0), **convergence diagnostics**
+- **Features**: **Auto k0**, **box bounds as implicit projection facets**, equality constraint (y^T alpha = 0), **convergence diagnostics**
 - **Output**: Support vector analysis, training accuracy, convergence info
 - **Use Case**: Machine learning classification, demonstrating new solver features
-- **Key Insight**: Box clipping (0 ≤ alpha ≤ C) + auto k0 makes SVM solving robust and automatic
+- **Key Insight**: Box bounds (0 ≤ alpha ≤ C) as facets of the same projection sweep + auto k0 make SVM solving robust and automatic
+
+### Raw vs. optimized modes (`example_raw_mode.py`)
+**Problem**: The same QP solved with hand-set raw parameters vs. the auto-configured defaults
+- **Difficulty**: Intermediate
+- **Features**: Bypassing auto-configuration, side-by-side convergence comparison
+- **Output**: `raw_vs_optimized.png`
+- **Use Case**: Understanding what the auto step size and adaptive projection buy you
 
 ## Example Output Format
 
-All examples print:
+Most examples print:
 - Problem description
 - Initial conditions
 - Solver progress (if verbose)
 - Final solution and objective value
 - Constraint satisfaction verification
 - Performance metrics (projections, time steps, etc.)
-- **Convergence diagnostics**: `converged`, `convergence_reason`, `iterations_used`, `final_proj_grad_norm`
+- **Convergence diagnostics**: `converged`, `convergence_reason`, `iterations_used`, and since v0.6.0 the KKT certificate fields `kkt_residual`, `kkt_tolerance`, `kkt_scale`, `kkt_fit_status` (`final_proj_grad_norm` is a legacy heuristic)
 
 ## Extending Examples
 
@@ -120,8 +137,8 @@ config  = SolverConfig(
     k0=None,            # Auto-compute step size from λ_max(A)
     k0_scale=0.5,       # Conservatism factor on the auto step
     max_iterations=2000,
-    lower_bound=0.0,    # Optional box-clipping
-    upper_bound=1.0,    # Optional box-clipping
+    lower_bound=0.0,    # Optional box bounds (implicit facets)
+    upper_bound=1.0,    # Optional box bounds (implicit facets)
     # Early stopping is enabled by default; tweak via config.convergence
 )
 solver  = SNNSolver(problem, config)
@@ -144,7 +161,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 1. **Start with Example 1**: It's the simplest and helps verify installation
 2. **Example 4 is most relevant** for control applications
-3. **Example 7 demonstrates** the new auto k0 and box clipping features
+3. **Example 7 demonstrates** auto k0 and box bounds on a real ML problem
 4. **Use `k0=None`** to enable automatic step size computation
 5. **Use `lower_bound/upper_bound`** for problems with simple box constraints
 6. **Use `verbose=True`** to see solver progress during optimization

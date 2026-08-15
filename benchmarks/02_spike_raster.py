@@ -46,7 +46,7 @@ def polytope_problem(n: int = 8, m: int = 16, seed: int = 3, offset: float = 2.0
     """QP over a random polytope with the unconstrained minimiser far outside.
 
     Rows of ``C`` are unit-normalised so that a violation is a true Euclidean
-    distance to the face, which is also what v0.5's winner selection assumes.
+    distance to the face, which is also what the winner selection assumes.
     """
     rng = np.random.default_rng(seed)
     Q = rng.standard_normal((n, n))

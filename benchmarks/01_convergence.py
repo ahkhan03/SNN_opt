@@ -117,7 +117,9 @@ def main() -> int:
         f"  ||x - x*||          = {np.linalg.norm(res.final_x - x_star):.3e}\n"
         f"  joint_feasible      = {res.joint_feasible}  "
         f"(max row distance {res.max_distance_rows:.2e})\n"
-        f"  stationarity        = {res.stationarity_residual:.3e}"
+        f"  kkt_residual        = {res.kkt_residual:.3e} "
+        f"(scale {res.kkt_scale:.3e}, relative defect "
+        f"{res.kkt_residual / res.kkt_scale:.3e}, status {res.kkt_fit_status})"
     )
     return 0
 

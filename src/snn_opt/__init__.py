@@ -9,7 +9,7 @@ by alternating gradient descent with discrete boundary projections, the
 optimization equivalent of LIF integrate-and-fire dynamics. The framework
 is described in:
 
-    Mancoo, Boerlin & Machens, *Understanding spiking networks through
+    Mancoo, Keemink & Machens, *Understanding spiking networks through
     convex optimization*, NeurIPS 2020.
 
 Public API
