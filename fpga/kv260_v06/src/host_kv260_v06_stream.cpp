@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -35,6 +36,7 @@ struct StreamOptions {
     std::string json_out;
     int warmups = 0;
     int repetitions = 1;
+    int energy_repetitions = 0;
     int route = snn_v06::AUTO;
     int shift = 2;
     int tail = snn_v06::HOLD_TAIL;
@@ -51,7 +53,7 @@ struct StreamOptions {
     std::fprintf(
         stream,
         "usage: %s <kernel.xclbin> <resident-stream.bin> <fixed-output.bin> "
-        "[--one-shot|--persistent] [--warmups N] [--reps N] "
+        "[--one-shot|--persistent] [--warmups N] [--reps N] [--energy-reps N] "
         "[--route auto|full|cg|stream] [--host-x0] [--mock] "
         "[--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
         "[--json-out PATH]\n",
@@ -98,6 +100,9 @@ StreamOptions parse_stream_options(int argc, char** argv) {
         } else if (arg == "--reps" && i + 1 < argc) {
             options.repetitions =
                 stream_integer(argv[++i], "repetition count", false);
+        } else if (arg == "--energy-reps" && i + 1 < argc) {
+            options.energy_repetitions =
+                stream_integer(argv[++i], "energy repetition count", true);
         } else if (arg == "--route" && i + 1 < argc) {
             options.route = stream_route(argv[++i]);
         } else if (arg == "--host-x0") {
@@ -119,6 +124,18 @@ StreamOptions parse_stream_options(int argc, char** argv) {
         }
     }
     return options;
+}
+
+bool wait_for_go() {
+    std::printf("READY\n");
+    std::fflush(stdout);
+    char line[64];
+    if (!std::fgets(line, sizeof(line), stdin) ||
+        std::strncmp(line, "GO", 2) != 0) {
+        std::fprintf(stderr, "energy mode expected GO on stdin\n");
+        return false;
+    }
+    return true;
 }
 
 msrp_v05::Problem problem_from_bundle(const resident_v1::Bundle& bundle) {
@@ -399,9 +416,15 @@ std::string stream_json(
          << ",\"xclbin\":\"" << options.xclbin << '\"'
          << ",\"n\":" << bundle.n << ",\"m\":" << bundle.m
          << ",\"periods\":" << bundle.period_count
-         << ",\"warmups\":" << options.warmups
-         << ",\"reps\":" << options.repetitions
-         << ",\"route_requested\":\"" << route_name(options.route) << '\"'
+         << ",\"warmups\":" << options.warmups;
+    if (options.energy_repetitions > 0) {
+        json << ",\"reps\":" << options.energy_repetitions
+             << ",\"energy_reps\":" << options.energy_repetitions
+             << ",\"energy_mode\":true";
+    } else {
+        json << ",\"reps\":" << options.repetitions;
+    }
+    json << ",\"route_requested\":\"" << route_name(options.route) << '\"'
          << ",\"route_selected\":"
          << (final_pass.empty()
                  ? 0
@@ -574,17 +597,34 @@ int main(int argc, char** argv) {
     std::vector<std::vector<ResultRecord>> passes;
     std::vector<double> final_violation;
     std::vector<double> final_first_error;
-    const int total_passes = options.warmups + options.repetitions;
-    timings.reserve(static_cast<std::size_t>(options.repetitions) *
-                    static_cast<std::size_t>(bundle.period_count));
-    passes.reserve(static_cast<std::size_t>(options.repetitions));
+    const bool energy_mode = options.energy_repetitions > 0;
+    const int measured_passes =
+        energy_mode ? options.energy_repetitions : options.repetitions;
+    const int total_passes = options.warmups + measured_passes;
+    if (!energy_mode)
+        timings.reserve(static_cast<std::size_t>(options.repetitions) *
+                        static_cast<std::size_t>(bundle.period_count));
+    passes.reserve(energy_mode ? 1U
+                               : static_cast<std::size_t>(options.repetitions));
 
-    // A persistent CU retains its warm state across passes.  Keep the host
+    // A persistent CU retains its warm state across passes. Keep the host
     // predecessor in lockstep so HOST_X0 control runs and HOLD_TAIL payloads
     // have the same continuous-stream semantics as RESIDENT_WARM.
     std::vector<double> resident_predecessor = bundle.x0;
     bool first_period = true;
+    std::uint64_t energy_started = 0;
+    std::uint64_t energy_finished = 0;
     for (int pass = 0; pass < total_passes; ++pass) {
+        if (energy_mode && pass == options.warmups) {
+            if (!wait_for_go()) {
+                // The persistent session must be stopped even when stdin is
+                // closed or carries a non-GO line.  Keep the protocol's
+                // documented exit status for this handshake failure.
+                (void)session.stop();
+                return 2;
+            }
+            energy_started = monotonic_raw_ns();
+        }
         std::vector<ResultRecord> pass_results;
         pass_results.reserve(static_cast<std::size_t>(bundle.period_count));
         std::vector<double> pass_violation;
@@ -611,8 +651,8 @@ int main(int argc, char** argv) {
                 options.host_x0 ? 0 : (first ? 0 : options.shift);
             TimingRecord timing;
             ResultRecord result = session.solve(
-                period.b, period.d, payload_x0, &timing, start, stride,
-                options.tail);
+                period.b, period.d, payload_x0,
+                energy_mode ? nullptr : &timing, start, stride, options.tail);
             if (result.mailbox[snn_v06::OUT_ERROR_CODE] != snn_v06::ERR_OK) {
                 std::fprintf(stderr, "SOLVE period %d failed with error %u\n",
                              period_index,
@@ -631,7 +671,8 @@ int main(int argc, char** argv) {
                 const bool stopped = session.stop();
                 return stopped ? 130 : 5;
             }
-            const double observed0 = previous_output.empty() ? 0.0 : previous_output[0];
+            const double observed0 =
+                previous_output.empty() ? 0.0 : previous_output[0];
             const double observed1 =
                 previous_output.size() < 2 ? 0.0 : previous_output[1];
             const double first_error = std::max(
@@ -643,20 +684,27 @@ int main(int argc, char** argv) {
             pass_violation.push_back(max_feasibility_violation(
                 period_problem, pass_results.back().raw));
             pass_first_error.push_back(first_error);
-            if (pass >= options.warmups) timings.push_back(timing);
+            if (!energy_mode && pass >= options.warmups)
+                timings.push_back(timing);
         }
         if (pass >= options.warmups) {
             final_violation = pass_violation;
             final_first_error = pass_first_error;
+            if (energy_mode) passes.clear();
             passes.push_back(std::move(pass_results));
         }
     }
-    const bool stopped = session.stop();
-    if (!stopped) return 5;
+    if (energy_mode) energy_finished = monotonic_raw_ns();
+
     if (passes.empty()) {
-        std::fprintf(stderr, "no timed repetitions were requested\n");
+        std::fprintf(stderr, "%s\n", energy_mode
+                                      ? "no energy repetitions were requested"
+                                      : "no timed repetitions were requested");
+        (void)session.stop();
         return 2;
     }
+
+    if (!energy_mode && !session.stop()) return 5;
     const std::vector<ResultRecord>& final_pass = passes.back();
     resident_v1::write_fixed_output(options.output, bundle.n,
                                     final_pass.back().raw,
@@ -668,13 +716,33 @@ int main(int argc, char** argv) {
         std::FILE* file = std::fopen(options.json_out.c_str(), "w");
         if (!file) {
             std::perror("--json-out");
+            if (energy_mode) (void)session.stop();
             return 2;
         }
         std::fwrite(line.data(), 1, line.size(), file);
         std::fputc('\n', file);
         std::fclose(file);
     }
-    std::printf("%s\n", line.c_str());
+    if (energy_mode) {
+        const std::uint64_t solves =
+            static_cast<std::uint64_t>(options.energy_repetitions) *
+            static_cast<std::uint64_t>(bundle.period_count);
+        const std::array<std::uint64_t, snn_v06::TELEMETRY_WORDS>& telemetry =
+            final_pass.back().telemetry;
+        std::printf(
+            "DONE REPS %d PERIODS %d SOLVES %llu DURATION_SECONDS %.17g "
+            "STATUS %llu EVENTS %llu DIGEST %016llx\n",
+            options.energy_repetitions, bundle.period_count,
+            static_cast<unsigned long long>(solves),
+            static_cast<double>(energy_finished - energy_started) * 1e-9,
+            static_cast<unsigned long long>(telemetry[1]),
+            static_cast<unsigned long long>(telemetry[5]),
+            static_cast<unsigned long long>(telemetry[10]));
+        std::fflush(stdout);
+        if (!session.stop()) return 5;
+    } else {
+        std::printf("%s\n", line.c_str());
+    }
     const double maximum_violation = final_violation.empty()
                                          ? 0.0
                                          : *std::max_element(

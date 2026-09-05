@@ -543,6 +543,9 @@ inline void load_cns_scale(const double* cns_source,
                            ap_uint<1>& cns_range,
                            ap_uint<1>& scale_range) {
 #pragma HLS INLINE off
+// Both vectors use the same binary64-to-fixed pipeline.  Keep the two
+// sequential call sites on one converter instance.
+#pragma HLS ALLOCATION function instances=binary64_to_dt limit=1
     const double input_limit = static_cast<double>(1ULL << (DATA_I - 1));
 load_cns_scale_shared:
     for (int i = 0; i < rows; ++i) {
@@ -557,12 +560,10 @@ load_cns_scale_shared:
 }
 
 inline int configure_geometry(
-    const double* A_cfg, const double* C_cfg, const double* G_cfg,
     const double* cns_cfg, const double* row_scale_cfg,
-    const double* x0_in, std::uint32_t* A_ddr, std::uint32_t* C_ddr,
-    std::uint32_t* Ct_ddr, std::uint32_t* G_ddr, int n, int m, double k0_f,
-    double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
-    int has_upper, double upper_f, int requested_route) {
+    const double* x0_in, int n, int m, double k0_f, double ctol_f,
+    int n_iters, int projmax, int has_lower, double lower_f, int has_upper,
+    double upper_f, int requested_route) {
 #pragma HLS INLINE off
     if (!dimensions_valid(n, m) || n_iters <= 0 || projmax <= 0 ||
         (has_lower != 0 && has_lower != 1) ||
@@ -593,12 +594,6 @@ inline int configure_geometry(
     cns_range_violation = 0;
     scale_range_violation = 0;
     initial_range_violation = 0;
-    load_geometry_matrix(A_cfg, A_ddr, nullptr, GEOMETRY_A, 0, n, n,
-                         route, offset_a, 0, a_range_violation);
-    load_geometry_matrix(C_cfg, C_ddr, Ct_ddr, GEOMETRY_C, 1, m, n, route,
-                         offset_c, offset_ct, c_range_violation);
-    load_geometry_matrix(G_cfg, G_ddr, nullptr, GEOMETRY_G, 0, m, m, route,
-                         offset_g, 0, g_range_violation);
     load_cns_scale(cns_cfg, row_scale_cfg, m, cns_range_violation,
                    scale_range_violation);
 
@@ -613,23 +608,19 @@ initialize_state:
     }
     for (int i = n; i < MAXN; ++i) resident_state[i] = static_cast<dt>(0);
 
-    write_geometry_range_flag();
     is_configured = 1;
     is_stopped = 0;
     state_has_committed = 0;
     return snn_v06::ERR_OK;
 }
 
-inline int refresh_a(const double* A_cfg, std::uint32_t* A_ddr, int n, int m) {
+inline int refresh_a(int n, int m) {
 #pragma HLS INLINE off
     if (!is_configured) return snn_v06::ERR_NOT_CONFIGURED;
     if (n != configured_n || m != configured_m || !dimensions_valid(n, m))
         return snn_v06::ERR_BAD_DIMENSIONS;
 
     a_range_violation = 0;
-    load_geometry_matrix(A_cfg, A_ddr, nullptr, GEOMETRY_A, 0, n, n,
-                         configured_route, offset_a, 0, a_range_violation);
-    write_geometry_range_flag();
     return snn_v06::ERR_OK;
 }
 
@@ -704,6 +695,10 @@ inline int solve_current(const double* b_in, const double* d_in,
                          unsigned long long* telemetry_out, int start_mode,
                          int shift_stride, int tail_policy) {
 #pragma HLS INLINE off
+// residual_matvec, hessian_rows, and the event updates all call the same
+// sequential line-buffer reader.  One instance is sufficient and avoids a
+// second 2.6k-LUT reader without changing any II=1 arithmetic loop.
+#pragma HLS ALLOCATION function instances=load_line_buffer limit=1
     if (!is_configured) return snn_v06::ERR_NOT_CONFIGURED;
     if (start_mode < snn_v06::RESIDENT_WARM ||
         start_mode > snn_v06::COLD_ZERO || shift_stride < 0 ||
@@ -1075,18 +1070,41 @@ inline DispatchResult dispatch_command(
     double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
     int has_upper, double upper_f) {
 #pragma HLS INLINE off
+// Keep all configuration and refresh geometry calls at this hierarchy level.
+// The allocation limit then covers A, C, Ct, G, and refresh-A uniformly.
+#pragma HLS ALLOCATION function instances=load_geometry_matrix limit=1
+// The geometry loader and CNS/scale loader use the same conversion pipeline.
+#pragma HLS ALLOCATION function instances=binary64_to_dt limit=1
     DispatchResult result;
     result.route = configured_route;
     if (command == snn_v06::CONFIGURE) {
         result.error = configure_geometry(
-            A_cfg, C_cfg, G_cfg, cns_cfg, row_scale_cfg, x0_in, A_ddr,
-            C_ddr, Ct_ddr, G_ddr, n, m, k0_f, ctol_f, n_iters, projmax,
-            has_lower, lower_f, has_upper, upper_f, requested_route);
+            cns_cfg, row_scale_cfg, x0_in, n, m, k0_f, ctol_f, n_iters,
+            projmax, has_lower, lower_f, has_upper, upper_f,
+            requested_route);
+        if (result.error == snn_v06::ERR_OK) {
+            load_geometry_matrix(A_cfg, A_ddr, nullptr, GEOMETRY_A, 0, n, n,
+                                 configured_route, offset_a, 0,
+                                 a_range_violation);
+            load_geometry_matrix(C_cfg, C_ddr, Ct_ddr, GEOMETRY_C, 1, m, n,
+                                 configured_route, offset_c, offset_ct,
+                                 c_range_violation);
+            load_geometry_matrix(G_cfg, G_ddr, nullptr, GEOMETRY_G, 0, m, m,
+                                 configured_route, offset_g, 0,
+                                 g_range_violation);
+            write_geometry_range_flag();
+        }
         result.route = configured_route;
         return result;
     }
     if (command == snn_v06::REFRESH_A) {
-        result.error = refresh_a(A_cfg, A_ddr, n, m);
+        result.error = refresh_a(n, m);
+        if (result.error == snn_v06::ERR_OK) {
+            load_geometry_matrix(A_cfg, A_ddr, nullptr, GEOMETRY_A, 0, n, n,
+                                 configured_route, offset_a, 0,
+                                 a_range_violation);
+            write_geometry_range_flag();
+        }
         result.route = configured_route;
         return result;
     }
@@ -1191,7 +1209,7 @@ extern "C" void snn_qp_v06(
 #pragma HLS INTERFACE s_axilite port = upper_f bundle = c
 #pragma HLS INTERFACE s_axilite port = return bundle = c
 
-#pragma HLS bind_storage variable = resident_matrix type = ram_2p impl = uram
+#pragma HLS bind_storage variable = resident_matrix type = ram_2p impl = uram latency = 2
 #pragma HLS bind_storage variable = resident_cns type = ram_1p impl = bram
 #pragma HLS bind_storage variable = resident_scale type = ram_1p impl = bram
 #pragma HLS bind_storage variable = resident_state type = ram_1p impl = bram

@@ -10,7 +10,7 @@
 #include "v06_host_protocol.hpp"
 #include "v06_xrt_compat.hpp"
 
-#include "../../kv260_v05/src/msrp_bundle.hpp"
+#include "msrp_bundle.hpp"
 
 #include <algorithm>
 #include <array>
