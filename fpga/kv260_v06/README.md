@@ -147,12 +147,30 @@ v0.5 across routes, starts, launch modes, refresh-A, range/cap fixtures, and
 PMSM bundles. A passing run ends with
 PARITY SUMMARY cells=271 failures=0 PASS.
 
-## Qualification boundary and deviations
+## Qualification record
 
-This seat cannot run Vitis HLS, link, implementation, or a board. The
-controller must check the loop table, inferred URAM/BRAM/LUT, timing, BO
-coherency, one-shot persistence, and the two-LSB PMSM gate. The only shape
-deviation from the original raw image is the explicit 256-bit row packing and
-the corrected asymmetric C-transpose row extent; fixed-point values and
-recurrence operation order are unchanged. The mock backend checks host
-ordering and JSON only.
+Evidence lives under `evidence/`:
+
+* `launch_floor_v05_2026-09-05/`: the launch-floor probe on the v0.5
+  bitstream that motivated the persistent mailbox path.
+* `board_2026-09-06_37f33fcfe2ca/`: the first board qualification of this
+  kernel. Bitstream `snn_qp_v06_200m_37f33fcfe2ca` (kernel source at the
+  commit recorded in `env.yaml`) closes 200 MHz (WNS +0.075 ns) at 47.5% LUT
+  and 56 URAM; raw state and all 16 telemetry words are byte-identical to
+  the native emulation on 6x18, 20x60 and 64x64 fixtures in both launch
+  modes and under forced STREAM and CG routes; default zocl buffers are
+  coherent without `sync` on this board image (litmus); on the PMSM H3_N1
+  stream the persistent mailbox path completes a solve in 33.0 us median
+  (25.1 us doorbell-to-done) against 111.8 us for a per-solve XRT launch,
+  and 96.7 us against 178.2 us at H10_N1, with the two-LSB feasibility gate
+  passing on every run.
+
+The shape deviations from the plan's raw-word image are the explicit 256-bit
+row packing (eight lanes per URAM word, rows padded to eight) and the
+asymmetric C-transpose row extent; fixed-point values and recurrence
+operation order are unchanged. The mock backend checks host ordering and
+JSON only.
+
+Not yet claimed: energy per solve (the PMSM paper measures it with its
+INA260 protocol), automatic CG/STREAM selection at the sizes where it
+happens, and board behaviour above n, m = 64.

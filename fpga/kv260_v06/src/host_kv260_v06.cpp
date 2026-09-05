@@ -684,11 +684,11 @@ class V06Session {
     }
 
     void upload_configure_inputs() {
-        a_cfg_bo_->write(q_.A.data(), q_.A.size() * sizeof(double));
-        c_cfg_bo_->write(q_.C.data(), q_.C.size() * sizeof(double));
-        g_cfg_bo_->write(q_.G.data(), q_.G.size() * sizeof(double));
-        cns_cfg_bo_->write(q_.c_norms_sq.data(), q_.c_norms_sq.size() * sizeof(double));
-        scale_cfg_bo_->write(q_.row_scale.data(), q_.row_scale.size() * sizeof(double));
+        a_cfg_bo_->write(q_.A.data(), q_.A.size() * sizeof(double), 0);
+        c_cfg_bo_->write(q_.C.data(), q_.C.size() * sizeof(double), 0);
+        g_cfg_bo_->write(q_.G.data(), q_.G.size() * sizeof(double), 0);
+        cns_cfg_bo_->write(q_.c_norms_sq.data(), q_.c_norms_sq.size() * sizeof(double), 0);
+        scale_cfg_bo_->write(q_.row_scale.data(), q_.row_scale.size() * sizeof(double), 0);
         sync_bo(*a_cfg_bo_, XCL_BO_SYNC_BO_TO_DEVICE, q_.A.size() * sizeof(double), 0);
         sync_bo(*c_cfg_bo_, XCL_BO_SYNC_BO_TO_DEVICE, q_.C.size() * sizeof(double), 0);
         sync_bo(*g_cfg_bo_, XCL_BO_SYNC_BO_TO_DEVICE, q_.G.size() * sizeof(double), 0);

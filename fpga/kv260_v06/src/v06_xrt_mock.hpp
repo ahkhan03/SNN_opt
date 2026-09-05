@@ -56,7 +56,7 @@ class bo {
         return reinterpret_cast<T>(storage_ ? storage_->bytes.data() : nullptr);
     }
 
-    void write(const void* source, std::size_t bytes, std::size_t offset = 0) {
+    void write(const void* source, std::size_t bytes, std::size_t offset) {
         if (!storage_ || offset > storage_->bytes.size() ||
             bytes > storage_->bytes.size() - offset)
             return;
