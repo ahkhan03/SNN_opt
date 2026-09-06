@@ -321,10 +321,23 @@ int main(int argc, char** argv) {
     V06Session session(host, problem);
     const int configure_error = session.configure();
     if (configure_error != snn_v06::ERR_OK) {
-        (void)session.stop();
+        const bool stopped = session.stop();
+        const bool interrupted = signal_requested();
+        if (interrupted) {
+            // CONFIGURE uses the same persistent run and mailbox wait as the
+            // loop.  If SIGINT lands there, preserve the same report/130
+            // contract instead of returning an unreported ordinary error.
+            const std::uint32_t initial_sequence =
+                stress.sequence_seed == 0 ? UINT32_C(1) : stress.sequence_seed;
+            const std::vector<std::uint64_t> no_timings;
+            write_report(stress, problem, 0, 0, 0, 0, 0, 0, initial_sequence,
+                         initial_sequence, false, stopped, no_timings,
+                         "CONFIGURE interrupted", interrupted);
+            return stopped ? 130 : 1;
+        }
         std::fprintf(stderr, "stress CONFIGURE failed with error %d\n",
                      configure_error);
-        return 3;
+        return stopped ? 3 : 5;
     }
 
     std::mt19937_64 rng(stress.seed);
@@ -347,15 +360,20 @@ int main(int argc, char** argv) {
         const unsigned choice =
             static_cast<unsigned>(rng() % UINT64_C(100));
         ResultRecord command_result;
-        TimingRecord timing;
+        TimingRecord timing{};
         if (choice < 82U) {
-            ++solve_count;
             mutate_vectors(problem, ordinal, rng);
             const ReferenceResult expected = reference_solve(problem);
+            if (signal_requested()) break;
+            ++solve_count;
             const std::uint32_t before = session.sequence();
             command_result = session.solve(problem.b, problem.d, problem.x0,
                                            &timing, snn_v06::HOST_X0, 0,
                                            snn_v06::HOLD_TAIL);
+            // An interrupted wait returns a synthetic ERR_BUSY record and
+            // does not populate TimingRecord.  Go straight to STOP instead
+            // of reading partial result data.
+            if (signal_requested()) break;
             if (timing.sequence != before + UINT32_C(1)) ++sequence_errors;
             std::size_t index = 0;
             bool telemetry_word = false;
@@ -381,20 +399,24 @@ int main(int argc, char** argv) {
                 ++sequence_errors;
             timings.push_back(timing.complete_ns);
         } else if (choice < 92U) {
-            ++refresh_count;
             mutate_A(problem, ordinal);
+            if (signal_requested()) break;
+            ++refresh_count;
             const std::uint32_t before = session.sequence();
             command_result = session.refresh_a();
+            if (signal_requested()) break;
             if (session.sequence() != before + UINT32_C(1)) ++sequence_errors;
             if (command_result.mailbox[snn_v06::OUT_ERROR_CODE] !=
                 snn_v06::ERR_OK)
                 ++sequence_errors;
         } else {
-            ++configure_count;
             mutate_vectors(problem, ordinal, rng);
             mutate_A(problem, ordinal + 3);
+            if (signal_requested()) break;
+            ++configure_count;
             const std::uint32_t before = session.sequence();
             command_result = session.reconfigure();
+            if (signal_requested()) break;
             if (session.sequence() != before + UINT32_C(1)) ++sequence_errors;
             if (command_result.mailbox[snn_v06::OUT_ERROR_CODE] !=
                 snn_v06::ERR_OK)
@@ -410,8 +432,10 @@ int main(int argc, char** argv) {
         ++completed;
     }
 
-    const bool interrupted = signal_requested();
     const bool stop_ok = session.stop();
+    // Sample after STOP as well as before it.  A SIGINT arriving while the
+    // final drain is waiting must still produce the interrupted/130 outcome.
+    const bool interrupted = signal_requested();
     const bool timing_checked = (problem.n == 6 && problem.m == 18) &&
                                 V06_HAVE_XRT;
     const bool timing_pass = !timing_checked || median_us(timings) <= 25.0;

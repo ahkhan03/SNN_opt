@@ -24,4 +24,7 @@
 // XRT's ERT command-state enum is ordered NEW/QUEUED/RUNNING followed by
 // COMPLETED and terminal error states.  Keeping this tiny predicate numeric
 // avoids depending on enum spelling across the 2.13 board packaging variants.
-inline bool v06_run_terminal(int state) { return state >= 4; }
+// ERT assigns 4 to COMPLETED and values above it to error/abort/timeout
+// states (and, on some XRT releases, SUBMITTED).  STOP is clean only when the
+// persistent run reached COMPLETED, so do not collapse failures into success.
+inline bool v06_run_terminal(int state) { return state == 4; }

@@ -61,11 +61,35 @@ within a handful of solves).
   size is above the projection, consistent with the honest bottom line that the
   FPGA is slower and costlier than one A53 core here.
 
-### Known harness limitation (non-blocking)
+### Graceful SIGINT drain (FIXED + board-verified)
 
-`stress_kv260_v06` does not install a working SIGINT handler on the XRT backend:
-a `kill -INT` mid-run did not drain/STOP/report and the process kept running (it
-was recovered as the killed-host case above). Normal end-of-run STOP works. A
-follow-up would port the stream host's `SignalGuard` into the stress binary so a
-graceful SIGINT writes an `interrupted` report; not required by gate 3, whose
-STOP and killed-host-recovery requirements are met.
+An earlier `stress_kv260_v06` build wedged on a mid-run `kill -INT`: the process
+kept running with a thread stuck in the XRT driver, CU(0) held an outstanding
+command (`kds_del_cu_context` in dmesg), no `interrupted` report was written, and
+the board needed a reboot to recover (`xmutil unloadapp`/`loadapp` did not clear
+the dead-thread-held CU context). Root cause: the persistent-run teardown
+predicate `v06_run_terminal()` accepted any ERT state `>= 4`, but only `4` is
+`COMPLETED` (`5+` are ERROR/ABORT/SUBMITTED/TIMEOUT). A non-completed run was
+declared terminal, so `wait_run_complete()` returned before the run finished and
+device teardown then blocked on the still-outstanding command.
+
+Fixes: `v06_run_terminal()` now requires exactly `COMPLETED` (`state == 4`), so a
+run that has not genuinely completed times out and reports STOP failure instead of
+a false green. The stress driver value-initializes its `TimingRecord`, checks the
+signal flag immediately before and after every command (no new command starts once
+a signal is seen, and no partial result is read from an interrupted solve), samples
+the flag after the final STOP (a signal during the drain still yields the
+`interrupted`/130 outcome), and writes the report with `interrupted=true` and
+returns 130 even when SIGINT lands during the initial CONFIGURE. The mailbox and
+STOP handshake were unchanged; STOP still waits with `honor_signal=false` and
+accepts only the immediate in-flight predecessor.
+
+Board verification (`tools/remote_gate3_sigint.sh`, `sigint/` here): a `kill -INT`
+mid-run on the H=3,N=1 fixture (seq seed near `UINT32_MAX`, wrap crossed) drained
+221 solves + 14 refresh + 23 configure, then exited 130 with `interrupted=true`,
+`stop_ok=true`, `clean_stop_pass=true`, `sequence_errors=0`, `parity_errors=0`. A
+fresh persistent host then CONFIGUREd and solved (route FULL, valid raw + 16-word
+telemetry) **without any application reset**, proving the graceful drain leaves the
+CU cleanly stopped rather than orphaned. No zombie process and no CU-outstanding
+dmesg after the run. (`pass:false`/`target_pass:false` in the report are the same
+always-sync verification-path latency noted above, not a drain failure.)
