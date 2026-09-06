@@ -78,8 +78,14 @@ inline std::vector<double> read_vector(std::FILE* file, std::size_t count,
     return std::vector<double>(source.begin(), source.end());
 }
 
+// The v0.5 command-line tools retain their historical 64x64 guard, while
+// v0.6's STREAM route deliberately supports the wider 1024x1024 contract.
+// Keep the guard a call-site choice so the v0.5 reference remains unchanged
+// by default and v0.6 can opt into its larger ABI without maintaining a second
+// bundle parser.
 inline Problem load_problem(const std::string& path,
-                            bool require_float32 = false) {
+                            bool require_float32 = false,
+                            int max_n = 64, int max_m = 64) {
     std::FILE* file = std::fopen(path.c_str(), "rb");
     if (!file) {
         std::fprintf(stderr, "cannot open %s\n", path.c_str());
@@ -115,8 +121,8 @@ inline Problem load_problem(const std::string& path,
     problem.has_lower = header[5] != 0;
     problem.has_upper = header[6] != 0;
     problem.source_is_float32 = is_float;
-    if (problem.n <= 0 || problem.n > 64 || problem.m <= 0 ||
-        problem.m > 64 || problem.iterations <= 0 ||
+    if (max_n <= 0 || max_m <= 0 || problem.n <= 0 || problem.n > max_n ||
+        problem.m <= 0 || problem.m > max_m || problem.iterations <= 0 ||
         problem.projection_cap <= 0) {
         std::fprintf(stderr, "problem dimensions or horizons are out of range\n");
         std::exit(2);

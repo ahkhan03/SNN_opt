@@ -1,0 +1,39 @@
+{
+ "schema": "snn-qp-v06-gate3-stress-v1",
+ "backend": "xrt",
+ "n": 6,
+ "m": 18,
+ "count_requested": 10000,
+ "count_completed": 10000,
+ "seed": 92647598721286,
+ "sequence_seed": 4294967290,
+ "first_sequence": 4294967290,
+ "last_sequence": 9994,
+ "wrap_crossed": true,
+ "sequence_errors": 0,
+ "parity_errors": 0,
+ "interrupted": false,
+ "commands": {
+  "solve": 8219,
+  "refresh_a": 969,
+  "configure": 812
+ },
+ "timing_cell": {
+  "horizon_n1": true,
+  "target_us": 25,
+  "target_checked": true,
+  "target_pass": false,
+  "p50_us": 1373.92,
+  "samples": 8219,
+  "round_trip_ns": "elided(8219 samples)",
+  "round_trip_us_summary": {
+   "min": 755.857,
+   "p50": 1373.924,
+   "p95": 2640.566,
+   "max": 4759.327
+  }
+ },
+ "stop_ok": true,
+ "clean_stop_pass": false,
+ "pass": false
+}

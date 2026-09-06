@@ -6,6 +6,10 @@
 #include <cstdio>
 #include <vector>
 
+#ifndef V05_INPUT_MAX_DIM
+#define V05_INPUT_MAX_DIM 64
+#endif
+
 extern "C" void snn_qp_v05(
     const double* A_in, const double* b_in, const double* C_in,
     const double* d_in, const double* cns_in, const double* row_scale_in,
@@ -20,7 +24,8 @@ int main(int argc, char** argv) {
                      argv[0]);
         return 2;
     }
-    const msrp_v05::Problem q = msrp_v05::load_problem(argv[1]);
+    const msrp_v05::Problem q = msrp_v05::load_problem(
+        argv[1], false, V05_INPUT_MAX_DIM, V05_INPUT_MAX_DIM);
     if (q.source_is_float32) {
         std::fprintf(stderr, "v0.5 hardware path requires binary64 input\n");
         return 2;

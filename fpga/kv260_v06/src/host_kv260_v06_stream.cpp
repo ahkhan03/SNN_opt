@@ -43,6 +43,7 @@ struct StreamOptions {
     bool persistent = true;
     bool host_x0 = false;
     bool force_mock = false;
+    bool self_test_reseed = false;
     Options::PollSync poll_sync = Options::PollSync::Always;
     Options::Poll poll = Options::Poll::Yield;
     unsigned int poll_sleep_us = 0;
@@ -55,6 +56,7 @@ struct StreamOptions {
         "usage: %s <kernel.xclbin> <resident-stream.bin> <fixed-output.bin> "
         "[--one-shot|--persistent] [--warmups N] [--reps N] [--energy-reps N] "
         "[--route auto|full|cg|stream] [--host-x0] [--mock] "
+        "[--self-test-reseed] "
         "[--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
         "[--json-out PATH]\n",
         program);
@@ -113,6 +115,8 @@ StreamOptions parse_stream_options(int argc, char** argv) {
             options.poll = parse_poll(argv[++i], options.poll_sleep_us);
         } else if (arg == "--mock") {
             options.force_mock = true;
+        } else if (arg == "--self-test-reseed") {
+            options.self_test_reseed = true;
         } else if (arg == "--json-out" && i + 1 < argc) {
             options.json_out = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
@@ -124,6 +128,87 @@ StreamOptions parse_stream_options(int argc, char** argv) {
         }
     }
     return options;
+}
+
+// A deliberately small resident-mailbox model for the off-board re-seed
+// regression test.  It models the one stateful fact that matters here: a
+// RESIDENT_WARM command starts from the device's committed state, whereas a
+// HOST_X0 command loads its payload before solving.  The arithmetic increment
+// is deterministic and is not presented as a fixed-point kernel oracle.
+bool run_mock_reseed_self_test() {
+    const std::vector<int> x0{3, -2, 5, 7};
+    const int stride = 2;
+    const int passes = 3;
+
+    auto shift = [](const std::vector<int>& value, int amount) {
+        std::vector<int> result = value;
+        if (amount > 0 && amount < static_cast<int>(result.size())) {
+            for (int i = 0; i + amount < static_cast<int>(result.size()); ++i)
+                result[static_cast<std::size_t>(i)] =
+                    value[static_cast<std::size_t>(i + amount)];
+        }
+        return result;
+    };
+    auto solve = [&](std::vector<int>& resident, int start,
+                     const std::vector<int>& payload, int amount) {
+        std::vector<int> state = start == snn_v06::HOST_X0 ? payload : resident;
+        state = shift(state, amount);
+        for (std::size_t i = 0; i < state.size(); ++i)
+            state[i] += static_cast<int>(i + 1);
+        resident = state;
+        return state;
+    };
+
+    std::vector<std::vector<int>> fixed_period0;
+    std::vector<int> resident = x0;
+    for (int pass = 0; pass < passes; ++pass) {
+        const std::vector<int> first =
+            solve(resident, snn_v06::HOST_X0, x0, 0);
+        fixed_period0.push_back(first);
+        std::vector<int> predecessor = first;
+        // Periods 1..P-1 remain warm within this pass.
+        (void)solve(resident, snn_v06::RESIDENT_WARM,
+                    shift(predecessor, stride), stride);
+    }
+    const std::vector<int> single_first = [&]() {
+        std::vector<int> state = x0;
+        return solve(state, snn_v06::HOST_X0, x0, 0);
+    }();
+    bool fixed_same = true;
+    for (const std::vector<int>& value : fixed_period0)
+        fixed_same = fixed_same && value == fixed_period0.front();
+    fixed_same = fixed_same && fixed_period0.front() == single_first;
+
+    // Reproduce the old once-per-session flag as a control.  After pass zero,
+    // period zero is incorrectly sent warm with the previous resident state.
+    std::vector<std::vector<int>> unfixed_period0;
+    resident = x0;
+    bool first_period = true;
+    for (int pass = 0; pass < passes; ++pass) {
+        const bool first = first_period;
+        const std::vector<int> first_payload =
+            first ? x0 : std::vector<int>(resident);
+        const std::vector<int> value = solve(
+            resident, first ? snn_v06::HOST_X0 : snn_v06::RESIDENT_WARM,
+            first_payload, first ? 0 : stride);
+        unfixed_period0.push_back(value);
+        first_period = false;
+        (void)solve(resident, snn_v06::RESIDENT_WARM, resident, stride);
+    }
+    bool unfixed_drift = false;
+    for (std::size_t i = 1; i < unfixed_period0.size(); ++i)
+        unfixed_drift = unfixed_drift ||
+                        unfixed_period0[i] != unfixed_period0[0];
+
+    std::printf(
+        "{\"schema\":\"resident-kv260-reseed-mock-v1\","
+        "\"passes\":%d,\"fixed_period0_identical\":%s,"
+        "\"fixed_matches_single_pass\":%s,\"unfixed_control_drifts\":%s,"
+        "\"pass\":%s}\n",
+        passes, fixed_same ? "true" : "false", fixed_same ? "true" : "false",
+        unfixed_drift ? "true" : "false",
+        (fixed_same && unfixed_drift) ? "true" : "false");
+    return fixed_same && unfixed_drift;
 }
 
 bool wait_for_go() {
@@ -563,7 +648,37 @@ std::string stream_json(
 
 int main(int argc, char** argv) {
     SignalGuard signal_guard;
+    // The regression model is useful before a resident bundle or XRT build
+    // exists, so accept the compact standalone spelling
+    // ``host_kv260_v06_stream --self-test-reseed --mock`` as well as the
+    // normal three-positional-argument form.
+    if (argc < 4) {
+        bool self_test = false;
+        bool mock = false;
+        for (int i = 1; i < argc; ++i) {
+            self_test = self_test || std::strcmp(argv[i], "--self-test-reseed") == 0;
+            mock = mock || std::strcmp(argv[i], "--mock") == 0;
+        }
+        if (self_test) {
+            if (!mock) {
+                std::fprintf(stderr,
+                             "--self-test-reseed is an off-board mock test; "
+                             "add --mock to make the backend explicit\n");
+                return 2;
+            }
+            return run_mock_reseed_self_test() ? 0 : 1;
+        }
+    }
     const StreamOptions options = parse_stream_options(argc, argv);
+    if (options.self_test_reseed) {
+        if (!options.force_mock) {
+            std::fprintf(stderr,
+                         "--self-test-reseed is an off-board mock test; "
+                         "add --mock to make the backend explicit\n");
+            return 2;
+        }
+        return run_mock_reseed_self_test() ? 0 : 1;
+    }
     const resident_v1::Bundle bundle = resident_v1::load_bundle(options.bundle);
     if (bundle.periods.empty()) {
         std::fprintf(stderr, "resident bundle has no periods\n");
@@ -607,11 +722,19 @@ int main(int argc, char** argv) {
     passes.reserve(energy_mode ? 1U
                                : static_cast<std::size_t>(options.repetitions));
 
-    // A persistent CU retains its warm state across passes. Keep the host
-    // predecessor in lockstep so HOST_X0 control runs and HOLD_TAIL payloads
-    // have the same continuous-stream semantics as RESIDENT_WARM.
+    // A persistent CU retains its warm state across passes.  The protocol's
+    // pass boundary is an explicit re-seed, however: period zero of every
+    // pass must load the configured x0 into the device resident state.  Keep
+    // the host predecessor in lockstep with that boundary; periods after zero
+    // remain a continuous HOLD_TAIL stream within the pass.
     std::vector<double> resident_predecessor = bundle.x0;
-    bool first_period = true;
+    // Preserve the historical explicit --host-x0 control: it deliberately
+    // submits HOST_X0 for every period and carries its host payload across
+    // repeated passes.  The per-pass reset below applies to the default
+    // RESIDENT_WARM protocol only; keeping this state separate prevents the
+    // regression fix from changing that diagnostic control.
+    std::vector<double> host_x0_predecessor = bundle.x0;
+    bool host_x0_started = false;
     std::uint64_t energy_started = 0;
     std::uint64_t energy_finished = 0;
     for (int pass = 0; pass < total_passes; ++pass) {
@@ -629,6 +752,10 @@ int main(int argc, char** argv) {
         pass_results.reserve(static_cast<std::size_t>(bundle.period_count));
         std::vector<double> pass_violation;
         std::vector<double> pass_first_error;
+        // Reset both host-side views at the start of *each* pass.  Leaving
+        // this state from the preceding pass was the source of the v06
+        // stream re-seed drift.
+        resident_predecessor = bundle.x0;
         std::vector<double> previous_output = resident_predecessor;
         for (int period_index = 0; period_index < bundle.period_count;
              ++period_index) {
@@ -642,13 +769,36 @@ int main(int argc, char** argv) {
             }
             const resident_v1::Period& period =
                 bundle.periods[static_cast<std::size_t>(period_index)];
-            const bool first = first_period;
-            std::vector<double> payload_x0 =
-                first ? bundle.x0 : hold_tail_shift(previous_output, options.shift);
-            const int start = options.host_x0 ? snn_v06::HOST_X0
-                                              : snn_v06::RESIDENT_WARM;
-            const int stride =
-                options.host_x0 ? 0 : (first ? 0 : options.shift);
+            const bool first = period_index == 0;
+            int start = snn_v06::RESIDENT_WARM;
+            int stride = options.shift;
+            std::vector<double> payload_x0;
+            if (options.host_x0) {
+                // The explicit host-x0 mode is an all-periods HOST_X0
+                // control.  Shift the payload on the host and leave the
+                // device stride at zero, as before.  Its historical
+                // predecessor intentionally spans repeated passes.
+                start = snn_v06::HOST_X0;
+                stride = 0;
+                if (!host_x0_started && first)
+                    payload_x0 = bundle.x0;
+                else
+                    payload_x0 = hold_tail_shift(
+                        host_x0_started ? host_x0_predecessor : previous_output,
+                        options.shift);
+            } else if (first) {
+                // HOST_X0 is the only command-level operation that re-seeds
+                // the kernel's on-device resident state.  A warm command's
+                // payload_x0 is intentionally ignored by the kernel.
+                start = snn_v06::HOST_X0;
+                stride = 0;
+                payload_x0 = bundle.x0;
+            } else {
+                // Within a pass, preserve the existing resident-warm and
+                // HOLD_TAIL semantics.  The kernel applies this shift to its
+                // committed resident predecessor.
+                payload_x0 = hold_tail_shift(previous_output, options.shift);
+            }
             TimingRecord timing;
             ResultRecord result = session.solve(
                 period.b, period.d, payload_x0,
@@ -662,7 +812,10 @@ int main(int argc, char** argv) {
             }
             previous_output = decode_raw(result.raw);
             resident_predecessor = previous_output;
-            first_period = false;
+            if (options.host_x0) {
+                host_x0_predecessor = previous_output;
+                host_x0_started = true;
+            }
             if (signal_requested()) {
                 std::fprintf(stderr,
                              "signal %d received after period %d; beginning "

@@ -96,6 +96,15 @@ void publish(Buffers& b, std::uint32_t sequence, int command, int start,
     b.mb_in[snn_v06::MAILBOX_SEQUENCE] = sequence;
 }
 
+int parse_route(const char* text) {
+    if (std::strcmp(text, "auto") == 0) return snn_v06::AUTO;
+    if (std::strcmp(text, "full") == 0) return snn_v06::FORCE_FULL;
+    if (std::strcmp(text, "cg") == 0) return snn_v06::FORCE_CG;
+    if (std::strcmp(text, "stream") == 0) return snn_v06::FORCE_STREAM;
+    std::fprintf(stderr, "invalid route: %s\n", text);
+    std::exit(2);
+}
+
 void write_output(const char* path, const msrp_v05::Problem& q,
                   const Buffers& b) {
     std::FILE* f = std::fopen(path, "wb");
@@ -152,7 +161,8 @@ msrp_v05::Problem generated_problem(int n, int m) {
     return q;
 }
 
-int run(const msrp_v05::Problem& q, const char* output, bool persistent) {
+int run(const msrp_v05::Problem& q, const char* output, bool persistent,
+        int route) {
     Buffers buffers;
     allocate_buffers(q, buffers);
     std::uint32_t sequence = 1;
@@ -160,26 +170,26 @@ int run(const msrp_v05::Problem& q, const char* output, bool persistent) {
     if (!persistent) {
         buffers.mb_in[snn_v06::MAILBOX_SEQUENCE] = sequence;
         call_kernel(q, buffers, snn_v06::CONFIGURE, snn_v06::ONESHOT,
-                    snn_v06::AUTO, snn_v06::HOST_X0, 0, snn_v06::HOLD_TAIL);
+                    route, snn_v06::HOST_X0, 0, snn_v06::HOLD_TAIL);
         error = static_cast<int>(buffers.mb_out[snn_v06::OUT_ERROR_CODE]);
         ++sequence;
         buffers.mb_in[snn_v06::MAILBOX_SEQUENCE] = sequence;
         call_kernel(q, buffers, snn_v06::SOLVE, snn_v06::ONESHOT,
-                    snn_v06::AUTO, snn_v06::HOST_X0, 0, snn_v06::HOLD_TAIL);
+                    route, snn_v06::HOST_X0, 0, snn_v06::HOLD_TAIL);
         error = static_cast<int>(buffers.mb_out[snn_v06::OUT_ERROR_CODE]);
     } else {
         publish(buffers, sequence, snn_v06::CONFIGURE, snn_v06::HOST_X0, 0,
-                snn_v06::HOLD_TAIL);
+                snn_v06::HOLD_TAIL, route);
         std::thread worker([&]() {
             call_kernel(q, buffers, snn_v06::CONFIGURE, snn_v06::PERSISTENT,
-                        snn_v06::AUTO, snn_v06::HOST_X0, 0,
+                        route, snn_v06::HOST_X0, 0,
                         snn_v06::HOLD_TAIL);
         });
         wait_done(buffers, sequence);
         error = static_cast<int>(buffers.mb_out[snn_v06::OUT_ERROR_CODE]);
         ++sequence;
         publish(buffers, sequence, snn_v06::SOLVE, snn_v06::HOST_X0, 0,
-                snn_v06::HOLD_TAIL);
+                snn_v06::HOLD_TAIL, route);
         wait_done(buffers, sequence);
         error = static_cast<int>(buffers.mb_out[snn_v06::OUT_ERROR_CODE]);
         ++sequence;
@@ -205,28 +215,52 @@ int run(const msrp_v05::Problem& q, const char* output, bool persistent) {
 
 int main(int argc, char** argv) {
     bool persistent = false;
+    int route = snn_v06::AUTO;
     if (argc >= 2 && std::strcmp(argv[1], "--generate") == 0) {
-        if (argc < 5 || argc > 6) {
+        if (argc < 5) {
             std::fprintf(stderr,
-                         "usage: %s --generate N M output.bin [--persistent]\n",
+                         "usage: %s --generate N M output.bin "
+                         "[--persistent] [--route auto|full|cg|stream]\n",
                          argv[0]);
             return 2;
         }
         const int n = std::atoi(argv[2]);
         const int m = std::atoi(argv[3]);
-        persistent = argc == 6 && std::strcmp(argv[5], "--persistent") == 0;
-        if (argc == 6 && !persistent) return 2;
+        if (n < 1 || n > 1024 || m < 1 || m > 1024) {
+            std::fprintf(stderr,
+                         "generated dimensions must be within 1..1024\n");
+            return 2;
+        }
+        for (int i = 5; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--persistent") == 0) {
+                persistent = true;
+            } else if (std::strcmp(argv[i], "--route") == 0 && i + 1 < argc) {
+                route = parse_route(argv[++i]);
+            } else {
+                std::fprintf(stderr, "invalid --generate option: %s\n", argv[i]);
+                return 2;
+            }
+        }
         const auto q = generated_problem(n, m);
-        return run(q, argv[4], persistent);
+        return run(q, argv[4], persistent, route);
     }
-    if (argc < 3 || argc > 4) {
+    if (argc < 3) {
         std::fprintf(stderr,
-                     "usage: %s problem.bin output.bin [--persistent]\n",
+                     "usage: %s problem.bin output.bin [--persistent] "
+                     "[--route auto|full|cg|stream]\n",
                      argv[0]);
         return 2;
     }
-    persistent = argc == 4 && std::strcmp(argv[3], "--persistent") == 0;
-    if (argc == 4 && !persistent) return 2;
-    const auto q = msrp_v05::load_problem(argv[1]);
-    return run(q, argv[2], persistent);
+    for (int i = 3; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--persistent") == 0) {
+            persistent = true;
+        } else if (std::strcmp(argv[i], "--route") == 0 && i + 1 < argc) {
+            route = parse_route(argv[++i]);
+        } else {
+            std::fprintf(stderr, "invalid option: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    const auto q = msrp_v05::load_problem(argv[1], false, 1024, 1024);
+    return run(q, argv[2], persistent, route);
 }

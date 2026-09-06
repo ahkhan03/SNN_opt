@@ -33,6 +33,20 @@
 #include <utility>
 #include <vector>
 
+#if defined(V06_MOCK_NATIVE_HOOK)
+// The gate-3 workstation build can link the v06 native kernel while retaining
+// the XRT-shaped BO facade.  The hook is deliberately compile-time only: a
+// normal mock build keeps its tiny deterministic record, while the stress
+// build gets an independent fixed-point execution path without changing the
+// board ABI.
+extern void v06_mock_native_invoke(
+    const msrp_v05::Problem* problem, const double* b_in, const double* d_in,
+    const double* x0_in, std::uint32_t* a_ddr, std::uint32_t* c_ddr,
+    std::uint32_t* ct_ddr, std::uint32_t* g_ddr, long long* raw_out,
+    unsigned long long* telemetry_out, std::uint32_t* mb_in,
+    std::uint32_t* mb_out, int command);
+#endif
+
 namespace {
 
 constexpr std::uint64_t FIXED_SCALE = UINT64_C(1) << 24;
@@ -92,6 +106,10 @@ struct Options {
     PollSync poll_sync = PollSync::Always;
     Poll poll = Poll::Yield;
     unsigned int poll_sleep_us = 0;
+    // Mailbox sequence numbers are deliberately uint32_t.  Keeping the
+    // initial value configurable lets the stress harness cross UINT32_MAX in
+    // a handful of commands instead of requiring a four-billion-command run.
+    std::uint32_t sequence_seed = 1;
 };
 
 [[noreturn]] void usage(const char* program, int status) {
@@ -103,6 +121,7 @@ struct Options {
         "[--route auto|full|cg|stream] [--start host_x0|resident_warm|cold_zero] "
         "[--shift S] [--tail hold|repeat] [--litmus] [--mock] "
         "[--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
+        "[--sequence-seed UINT32] "
         "[--json-out PATH]\n",
         program);
     std::exit(status);
@@ -172,6 +191,18 @@ Options::Poll parse_poll(const char* text, unsigned int& sleep_us) {
     std::exit(2);
 }
 
+std::uint32_t parse_u32(const char* text, const char* label) {
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long value = std::strtoull(text, &end, 0);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value > static_cast<unsigned long long>(UINT32_MAX)) {
+        std::fprintf(stderr, "invalid %s: %s\n", label, text);
+        std::exit(2);
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
 const char* poll_sync_name(Options::PollSync policy) {
     return policy == Options::PollSync::Always ? "always" : "never";
 }
@@ -215,6 +246,8 @@ Options parse_options(int argc, char** argv) {
             options.poll_sync = parse_poll_sync(argv[++i]);
         } else if (arg == "--poll" && i + 1 < argc) {
             options.poll = parse_poll(argv[++i], options.poll_sleep_us);
+        } else if (arg == "--sequence-seed" && i + 1 < argc) {
+            options.sequence_seed = parse_u32(argv[++i], "sequence seed");
         } else if (arg == "--litmus") {
             options.litmus = true;
         } else if (arg == "--mock") {
@@ -434,8 +467,17 @@ class V06Session {
         }
     }
 
-    int configure() {
-        sequence_ = 1;
+    int configure(std::uint32_t initial_sequence = 0) {
+        sequence_ = initial_sequence == 0 ? options_.sequence_seed
+                                          : initial_sequence;
+        // Zero is a valid post-wrap sequence, but using it for the very first
+        // command would be indistinguishable from an untouched output BO on
+        // a few mailbox implementations.  Keep the initial command nonzero;
+        // subsequent increments are intentionally allowed to wrap to zero.
+        if (sequence_ == 0) sequence_ = 1;
+        have_completed_sequence_ = false;
+        stop_sent_ = false;
+        stop_ok_ = true;
         publish(sequence_, snn_v06::CONFIGURE, options_.start, 0,
                 snn_v06::HOLD_TAIL, false);
         if (options_.persistent) {
@@ -460,8 +502,62 @@ class V06Session {
         }
         configured_ = true;
         const ResultRecord result = read_output(nullptr);
+        last_error_code_ = result.mailbox[snn_v06::OUT_ERROR_CODE];
         return static_cast<int>(result.mailbox[snn_v06::OUT_ERROR_CODE]);
     }
+
+    // Reconfigure and REFRESH_A are mailbox transactions on the already
+    // armed persistent CU.  They are kept as explicit Session methods so the
+    // stress path exercises the same production publication/acknowledgement
+    // code as ordinary solves.
+    ResultRecord reconfigure() {
+        ResultRecord failed;
+        if (!persistent_started_ || !configured_) {
+            failed.mailbox[snn_v06::OUT_ERROR_CODE] = snn_v06::ERR_NOT_CONFIGURED;
+            return failed;
+        }
+        upload_configure_inputs();
+        ++sequence_;
+        publish(sequence_, snn_v06::CONFIGURE, options_.start, 0,
+                snn_v06::HOLD_TAIL, false);
+        mock_complete(sequence_, snn_v06::CONFIGURE);
+        if (!wait_done(sequence_, nullptr)) {
+            failed.mailbox[snn_v06::OUT_DONE_SEQUENCE] = sequence_;
+            failed.mailbox[snn_v06::OUT_ERROR_CODE] = snn_v06::ERR_BUSY;
+            return failed;
+        }
+        const ResultRecord result = read_output(nullptr);
+        configured_ = result.mailbox[snn_v06::OUT_ERROR_CODE] == snn_v06::ERR_OK;
+        last_error_code_ = result.mailbox[snn_v06::OUT_ERROR_CODE];
+        return result;
+    }
+
+    ResultRecord refresh_a() {
+        ResultRecord failed;
+        if (!persistent_started_ || !configured_) {
+            failed.mailbox[snn_v06::OUT_ERROR_CODE] = snn_v06::ERR_NOT_CONFIGURED;
+            return failed;
+        }
+        a_cfg_bo_->write(q_.A.data(), q_.A.size() * sizeof(double), 0);
+        sync_bo(*a_cfg_bo_, XCL_BO_SYNC_BO_TO_DEVICE,
+                q_.A.size() * sizeof(double), 0);
+        ++sequence_;
+        publish(sequence_, snn_v06::REFRESH_A, options_.start, 0,
+                snn_v06::HOLD_TAIL, false);
+        mock_complete(sequence_, snn_v06::REFRESH_A);
+        if (!wait_done(sequence_, nullptr)) {
+            failed.mailbox[snn_v06::OUT_DONE_SEQUENCE] = sequence_;
+            failed.mailbox[snn_v06::OUT_ERROR_CODE] = snn_v06::ERR_BUSY;
+            return failed;
+        }
+        const ResultRecord result = read_output(nullptr);
+        last_error_code_ = result.mailbox[snn_v06::OUT_ERROR_CODE];
+        return result;
+    }
+
+    std::uint32_t sequence() const { return sequence_; }
+    std::uint32_t last_done_sequence() const { return last_completed_sequence_; }
+    std::uint32_t last_error_code() const { return last_error_code_; }
 
     ResultRecord solve(const std::vector<double>& b, const std::vector<double>& d,
                        const std::vector<double>& x0, TimingRecord* timing,
@@ -523,6 +619,8 @@ class V06Session {
         const std::uint64_t output_start = doorbell_done;
         const ResultRecord result = read_output(timing);
         const std::uint64_t complete_done = monotonic_raw_ns();
+
+        last_error_code_ = result.mailbox[snn_v06::OUT_ERROR_CODE];
 
         if (timing != nullptr) {
             timing->payload_write_ns = write_done - write_start;
@@ -594,8 +692,13 @@ class V06Session {
             // command is on the wire, stop_sent_ makes cleanup idempotent.
             stop_sent_ = true;
             mock_complete(sequence_, snn_v06::STOP);
-            const bool acknowledged =
-                wait_done(sequence_, nullptr, STOP_TIMEOUT_MS, false);
+            // A signal may have interrupted the host while the immediately
+            // preceding SOLVE was still retiring.  STOP is the one serialized
+            // transaction allowed to observe that predecessor before its own
+            // acknowledgement; normal SOLVE/REFRESH/CONFIGURE waits remain
+            // strict and reject every unexpected sequence.
+            const bool acknowledged = wait_done(
+                sequence_, nullptr, STOP_TIMEOUT_MS, false, true);
             if (!acknowledged) {
                 std::fprintf(
                     stderr,
@@ -605,6 +708,21 @@ class V06Session {
                 std::fprintf(stderr,
                              "ERROR: the only known recovery from an orphaned "
                              "persistent run is a board reboot.\n");
+                running_ = false;
+                stop_ok_ = false;
+                return false;
+            }
+
+            // Read the committed mailbox fields after the matching sequence;
+            // a STOP acknowledgement with any other error is not a clean
+            // terminal handshake.
+            const ResultRecord stop_result = read_output(nullptr);
+            last_error_code_ = stop_result.mailbox[snn_v06::OUT_ERROR_CODE];
+            if (last_error_code_ != snn_v06::ERR_STOPPED) {
+                std::fprintf(stderr,
+                             "ERROR: STOP sequence %u returned error %u, "
+                             "expected %u\n",
+                             sequence_, last_error_code_, snn_v06::ERR_STOPPED);
                 running_ = false;
                 stop_ok_ = false;
                 return false;
@@ -782,7 +900,8 @@ class V06Session {
 
     bool wait_done(std::uint32_t wanted, TimingRecord* timing,
                    int timeout_ms = WAIT_TIMEOUT_MS,
-                   bool honor_signal = true) {
+                   bool honor_signal = true,
+                   bool allow_inflight_predecessor = false) {
         const std::uint64_t started = monotonic_raw_ns();
         const std::uint64_t deadline = started +
                                        static_cast<std::uint64_t>(timeout_ms) *
@@ -795,6 +914,22 @@ class V06Session {
                     output_map_ + output_layout_.mailbox);
             const std::uint32_t done = mailbox[snn_v06::OUT_DONE_SEQUENCE];
             if (done == wanted) break;
+            // A serialized Session must never observe a different *new*
+            // completion while waiting for the current one.  The prior value
+            // is allowed (it is the normal stale mailbox value); any other
+            // value is a lost/duplicated/out-of-order sequence.  All
+            // arithmetic is uint32_t, so UINT32_MAX -> 0 is a valid successor.
+            const std::uint32_t predecessor = wanted - UINT32_C(1);
+            const bool is_inflight_predecessor =
+                allow_inflight_predecessor && done == predecessor;
+            if (have_completed_sequence_ && done != last_completed_sequence_ &&
+                !is_inflight_predecessor) {
+                std::fprintf(stderr,
+                             "mailbox sequence changed unexpectedly: wanted "
+                             "%u, observed %u after %u\n",
+                             wanted, done, last_completed_sequence_);
+                return false;
+            }
             if (honor_signal && signal_requested()) {
                 std::fprintf(stderr,
                              "signal %d received while waiting for sequence "
@@ -815,6 +950,8 @@ class V06Session {
             }
         }
         std::atomic_thread_fence(std::memory_order_acquire);
+        last_completed_sequence_ = wanted;
+        have_completed_sequence_ = true;
         if (timing != nullptr) {
             timing->mailbox_wait_ns = monotonic_raw_ns() - started;
         }
@@ -869,6 +1006,45 @@ class V06Session {
 
     void mock_complete(std::uint32_t sequence, int command) {
         if (!is_mock()) return;
+#if defined(V06_MOCK_NATIVE_HOOK)
+        if (command != snn_v06::LITMUS) {
+            v06_mock_native_invoke(
+                &q_, input_map_ == nullptr
+                           ? nullptr
+                           : reinterpret_cast<const double*>(input_map_ +
+                                                              input_layout_.b),
+                input_map_ == nullptr
+                    ? nullptr
+                    : reinterpret_cast<const double*>(input_map_ +
+                                                       input_layout_.d),
+                input_map_ == nullptr
+                    ? nullptr
+                    : reinterpret_cast<const double*>(input_map_ +
+                                                       input_layout_.x0),
+                a_ddr_bo_ == nullptr
+                    ? nullptr
+                    : a_ddr_bo_->map<std::uint32_t*>(),
+                c_ddr_bo_ == nullptr
+                    ? nullptr
+                    : c_ddr_bo_->map<std::uint32_t*>(),
+                ct_ddr_bo_ == nullptr
+                    ? nullptr
+                    : ct_ddr_bo_->map<std::uint32_t*>(),
+                g_ddr_bo_ == nullptr
+                    ? nullptr
+                    : g_ddr_bo_->map<std::uint32_t*>(),
+                output_map_ == nullptr
+                    ? nullptr
+                    : reinterpret_cast<long long*>(output_map_ +
+                                                    output_layout_.raw),
+                output_map_ == nullptr
+                    ? nullptr
+                    : reinterpret_cast<unsigned long long*>(
+                          output_map_ + output_layout_.telemetry),
+                mailbox_in(), mailbox_out(), command);
+            return;
+        }
+#endif
         std::uint32_t* mb = mailbox_out();
         mb[snn_v06::OUT_ERROR_CODE] = command == snn_v06::STOP
                                           ? snn_v06::ERR_STOPPED
@@ -928,6 +1104,9 @@ class V06Session {
     std::uint8_t* input_map_ = nullptr;
     std::uint8_t* output_map_ = nullptr;
     std::uint32_t sequence_ = 0;
+    std::uint32_t last_completed_sequence_ = 0;
+    std::uint32_t last_error_code_ = snn_v06::ERR_OK;
+    bool have_completed_sequence_ = false;
     bool configured_ = false;
     bool running_ = false;
     bool persistent_started_ = false;
@@ -1038,7 +1217,8 @@ std::string make_json(const Options& options, const msrp_v05::Problem& q,
 int main(int argc, char** argv) {
     SignalGuard signal_guard;
     const Options options = parse_options(argc, argv);
-    const msrp_v05::Problem problem = msrp_v05::load_problem(options.problem);
+    const msrp_v05::Problem problem =
+        msrp_v05::load_problem(options.problem, false, 1024, 1024);
     if (problem.n <= 0 || problem.m <= 0) {
         std::fprintf(stderr, "v06 requires positive n and m\n");
         return 2;
