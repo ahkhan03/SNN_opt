@@ -42,10 +42,10 @@ QUALIFIED_HASHES = {
         "71064c323c7d1d353a973b940b599b935fab477ca003e83f1b4ea200608311fa"
     ),
     "src/msrp_bundle.hpp": (
-        "ce1c262ac07ee75cc4a9eec9dd609b26841e3c16109aad8f4d5461e856dba682"
+        "da38ee2e4e1b892ccac34227067090ab1754b28d3b3913676c2859e4e5c73d4d"
     ),
     "src/native_fixed_v05.cpp": (
-        "9e0e66b422b8ccaf0769346d2276bfd4da401e75ec4c0e716161f8605bb3c986"
+        "5d84ec157df4f0cabf746d7593deac6d6bc23e5d6bfa7caa5127d8e25b842102"
     ),
     "src/reference_v05.cpp": (
         "f1ebe1719b9d190b12b19cf0742fa7c5691d5678cab4df9e8d6741450f710fae"
@@ -123,8 +123,11 @@ def test_bundle_and_capability_guards_are_explicit() -> None:
     native = (SRC / "native_fixed_v05.cpp").read_text(encoding="utf-8")
     readme = (FPGA / "README.md").read_text(encoding="utf-8")
     assert "'M', 'S', 'R', 'P', 'D', 'L', '1'" in bundle
-    assert "problem.n <= 0 || problem.n > 64 || problem.m <= 0" in bundle
-    assert "problem.m > 64" in bundle
+    # v0.6 made the 64x64 guard a call-site default so its STREAM route can opt
+    # into 1024x1024; the v0.5 tools still get 64x64 by default.
+    assert "int max_n = 64, int max_m = 64" in bundle
+    assert "problem.n > max_n" in bundle
+    assert "problem.m > max_m" in bundle
     assert "problem bundle contains trailing bytes" in bundle
     assert "v0.5 hardware path requires binary64 input" in native
     for boundary in (
