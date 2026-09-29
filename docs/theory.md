@@ -20,13 +20,17 @@ Recent work has established connections between spiking neural network dynamics 
 
 A leaky integrate-and-fire (LIF) neuron model describes voltage dynamics as:
 
-$$\dot{V}_i = -\lambda V_i + I_i(t)$$
+```math
+\dot{V}_i = -\lambda V_i + I_i(t)
+```
 
 where $V_i$ is the membrane voltage, $\lambda$ is the leak rate, and $I_i(t)$ represents input currents. When $V_i$ reaches a threshold $T_i$, the neuron fires a spike and the voltage resets.
 
 For a network of $N$ neurons with recurrent connectivity, the voltage dynamics become:
 
-$$\dot{\mathbf{V}} = -\lambda\mathbf{V} + \mathbf{F}\mathbf{c}(t) + \mathbf{\Omega}\mathbf{s}(t) + \mathbf{I}_{bg}$$
+```math
+\dot{\mathbf{V}} = -\lambda\mathbf{V} + \mathbf{F}\mathbf{c}(t) + \mathbf{\Omega}\mathbf{s}(t) + \mathbf{I}_{bg}
+```
 
 where $\mathbf{V} \in \mathbb{R}^N$ are voltages, $\mathbf{F}$ encodes feedforward weights, $\mathbf{c}(t)$ are inputs, $\mathbf{\Omega}$ represents recurrent connectivity, and $\mathbf{s}(t)$ are spike trains modeled as sums of delta functions.
 
@@ -40,10 +44,12 @@ The key insight connecting SNNs to optimization is that voltage thresholds natur
 
 We consider convex optimization problems with linear inequality constraints:
 
-$$\begin{aligned}
+```math
+\begin{aligned}
 \min_{\mathbf{y}} \quad & E(\mathbf{y}) = \frac{\lambda}{2}\mathbf{y}^\top\mathbf{y} + \mathbf{b}^\top\mathbf{y} \\
 \text{subject to} \quad & \mathbf{C}\mathbf{y} + \mathbf{d} \leq \mathbf{0}
-\end{aligned}$$
+\end{aligned}
+```
 
 where:
 - $\mathbf{y} \in \mathbb{R}^n$ is the optimization variable
@@ -58,21 +64,27 @@ The constraint $\mathbf{C}\mathbf{y} + \mathbf{d} \leq \mathbf{0}$ defines the f
 
 The $i$-th inequality constraint can be written as:
 
-$$\mathbf{C}_i^\top \mathbf{y} \leq -d_i$$
+```math
+\mathbf{C}_i^\top \mathbf{y} \leq -d_i
+```
 
 This defines a closed half-space in $\mathbb{R}^n$. The boundary of the feasible region consists of points where at least one constraint is active (holds with equality). At the optimal solution $\mathbf{y}^*$, a subset of constraints will be active, defining the optimal face of the feasible polytope.
 
 The gradient of the objective function is:
 
-$$\nabla E(\mathbf{y}) = \lambda\mathbf{y} + \mathbf{b}$$
+```math
+\nabla E(\mathbf{y}) = \lambda\mathbf{y} + \mathbf{b}
+```
 
-For a quadratic program ($\lambda > 0$), this gradient points away from the origin with magnitude proportional to $\|\mathbf{y}\|$, creating a "pull" toward zero. For a linear program ($\lambda = 0$), the gradient is constant at $\mathbf{b}$.
+For a quadratic program ($\lambda > 0$), this gradient points away from the origin with magnitude proportional to $\Vert\mathbf{y}\Vert$, creating a "pull" toward zero. For a linear program ($\lambda = 0$), the gradient is constant at $\mathbf{b}$.
 
 ### 2.3 Gradient Descent with Boundary Projections
 
 The unconstrained gradient descent dynamics are:
 
-$$\dot{\mathbf{y}} = -k_0 \nabla E(\mathbf{y}) = -k_0(\lambda\mathbf{y} + \mathbf{b})$$
+```math
+\dot{\mathbf{y}} = -k_0 \nabla E(\mathbf{y}) = -k_0(\lambda\mathbf{y} + \mathbf{b})
+```
 
 where $k_0 > 0$ is the step size parameter. This would minimize $E(\mathbf{y})$ in the absence of constraints, but may leave the feasible region.
 
@@ -82,7 +94,9 @@ To enforce constraints, we augment the dynamics with projection events. When the
 
 The original formulation uses a fixed step size:
 
-$$\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}_i$$
+```math
+\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}_i
+```
 
 where $k_1 > 0$ controls the projection magnitude. This requires tuning $k_1$ and may need multiple iterations to reach the boundary.
 
@@ -90,16 +104,29 @@ where $k_1 > 0$ controls the projection magnitude. This requires tuning $k_1$ an
 
 A more efficient approach computes the exact step to reach the constraint boundary. For a violated constraint $g_j(\mathbf{y}) = \mathbf{c}_j^\top \mathbf{y} + d_j > 0$, the exact orthogonal projection onto the constraint hyperplane is:
 
-$$\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2} \mathbf{c}_j$$
+```math
+\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2} \mathbf{c}_j
+```
 
 **Derivation:** We seek the point $\mathbf{y}'$ on the hyperplane $\mathbf{c}_j^\top \mathbf{y}' + d_j = 0$ that is closest to $\mathbf{y}$. The projection moves along the normal direction $\mathbf{c}_j$:
 
-$$\mathbf{y}' = \mathbf{y} - \alpha \mathbf{c}_j$$
+```math
+\mathbf{y}' = \mathbf{y} - \alpha \mathbf{c}_j
+```
 
 Substituting into the constraint equation:
-$$\mathbf{c}_j^\top(\mathbf{y} - \alpha \mathbf{c}_j) + d_j = 0$$
-$$\mathbf{c}_j^\top \mathbf{y} + d_j = \alpha \|\mathbf{c}_j\|^2$$
-$$\alpha = \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2}$$
+
+```math
+\mathbf{c}_j^\top(\mathbf{y} - \alpha \mathbf{c}_j) + d_j = 0
+```
+
+```math
+\mathbf{c}_j^\top \mathbf{y} + d_j = \alpha \|\mathbf{c}_j\|^2
+```
+
+```math
+\alpha = \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2}
+```
 
 This adaptive step eliminates $k_1$ as a hyperparameter and projects exactly onto the boundary in one step per constraint.
 
@@ -122,7 +149,10 @@ The Euler method is often more stable for tightly constrained problems, and is e
 When any constraint becomes violated, apply corrections. Two methods are available:
 
 **Fixed Step (original):**
-$$\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}^\top \mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}$$
+
+```math
+\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}^\top \mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}
+```
 
 where $\mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}$ is an indicator vector for violated constraints.
 
@@ -130,8 +160,15 @@ where $\mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}$ is an indicator vector for viola
 Project onto the most violated constraint, where "most violated" is measured by
 the *normalized* (geometric) distance so differently scaled rows compete fairly,
 with an exact step:
-$$j = \arg\max_i \frac{g_i(\mathbf{y})}{\|\mathbf{c}_i\|}$$
-$$\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2} \mathbf{c}_j$$
+
+```math
+j = \arg\max_i \frac{g_i(\mathbf{y})}{\|\mathbf{c}_i\|}
+```
+
+```math
+\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j(\mathbf{y})}{\|\mathbf{c}_j\|^2} \mathbf{c}_j
+```
+
 Since v0.5.0 box bounds participate in the same sweep as implicit unit-normal
 facets, competing on the same normalized distance.
 
@@ -145,13 +182,13 @@ The adaptive method eliminates $k_1$ as a hyperparameter and converges faster by
 
 The proof sketch relies on several observations:
 
-1. The gradient descent phase decreases the objective function: $\frac{d}{dt}E(\mathbf{y}) = -k_0 \|\nabla E(\mathbf{y})\|^2 \leq 0$
+1. The gradient descent phase decreases the objective function: $\frac{d}{dt}E(\mathbf{y}) = -k_0 \Vert\nabla E(\mathbf{y})\Vert^2 \leq 0$
 
 2. Projections maintain feasibility: after applying corrections, $\mathbf{C}\mathbf{y} + \mathbf{d} \leq \mathbf{0}$
 
 3. The objective function is bounded below on the feasible set (by convexity and compactness arguments)
 
-4. The discrete jumps introduce bounded error: $\|\mathbf{y} - \mathbf{y}^*\| = O(k_1)$
+4. The discrete jumps introduce bounded error: $\Vert\mathbf{y} - \mathbf{y}^*\Vert = O(k_1)$
 
 A rigorous convergence analysis would require specifying bounds on $k_0$ relative to the condition number of the Hessian $\lambda \mathbf{I}$ and bounds on $k_1$ relative to the constraint geometry. For practical implementation, empirical tuning of these parameters suffices.
 
@@ -228,7 +265,9 @@ The algorithm monitors the constraint function $\mathbf{g}(\mathbf{y}) = \mathbf
 **Multiple Simultaneous Violations:**
 When multiple constraints are violated, the projection step corrects all violations simultaneously:
 
-$$\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}^\top \mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}$$
+```math
+\mathbf{y} \leftarrow \mathbf{y} - k_1 \mathbf{C}^\top \mathbb{1}_{\mathbf{g}(\mathbf{y}) > 0}
+```
 
 In practice, this may require iterating the projection step several times until all constraints are satisfied, particularly near vertices of the feasible polytope where many constraints are nearly active.
 
@@ -263,11 +302,11 @@ The dominant cost is typically the matrix-vector products, which are $O(n^2 + mn
 ### 4.2 Convergence Rate
 
 The number of iterations required depends on:
-- Initial distance to the solution: $\|\mathbf{y}_0 - \mathbf{y}^*\|$
+- Initial distance to the solution: $\Vert\mathbf{y}_0 - \mathbf{y}^*\Vert$
 - Problem conditioning: condition number of $\mathbf{A}$
 - Step size $k_0$: larger steps mean fewer iterations but risk instability
 
-For well-conditioned problems, convergence is typically linear with rate determined by $k_0 \lambda_{\min}(A)$ where $\lambda_{\min}$ is the smallest eigenvalue.
+For well-conditioned problems, convergence is typically linear with rate determined by $`k_0 \lambda_{\min}(A)`$ where $\lambda_{\min}$ is the smallest eigenvalue.
 
 ### 4.3 Comparison to Standard Methods
 
@@ -317,10 +356,12 @@ This receding horizon approach requires solving a new optimization problem at ea
 
 At each control timestep $t_k$, we solve:
 
-$$\begin{aligned}
+```math
+\begin{aligned}
 \min_{\mathbf{u}} \quad & \frac{1}{2}\mathbf{u}^\top \mathbf{A} \mathbf{u} + \mathbf{b}^\top \mathbf{u} \\
 \text{subject to} \quad & \mathbf{C}(t_k, \mathbf{x}_k) \mathbf{u} + \mathbf{d}(t_k, \mathbf{x}_k) \leq \mathbf{0}
-\end{aligned}$$
+\end{aligned}
+```
 
 where the constraint matrices $\mathbf{C}$ and $\mathbf{d}$ may depend on the current time and state. Critically, these are **held constant during each optimization solve**, avoiding the "chasing a moving target" problem.
 
@@ -328,7 +369,9 @@ where the constraint matrices $\mathbf{C}$ and $\mathbf{d}$ may depend on the cu
 
 A key advantage for control applications is **warm starting**: we initialize each solve with the solution from the previous timestep:
 
-$$\mathbf{u}_0^{(k)} = \mathbf{u}^{*(k-1)}$$
+```math
+\mathbf{u}_0^{(k)} = \mathbf{u}^{*(k-1)}
+```
 
 For smoothly varying problems, this provides an excellent initialization, often requiring only a few iterations to converge. This dramatically reduces computational cost compared to cold-start methods.
 
@@ -352,7 +395,9 @@ Consider a robotic manipulator with $n$ joints (degrees of freedom). The configu
 
 **Kinematics:** The relationship between joint velocities and end-effector velocity is:
 
-$$\dot{\mathbf{r}} = \mathbf{J}(\boldsymbol{\theta}) \mathbf{u}$$
+```math
+\dot{\mathbf{r}} = \mathbf{J}(\boldsymbol{\theta}) \mathbf{u}
+```
 
 where $\mathbf{J}(\boldsymbol{\theta}) \in \mathbb{R}^{3 \times n}$ is the Jacobian matrix, computed from the manipulator's forward kinematics.
 
@@ -360,29 +405,37 @@ where $\mathbf{J}(\boldsymbol{\theta}) \in \mathbb{R}^{3 \times n}$ is the Jacob
 
 At each timestep, we solve:
 
-$$\begin{aligned}
+```math
+\begin{aligned}
 \min_{\mathbf{u}} \quad & \frac{1}{2}\mathbf{u}^\top \mathbf{u} \\
 \text{subject to} \quad & \|\mathbf{J}(\boldsymbol{\theta}) \mathbf{u} - \dot{\mathbf{r}}_d\| \leq \delta
-\end{aligned}$$
+\end{aligned}
+```
 
 where $\delta > 0$ is a tolerance on velocity tracking error. This objective minimizes control effort (encouraging smooth motions) while approximately tracking the desired velocity.
 
 ### 6.3 Constraint Reformulation
 
-The constraint $\|\mathbf{J}\mathbf{u} - \dot{\mathbf{r}}_d\| \leq \delta$ is equivalent to:
+The constraint $\Vert\mathbf{J}\mathbf{u} - \dot{\mathbf{r}}_d\Vert \leq \delta$ is equivalent to:
 
-$$-\delta \leq [\mathbf{J}\mathbf{u} - \dot{\mathbf{r}}_d]_i \leq \delta, \quad i = 1,2,3$$
+```math
+-\delta \leq [\mathbf{J}\mathbf{u} - \dot{\mathbf{r}}_d]_i \leq \delta, \quad i = 1,2,3
+```
 
 This can be written as linear inequalities:
 
-$$\begin{aligned}
+```math
+\begin{aligned}
 \mathbf{J}\mathbf{u} - \dot{\mathbf{r}}_d &\leq \delta \mathbf{1} \\
 -\mathbf{J}\mathbf{u} + \dot{\mathbf{r}}_d &\leq \delta \mathbf{1}
-\end{aligned}$$
+\end{aligned}
+```
 
 where $\mathbf{1} = [1, 1, 1]^\top$. This gives us $m = 6$ linear constraints in the form required by our algorithm:
 
-$$\mathbf{C} = \begin{bmatrix} \mathbf{J} \\ -\mathbf{J} \end{bmatrix}, \quad \mathbf{d} = \begin{bmatrix} -\dot{\mathbf{r}}_d - \delta\mathbf{1} \\ \dot{\mathbf{r}}_d - \delta\mathbf{1} \end{bmatrix}$$
+```math
+\mathbf{C} = \begin{bmatrix} \mathbf{J} \\ -\mathbf{J} \end{bmatrix}, \quad \mathbf{d} = \begin{bmatrix} -\dot{\mathbf{r}}_d - \delta\mathbf{1} \\ \dot{\mathbf{r}}_d - \delta\mathbf{1} \end{bmatrix}
+```
 
 ### 6.4 Algorithm Application
 
@@ -441,7 +494,7 @@ The algorithm uses only basic operations (matrix-vector multiplications, additio
 
 **Constraint boundary oscillations:** Near constraint boundaries, floating-point errors may cause oscillations between feasible and infeasible. Use a small tolerance $\epsilon = 10^{-6}$ when checking constraints.
 
-**Accumulation of projection errors:** Many rapid projections may cause drift. Monitor $\|\mathbf{C}\mathbf{y} + \mathbf{d}\|$ to ensure constraint satisfaction.
+**Accumulation of projection errors:** Many rapid projections may cause drift. Monitor $\Vert\mathbf{C}\mathbf{y} + \mathbf{d}\Vert$ to ensure constraint satisfaction.
 
 ### 7.2 Real-Time Guarantees
 
@@ -459,7 +512,9 @@ For hard real-time systems, deterministic execution is required:
 
 The gradient descent step size can be automatically computed from the Hessian's Lipschitz constant:
 
-$$k_0 = \frac{k_0^{\text{scale}}}{\lambda_{\max}(\mathbf{A})}$$
+```math
+k_0 = \frac{k_0^{\text{scale}}}{\lambda_{\max}(\mathbf{A})}
+```
 
 where $\lambda_{\max}(\mathbf{A})$ is the largest eigenvalue of the Hessian matrix. This guarantees convergence for convex QPs since the step size is bounded by the inverse of the Lipschitz constant of the gradient.
 
@@ -501,7 +556,9 @@ The algorithm is straightforward to implement in any programming language. Key c
 
 Many optimization problems include simple bound constraints (box constraints):
 
-$$l_i \leq y_i \leq u_i$$
+```math
+l_i \leq y_i \leq u_i
+```
 
 Since v0.5.0 these are handled as **implicit unit-normal facets inside the same
 projection sweep** that handles the rows of $\mathbf{C}$. A bound behaves as one
@@ -543,11 +600,13 @@ row-only violation: the joint measure is the one that accounts for both.
 
 ### 7.6 Extension to Equality Constraints
 
-The formulation handles inequality constraints naturally. Equality constraints $\mathbf{A}_{eq}\mathbf{y} = \mathbf{b}_{eq}$ can be incorporated as pairs of inequalities:
+The formulation handles inequality constraints naturally. Equality constraints $`\mathbf{A}_{eq}\mathbf{y} = \mathbf{b}_{eq}`$ can be incorporated as pairs of inequalities:
 
-$$\mathbf{A}_{eq}\mathbf{y} \leq \mathbf{b}_{eq}, \quad -\mathbf{A}_{eq}\mathbf{y} \leq -\mathbf{b}_{eq}$$
+```math
+\mathbf{A}_{eq}\mathbf{y} \leq \mathbf{b}_{eq}, \quad -\mathbf{A}_{eq}\mathbf{y} \leq -\mathbf{b}_{eq}
+```
 
-**Why this works with adaptive projection:** The adaptive projection formula $\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j}{\|\mathbf{c}_j\|^2}\mathbf{c}_j$ projects exactly onto the constraint boundary. For equality constraints expressed as two opposing inequalities:
+**Why this works with adaptive projection:** The adaptive projection formula $\mathbf{y} \leftarrow \mathbf{y} - \frac{g_j}{\Vert\mathbf{c}_j\Vert^2}\mathbf{c}_j$ projects exactly onto the constraint boundary. For equality constraints expressed as two opposing inequalities:
 - If $\mathbf{a}^\top \mathbf{y} > b$ (positive side): the first inequality is violated, projection moves toward $\mathbf{a}^\top \mathbf{y} = b$
 - If $\mathbf{a}^\top \mathbf{y} < b$ (negative side): the second inequality is violated, projection moves toward $\mathbf{a}^\top \mathbf{y} = b$
 - Either way, we end up on the equality hyperplane
@@ -565,19 +624,23 @@ the distance to that condition directly, over *all* unit-normalized facets
 $\hat{\mathbf{n}}_i$ with signed slacks $s_i$ (no active-set window), by one
 augmented nonnegative least-squares fit:
 
-$$\hat\mu \in \arg\min_{\mu \ge 0}
+```math
+\hat\mu \in \arg\min_{\mu \ge 0}
 \left\| \begin{bmatrix} N^\top \\ |s|^\top / \ell_x \end{bmatrix} \mu
 - \begin{bmatrix} -\nabla f(x) \\ 0 \end{bmatrix} \right\|_2,
-\qquad \ell_x = \max(1, \|x\|_2)$$
+\qquad \ell_x = \max(1, \|x\|_2)
+```
 
 The appended complementarity row makes it expensive for the fit to load a
 *slack* facet's normal, which is what removes the need for an active-set
 window. The residual
-$r_{\mathrm{kkt}} = \sqrt{\|\nabla f + N^\top\hat\mu\|_2^2 + (|s|^\top\hat\mu/\ell_x)^2}$
+$`r_{\mathrm{kkt}} = \sqrt{\Vert\nabla f + N^\top\hat\mu\Vert_2^2 + (|s|^\top\hat\mu/\ell_x)^2}`$
 carries gradient units in both components and is accepted when
 
-$$r_{\mathrm{kkt}} \le \epsilon_{\mathrm{abs}} + \epsilon_{\mathrm{rel}} \cdot
-\max(\|Ax\|_2, \|b\|_2, \|N^\top\hat\mu\|_2)$$
+```math
+r_{\mathrm{kkt}} \le \epsilon_{\mathrm{abs}} + \epsilon_{\mathrm{rel}} \cdot
+\max(\|Ax\|_2, \|b\|_2, \|N^\top\hat\mu\|_2)
+```
 
 so while the relative term dominates the threshold the decision is
 invariant under positive objective rescaling, constraint row order, and row
@@ -586,7 +649,7 @@ near-zero gradient scales). It is evaluated host-side on every backend.
 
 *Historical note.* Through v0.5 the optimality test was a per-facet
 independent gradient projection,
-$\nabla_{\text{proj}} f = \nabla f - \sum_{j \in \text{active}} \min(0, \nabla f \cdot \mathbf{c}_j / \|\mathbf{c}_j\|^2) \, \mathbf{c}_j$
+$`\nabla_{\text{proj}} f = \nabla f - \sum_{j \in \text{active}} \min(0, \nabla f \cdot \mathbf{c}_j / \Vert\mathbf{c}_j\Vert^2) \, \mathbf{c}_j`$
 (only components whose removal blocks descent into the facet are subtracted),
 compared against an *absolute* tolerance. That quantity is structurally
 nonzero at constrained optima whose active normals are correlated (the
@@ -598,7 +661,9 @@ diagnostic.
 **Objective Plateau Detection:**
 Convergence is also indicated when the objective value stabilizes:
 
-$$\frac{\max_{i \in W} f(x^{(i)}) - \min_{i \in W} f(x^{(i)})}{\max(|f(x^{(k)})|, 10^{-10})} < \epsilon_{\text{obj}}$$
+```math
+\frac{\max_{i \in W} f(x^{(i)}) - \min_{i \in W} f(x^{(i)})}{\max(|f(x^{(k)})|, 10^{-10})} < \epsilon_{\text{obj}}
+```
 
 where $W$ is the trailing window of $w$ iterations: the objective's range over
 the window, normalized by the latest value.
@@ -617,20 +682,25 @@ Convergence detection corresponds to monitoring network equilibrium. When voltag
 The algorithm implicitly satisfies the Karush-Kuhn-Tucker (KKT) conditions for optimality.
 
 **KKT System for QP:**
-$$\begin{aligned}
+
+```math
+\begin{aligned}
 \mathbf{A}\mathbf{x} + \mathbf{b} + \mathbf{C}^\top \boldsymbol{\lambda} &= \mathbf{0} & \text{(Stationarity)} \\
 \mathbf{C}\mathbf{x} + \mathbf{d} &\leq \mathbf{0} & \text{(Primal Feasibility)} \\
 \boldsymbol{\lambda} &\geq \mathbf{0} & \text{(Dual Feasibility)} \\
 \lambda_i (\mathbf{C}\mathbf{x} + \mathbf{d})_i &= 0 & \text{(Complementary Slackness)}
-\end{aligned}$$
+\end{aligned}
+```
 
 **Key Insight: Projection Coefficients ARE Lagrange Multipliers**
 
 When projecting constraint $j$ with violation $g_j = \mathbf{c}_j^\top \mathbf{x} + d_j > 0$:
 
-$$\mathbf{x}_{\text{new}} = \mathbf{x} - \frac{g_j}{\|\mathbf{c}_j\|^2} \mathbf{c}_j = \mathbf{x} - \lambda_j \mathbf{c}_j$$
+```math
+\mathbf{x}_{\text{new}} = \mathbf{x} - \frac{g_j}{\|\mathbf{c}_j\|^2} \mathbf{c}_j = \mathbf{x} - \lambda_j \mathbf{c}_j
+```
 
-The adaptive projection coefficient $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ **is** the Lagrange multiplier for constraint $j$. At convergence, stationarity requires $\nabla f + \sum_j \lambda_j \mathbf{c}_j = \mathbf{0}$, which is satisfied when gradient descent and projections balance.
+The adaptive projection coefficient $\lambda_j = g_j / \Vert\mathbf{c}_j\Vert^2$ **is** the Lagrange multiplier for constraint $j$. At convergence, stationarity requires $\nabla f + \sum_j \lambda_j \mathbf{c}_j = \mathbf{0}$, which is satisfied when gradient descent and projections balance.
 
 **Algorithm ↔ KKT Mapping:**
 
@@ -638,7 +708,7 @@ The adaptive projection coefficient $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ **is*
 |----------------|---------------|-------------------|
 | Gradient descent | Stationarity | $\mathbf{x} \leftarrow \mathbf{x} - k_0(\mathbf{A}\mathbf{x} + \mathbf{b})$ drives $\nabla f \to \mathbf{0}$ |
 | Adaptive projection | Primal feasibility | Projects onto $\mathbf{C}\mathbf{x} + \mathbf{d} = \mathbf{0}$ |
-| $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ | Dual variable | Computed implicitly during projection |
+| $\lambda_j = g_j / \Vert\mathbf{c}_j\Vert^2$ | Dual variable | Computed implicitly during projection |
 | Only project when $g_j > 0$ | Complementary slackness | $\lambda_j = 0$ when constraint inactive |
 | Implicit bound facets | Box feasibility | Bounds join the same sweep, so $\mathbf{x} \in [\mathbf{l}, \mathbf{u}]$ holds *jointly* with $\mathbf{C}\mathbf{x} + \mathbf{d} \le \mathbf{0}$ (see 7.5) |
 
@@ -651,7 +721,7 @@ The adaptive projection coefficient $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ **is*
 | Dual feasibility | Inhibitory ($\lambda > 0$) connections only |
 | Complementary slackness | Silent neurons for inactive constraints |
 
-The adaptive projection $\lambda_j = g_j / \|\mathbf{c}_j\|^2$ is analogous to computing the synaptic strength needed to bring a neuron back into its valid firing range.
+The adaptive projection $\lambda_j = g_j / \Vert\mathbf{c}_j\Vert^2$ is analogous to computing the synaptic strength needed to bring a neuron back into its valid firing range.
 
 ---
 

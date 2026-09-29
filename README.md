@@ -14,10 +14,10 @@
 
 `snn_opt` is a Python implementation of the **spiking neural network (SNN) → convex optimization** equivalence, developed as part of an ongoing research program on neuromorphic computation for classical machine-learning problems. It solves quadratic and linear programs of the form
 
-$$
+```math
 \min_{x \in \mathbb{R}^n}\ \tfrac{1}{2}\, x^\top A x + b^\top x
 \quad\text{subject to}\quad C x + d \le 0,
-$$
+```
 
 by alternating gradient descent, which plays the role of leaky-integrate membrane drift, with discrete projection events that clamp the trajectory to the constraint boundary, the optimization analogue of an integrate-and-fire **spike**. The construction follows Mancoo, Keemink and Machens ([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html)) and is the canonical solver underlying the **SNN-X** research program, a series of classical machine-learning problems recast as constrained convex programs and solved by these dynamics (see [Applications](#applications)).
 
@@ -27,9 +27,9 @@ This repository is intended both as a **research artifact**, since every publish
 
 Given a positive semi-definite Hessian $A \in \mathbb{R}^{n\times n}$, a linear cost $b \in \mathbb{R}^n$, and $m$ linear inequality constraints stacked into $C \in \mathbb{R}^{m \times n}$ and $d \in \mathbb{R}^m$, we seek
 
-$$
+```math
 x^\star \;=\; \arg\min_{x}\ \tfrac{1}{2}\, x^\top A x + b^\top x \quad\text{s.t.}\quad c_i^\top x + d_i \le 0,\ i = 1,\dots,m.
-$$
+```
 
 The class subsumes box-constrained QPs (set $C = [I; -I]$), linear programs ($A = 0$), kernel-ridge subproblems, support-vector machine duals, projected-gradient flows on polytopes, and the bulk of the inner solves that arise in receding-horizon control.
 
@@ -37,9 +37,9 @@ The class subsumes box-constrained QPs (set $C = [I; -I]$), linear programs ($A 
 
 The continuous-time dynamics
 
-$$
+```math
 \dot x \;=\; -\nabla f(x) \;-\; C^\top s(t)
-$$
+```
 
 models a population of $n$ leaky integrators driven by the gradient $\nabla f(x) = Ax + b$, with a corrective spike train $s(t)$ that fires whenever an inequality $c_i^\top x + d_i$ would otherwise become positive. Each spike applies a *minimal* projection that re-enters the feasible set; spike inter-arrival times encode constraint *traffic*. Discretized with forward Euler and an adaptive step that reaches the boundary exactly, this becomes a fast projected-gradient solver with diagnostics that double as a neural raster plot.
 
