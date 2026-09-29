@@ -15,9 +15,7 @@ import argparse
 import json
 import struct
 import subprocess
-import sys
 from pathlib import Path
-
 
 CAP = 440_000
 BRAM_CAP = 129_024
