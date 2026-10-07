@@ -35,10 +35,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build wheels with cibuildwheel
-        uses: pypa/cibuildwheel@v2.21
+        uses: pypa/cibuildwheel@v4.3.0
         env:
-          # CPython 3.9 through 3.13. Bump as new minor versions land.
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          # CPython 3.9 through 3.14 (GIL builds; cp314t free-threading not built).
+          # Bump as new minor versions land.
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
           # Skip musl (Alpine) and PyPy to keep the matrix small.
           CIBW_SKIP: "*-musllinux* pp*"
           CIBW_ARCHS: ${{ matrix.arch }}

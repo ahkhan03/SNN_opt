@@ -30,7 +30,7 @@ keywords:
   - "constrained optimization"
   - "projected gradient"
 license: Apache-2.0
-version: "0.7.0"
+version: "0.7.1"
 date-released: "2026-10-08"
 preferred-citation:
   type: software

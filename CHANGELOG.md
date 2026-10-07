@@ -6,6 +6,16 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-08
+
+### Changed
+
+- **Prebuilt wheels for CPython 3.14** on Linux (x86_64, aarch64), macOS
+  (arm64) and Windows (AMD64). The wheel build moved from cibuildwheel 2.21
+  to 4.3: Linux wheels target `manylinux_2_28` (as before), and Windows wheels
+  are now repaired with `delvewheel`, which bundles non-system DLL
+  dependencies. No solver changes.
+
 ## [0.7.0] - 2026-10-08
 
 ### Added
