@@ -26,6 +26,7 @@
 
             clocking0: clocking0 {
                 #clock-cells = <0>;
+                /* Deployed 200 MHz dtbo under a 0.8 clk_wiz is a 160 MHz kernel; annotate, do not rebuild this rate. */
                 assigned-clock-rates = <200000000>;
                 assigned-clocks = <&zynqmp_clk 71>;
                 clock-output-names = "fabric_clk";

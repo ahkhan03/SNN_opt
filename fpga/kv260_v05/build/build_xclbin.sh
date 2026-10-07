@@ -37,8 +37,11 @@ xclbinutil --input "${xclbin}" \
   bootgen -arch zynqmp -image "${script_dir}/msrp_v05.bif" \
     -o "${bitbin}" -w on
 )
+kria_clock="${KRIA_CLOCK:-kria-clock}"
+command -v "${kria_clock}" >/dev/null 2>&1 || { echo "kria-clock not found; set KRIA_CLOCK to the tool that derives the dtbo rate" >&2; exit 1; }
+"${kria_clock}" pack --xclbin "${xclbin}" --firmware-name snn_qp_v05.bit.bin --bitstream "${bitbin}"
 "${dtc_bin}" -@ -I dts -O dtb -o "${dtbo}" \
-  "${script_dir}/msrp_v05.dts"
+  "${work_dir}/snn_qp_v05.dts"
 printf '%s\n' '{"shell_type":"XRT_FLAT","num_slots":"1"}' \
   > "${work_dir}/shell.json"
 

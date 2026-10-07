@@ -20,11 +20,20 @@ problems (m == 0) still dispatch to the exact vectorized box projection.
 """
 
 from dataclasses import InitVar, dataclass, field, replace
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import scipy.sparse as _sp
 from scipy.integrate import solve_ivp
+
+from .nonlinear import (
+    _SNN_NATIVE_PSD_TOKEN,
+    _SNN_NATIVE_SPECTRAL_TOKEN,
+    AffineSubspaceProjector,
+    CutterCandidate,
+    DykstraProjector,
+    ProjectorCandidate,
+)
 
 
 def _issparse(x):
@@ -78,6 +87,11 @@ class ConvergenceConfig:
     stalled structurally at constrained optima with correlated active
     normals.
 
+    For a strongly convex QP constrained only by an exact-set projector (or
+    disjoint exact projectors), the certificate instead bounds state error.
+    Its scale is max(1, ||x||), and both tolerances have state units. See
+    ``KKTCertificate`` for the bound and the iterative-projector variant.
+
     The cheap criteria (objective plateau, solution stability) and the
     feasibility gate are evaluated first; the KKT fit only runs when they
     already pass, so its cost is confined to near-termination checkpoints.
@@ -101,7 +115,9 @@ class ConvergenceConfig:
     # whose gradient scale is ~0. kkt_rel_tol=1e-4 is calibrated to the O(k0)
     # fixed-point floor of the default dynamics (k0_scale=0.5): it certifies
     # the residual the solver genuinely reaches, roughly 1e-3 relative
-    # solution error; it is a KKT-residual tolerance, not an error bound.
+    # solution error; for row/cone fits it is a KKT-residual tolerance.
+    # Strongly convex exact-projector certificates instead use state units
+    # and bound state error (see KKTCertificate).
     # None = "not explicitly chosen" (resolved to 1e-9 / 1e-4 in
     # __post_init__): the sentinel lets alias-conflict detection see EVERY
     # explicitly supplied new-style setting, including one that happens to
@@ -213,11 +229,17 @@ class SolverConfig:
     # Box facets have unit normals, so their raw violation is already a distance.
     constraint_tol: float = 1e-6
     # Safety watchdog for the inner projection sweep. None (default) resolves to
-    # max(1000, 10 * (m + number of box facets)). The sweep is meant to run to
+    # max(1000, 10 * (m + box facets + nonlinear candidates)). The sweep runs to
     # joint tolerance; hitting this cap aborts the solve with
     # convergence_reason='projection_budget_exhausted' (never silently continued
     # from a knowingly infeasible point).
     max_projection_iters: Optional[int] = None
+
+    # Opt-in hardware-shaped experiment mode for the nonlinear extension. A
+    # capped extended sweep returns its truncated point and lets the outer
+    # Euler loop continue when this is true. The released row/facet path never
+    # consults this switch and retains its abort semantics.
+    continue_after_projection_budget: bool = False
     
     # Integration method: 'ivp' (continuous ODE) or 'euler' (discrete steps)
     integration_method: str = 'euler'  # Default to euler for better stability
@@ -305,6 +327,10 @@ class OptimizationProblem:
     b: np.ndarray
     C: np.ndarray
     d: np.ndarray
+    # Optional nonlinear/conic candidates.  The default is an empty tuple so
+    # the released polyhedral path can retain its literal numerical fast path.
+    nonlinear_candidates: Sequence[Union[CutterCandidate, ProjectorCandidate]] = field(
+        default_factory=tuple)
     
     def __post_init__(self):
         """Validate problem dimensions."""
@@ -313,6 +339,23 @@ class OptimizationProblem:
         assert self.b.shape == (n,), f"b must have shape ({n},)"
         assert self.C.shape[1] == n, f"C must have {n} columns"
         assert self.C.shape[0] == self.d.shape[0], "C rows must match d length"
+        try:
+            candidates = tuple(self.nonlinear_candidates)
+        except TypeError as exc:
+            raise TypeError("nonlinear_candidates must be an iterable of candidate objects") from exc
+        for q, candidate in enumerate(candidates):
+            if not isinstance(candidate, (CutterCandidate, ProjectorCandidate)):
+                raise TypeError(
+                    f"nonlinear_candidates[{q}] must be a CutterCandidate or "
+                    f"ProjectorCandidate, got {type(candidate).__name__}")
+            coords = getattr(candidate, "coordinates", None)
+            if coords is not None and any(int(i) >= n for i in coords):
+                raise ValueError(
+                    f"nonlinear_candidates[{q}] has a coordinate outside the "
+                    f"problem dimension {n}")
+        # Preserve caller order exactly.  This order is part of the tie rule
+        # and therefore must not remain as a mutable list/generator.
+        self.nonlinear_candidates = candidates
     
     @property
     def n_vars(self) -> int:
@@ -352,8 +395,9 @@ class OptimizationProblem:
 class KKTCertificate:
     """Scale-invariant KKT residual at a point (see ``optimality_test="kkt"``).
 
-    ``residual = hypot(stationarity, complementarity)`` where both components
-    carry gradient units:
+    On the ordinary row/box KKT path,
+    ``residual = hypot(stationarity, complementarity)``. Both components carry
+    gradient units:
 
         stationarity     ||grad f(x) + N^T mu||_2
         complementarity  |s|^T mu / max(1, ||x||_2)
@@ -362,6 +406,20 @@ class KKTCertificate:
     ALL nondegenerate facets (explicit rows and box bounds, unit-normalized),
     no active-set window. ``scale = max(||A x||, ||b||, ||N^T mu||)`` and the
     acceptance threshold is ``tolerance = kkt_abs_tol + kkt_rel_tol * scale``.
+    For a strongly convex objective on one exact set or disjoint exact sets,
+    the state-unit path reports ``residual = stationarity`` for a direct
+    projector and ``residual = stationarity + complementarity`` for the
+    iterative Dykstra witness path. Here stationarity is the projected
+    fixed-point error bound, complementarity is zero (or the distance to a
+    nearby witness for iterative Dykstra projectors), and scale is max(1,
+    ||x||). Then the state error is at most residual for both direct
+    projectors and the witness path. This requires an exact
+    projector and numerically resolved positive minimum curvature; all other
+    paths retain the ordinary gradient-unit residual above.
+    On the Dykstra witness path, ``converged`` means that the projector is
+    trusted to its configured positional tolerance. That oracle error is not
+    amplified or otherwise bounded through the capped Euler step; the
+    certificate admits it only with a strict 100x positional margin.
     ``fit_status`` is ``"ok"``, ``"non_finite"``, ``"fit_failed"``, or ``"too_large"``; any
     non-``"ok"`` status fails the convergence gate closed.
     """
@@ -371,6 +429,7 @@ class KKTCertificate:
     scale: float
     tolerance: float
     fit_status: str
+    multipliers: Optional[np.ndarray] = None
 
     @property
     def passed(self) -> bool:
@@ -451,24 +510,36 @@ class SolverResult:
         constraint row order and row duplication; the dimensional value
         scales with the objective (kkt_residual / kkt_scale is the
         invariant normalized defect). NaN when the fit failed (see
-        kkt_fit_status).
+        kkt_fit_status). Strongly convex exact-projector certificates use
+        state units and bound state error instead; see KKTCertificate.
     kkt_stationarity_residual : float
-        ||grad f(x) + N^T mu||_2 component of the certificate.
+        ||grad f(x) + N^T mu||_2 component of the certificate, or the
+        projected state-error term for an exact-projector path.
     kkt_complementarity_residual : float
-        |s|^T mu / max(1, ||x||) component (gradient units).
+        |s|^T mu / max(1, ||x||) component (gradient units), or the witness
+        displacement in state units for a Dykstra exact-projector path.
     kkt_scale : float
         Scale reference max(||A x||, ||b||, ||N^T mu||) used by the
-        acceptance threshold.
+        acceptance threshold, or max(1, ||x||) for state-unit certificates.
     kkt_tolerance : float
         Acceptance threshold kkt_abs_tol + kkt_rel_tol * kkt_scale that was
         in force at the final point.
     kkt_fit_status : str
         "ok", "non_finite", "fit_failed", or "too_large". Anything but "ok" means the
         certificate could not be evaluated and convergence failed closed.
+    kkt_multipliers : ndarray or None
+        Nonnegative fit coefficients in the certificate row order.  The
+        extended path includes candidate normals; the legacy path may leave
+        this field unset.
     projection_budget_exhausted : bool
         True when an inner sweep hit the safety cap before reaching joint
         tolerance; the solve is aborted at that iteration with
         convergence_reason='projection_budget_exhausted'.
+    projection_truncated_sweeps : int
+        Number of extended-path projection sweeps that consumed the configured
+        ``max_projection_iters`` cap. In continuation mode these sweeps return
+        their truncated point and the outer solve continues; with the default
+        mode the first still-infeasible capped sweep aborts.
     explicit_row_event_counts : ndarray or None
         Per-explicit-row committed projection-event counts. None when the
         opt-in observer is disabled.
@@ -497,6 +568,14 @@ class SolverResult:
         and allow the outer solve to continue, so this is distinct from the
         terminal `projection_budget_exhausted` flag. None when observation is
         disabled.
+    spike_event_kinds, spike_event_indices : list / ndarray
+        Parallel per-event metadata.  Legacy rows use ``row``, ``lo`` and
+        ``hi``; opt-in candidates use ``cutter`` or ``set``.
+    nonlinear_event_counts : dict
+        Counts for opt-in candidate events, keyed by event kind and, when
+        available, by candidate name/index.
+    max_violation_nonlinear : float
+        Final maximum normalized violation over the opt-in candidate family.
     """
     t: np.ndarray
     X: np.ndarray
@@ -521,6 +600,7 @@ class SolverResult:
     max_violation_box: float = 0.0
     stationarity_residual: float = float("nan")
     projection_budget_exhausted: bool = False
+    projection_truncated_sweeps: int = 0
     # --- v0.6.0 scale-invariant KKT certificate at the final point ---------
     # Always computed at the final iterate regardless of optimality_test, so
     # every solve reports the same authoritative optimality diagnostic. The
@@ -532,6 +612,7 @@ class SolverResult:
     kkt_scale: float = float("nan")
     kkt_tolerance: float = float("nan")
     kkt_fit_status: str = "not_computed"
+    kkt_multipliers: Optional[np.ndarray] = None
     explicit_row_event_counts: Optional[np.ndarray] = None
     implicit_lower_event_counts: Optional[np.ndarray] = None
     implicit_upper_event_counts: Optional[np.ndarray] = None
@@ -544,6 +625,41 @@ class SolverResult:
     projection_first_candidate_id: Optional[int] = None
     projection_last_candidate_id: Optional[int] = None
     projection_cap_rechecks: Optional[int] = None
+    spike_event_kinds: List[str] = field(default_factory=list)
+    spike_event_indices: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=int))
+    nonlinear_event_counts: Dict[str, int] = field(default_factory=dict)
+    max_violation_nonlinear: float = 0.0
+    # Dykstra diagnostics.  Each entry aggregates one outer Euler/projection
+    # sweep, so callers can see the cost of the inner exact-set projection
+    # without reconstructing it from the event stream.
+    dykstra_inner_iterations: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=int))
+    dykstra_inner_projection_events: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=int))
+    dykstra_inner_converged: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=bool))
+    dykstra_inner_cap_hits: int = 0
+
+    @property
+    def inner_iterations(self) -> np.ndarray:
+        """Alias for per-outer-step Dykstra cycle counts."""
+        return self.dykstra_inner_iterations
+
+    @property
+    def inner_projection_events(self) -> np.ndarray:
+        """Alias for per-outer-step Dykstra member-event counts."""
+        return self.dykstra_inner_projection_events
+
+    @property
+    def dykstra_inner_iterations_per_step(self) -> np.ndarray:
+        """Explicit per-outer-step spelling of ``dykstra_inner_iterations``."""
+        return self.dykstra_inner_iterations
+
+    @property
+    def dykstra_inner_projection_events_per_step(self) -> np.ndarray:
+        """Explicit per-outer-step spelling of inner event counts."""
+        return self.dykstra_inner_projection_events
     
     def summary(self) -> str:
         """Generate summary statistics string."""
@@ -566,6 +682,11 @@ class SolverResult:
         ]
         if self.projection_budget_exhausted:
             lines.append("  WARNING: projection budget exhausted (solve aborted)")
+        if self.projection_truncated_sweeps:
+            lines.append(f"  Truncated projection sweeps: {self.projection_truncated_sweeps}")
+        if self.dykstra_inner_cap_hits:
+            lines.append(
+                f"  Dykstra inner cap hits: {self.dykstra_inner_cap_hits}")
 
         if len(self.spike_norms) > 0:
             lines.append(f"  Avg spike norm: {self.spike_norms.mean():.6e}")
@@ -592,6 +713,39 @@ class SNNSolver:
     def __init__(self, problem: OptimizationProblem, config: Optional[SolverConfig] = None):
         self.problem = problem
         self.config = config or SolverConfig()
+
+        # Nonlinear/conic candidates are an explicitly opt-in Python path.  Do
+        # this dispatch guard before any backend-specific setup so unsupported
+        # combinations fail with a useful message rather than a later,
+        # misleading kernel/trajectory error.
+        self._nonlinear_candidates = tuple(
+            getattr(self.problem, "nonlinear_candidates", ()) or ())
+        self._native_descriptor_cache = None
+        if self._nonlinear_candidates:
+            unsupported = []
+            native_backend = self.config.backend in _C_BACKENDS
+            if not native_backend and not self.config.record_trajectory:
+                unsupported.append("record_trajectory=False (lean path)")
+            if self.config.transform is not None:
+                unsupported.append("transform")
+            if self.config.integration_method != "euler":
+                unsupported.append(
+                    f"integration_method={self.config.integration_method!r}")
+            if self.config.projection_method != "adaptive":
+                unsupported.append(
+                    f"projection_method={self.config.projection_method!r}")
+            if unsupported:
+                raise ValueError(
+                    "nonlinear_candidates are supported only with the Python "
+                    "recorded Euler adaptive path; unsupported combination: "
+                    + ", ".join(unsupported))
+            self._validate_candidate_coordinates()
+            if native_backend:
+                # Validate the descriptor boundary before importing the
+                # optional extension, so unsupported callbacks fail with
+                # the actionable candidate-index/backend message promised by
+                # the public API.
+                self._native_descriptor_cache = self._native_candidate_descriptors()
 
         # Diagonal Hessian fast-path hint. None = dense A (the usual case). Set
         # to the length-n diagonal by the transform path (e.g. eigenbasis) so the
@@ -652,10 +806,13 @@ class SNNSolver:
         n_facets = ((self.problem.n_vars if self.config.lower_bound is not None else 0)
                     + (self.problem.n_vars if self.config.upper_bound is not None else 0))
         if self.config.max_projection_iters is None:
-            self._proj_cap = max(1000, 10 * (self.problem.n_constraints + n_facets))
+            n_candidates = len(self._nonlinear_candidates)
+            self._proj_cap = max(
+                1000, 10 * (self.problem.n_constraints + n_facets + n_candidates))
         else:
             self._proj_cap = int(self.config.max_projection_iters)
         self._projection_budget_exhausted = False
+        self._projection_truncated_sweeps = 0
 
         # Pre-compute the constraint Gram matrix G = C C^T (the constraint-
         # coupling / recurrent matrix). Both the compiled C kernel and the
@@ -679,6 +836,13 @@ class SNNSolver:
         self._spike_deltas: List[np.ndarray] = []
         self._spike_constraints: List[np.ndarray] = []
         self._spike_violation_values: List[np.ndarray] = []
+        self._spike_event_kinds: List[str] = []
+        self._spike_event_indices: List[int] = []
+        self._nonlinear_event_counts: Dict[str, int] = {}
+        self._dykstra_inner_iterations: List[int] = []
+        self._dykstra_inner_projection_events: List[int] = []
+        self._dykstra_inner_converged: List[bool] = []
+        self._dykstra_inner_cap_hits = 0
         self._reset_projection_event_observer()
         
         # Convergence tracking
@@ -686,8 +850,417 @@ class SNNSolver:
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
 
+    def _validate_candidate_coordinates(self) -> None:
+        """Validate candidate coordinate declarations against ``n_vars``."""
+        n = self.problem.n_vars
+        def validate(candidate, path: str) -> None:
+            coords = getattr(candidate, "coordinates", None)
+            if coords is None:
+                coords_tuple = None
+            else:
+                try:
+                    coords_tuple = tuple(int(i) for i in coords)
+                except (TypeError, ValueError) as exc:  # defensive for hand-made objects
+                    raise ValueError(
+                        f"nonlinear candidate {path} has invalid coordinates") from exc
+                if (len(set(coords_tuple)) != len(coords_tuple)
+                        or any(i < 0 or i >= n for i in coords_tuple)):
+                    raise ValueError(
+                        f"nonlinear candidate {path} coordinates must be unique indices "
+                        f"in [0, {n})")
+            if isinstance(candidate, DykstraProjector):
+                for member_index, member in enumerate(candidate.members):
+                    validate(member, f"{path} member {member_index}")
+
+        for q, candidate in enumerate(self._nonlinear_candidates):
+            validate(candidate, str(q))
+
+    @staticmethod
+    def _candidate_kind(candidate: Union[CutterCandidate, ProjectorCandidate]) -> str:
+        return "cutter" if isinstance(candidate, CutterCandidate) else "set"
+
+    # Descriptor layout consumed by snn_qp_extended.hpp.  Keep this as one
+    # named constant because the C++ binding validates the width at its choke
+    # point and hidden parity fixtures inspect the packed arrays directly.
+    _EXT_DESCRIPTOR_WIDTH = 11
+
+    def _native_candidate_descriptors(self):
+        """Serialize built-in set candidates and spectral cutters for C++.
+
+        The native path accepts only immutable built-ins.  All affine factors
+        are taken from the Python candidate (which computed them at
+        construction time), so the extension never factorizes a user matrix
+        and never receives a Python callback.
+        """
+        coords_data: List[int] = []
+        numeric_data: List[float] = []
+        top_meta: List[List[int]] = []
+        member_meta: List[List[int]] = []
+
+        def fail(path: str, detail: str):
+            raise ValueError(
+                f"backend='c' does not support nonlinear candidate {path}: "
+                f"{detail}; use backend='python'")
+
+        def add_coords(values) -> Tuple[int, int]:
+            if values is None:
+                return 0, 0
+            vals = tuple(int(v) for v in values)
+            offset = len(coords_data)
+            coords_data.extend(vals)
+            return offset, len(vals)
+
+        def add_data(values) -> Tuple[int, int]:
+            vals = [float(v) for v in values]
+            if not np.all(np.isfinite(np.asarray(vals, dtype=float))):
+                raise ValueError("native candidate descriptor data must be finite")
+            offset = len(numeric_data)
+            numeric_data.extend(vals)
+            return offset, len(vals)
+
+        def matrix_set_descriptor(candidate, path: str, kdata: dict):
+            """Cross-check factory closures, metadata, and coordinate order."""
+            is_cutter = isinstance(candidate, CutterCandidate)
+            callback = candidate.value if is_cutter else candidate.project
+            stamp = getattr(callback, "_snn_native_set", None)
+            family = kdata.get("set")
+            token = (_SNN_NATIVE_SPECTRAL_TOKEN if family == "spectral_ball"
+                     else _SNN_NATIVE_PSD_TOKEN)
+            if (not isinstance(stamp, dict) or stamp.get("token") is not token
+                    or stamp.get("family") != family
+                    or stamp.get("coordinates") != candidate.coordinates):
+                fail(path, "matrix-set callback lacks a matching native factory stamp")
+            certificate_project = kdata.get("euclidean_project")
+            if is_cutter:
+                if (stamp.get("jacobian") is not candidate.jacobian
+                        or stamp.get("project") is not certificate_project):
+                    fail(path, "spectral cutter callbacks do not match the factory stamp")
+                project_stamp = getattr(certificate_project, "_snn_native_set", None)
+                if (not isinstance(project_stamp, dict)
+                        or any(project_stamp.get(key) != stamp.get(key)
+                               for key in ("token", "family", "shape", "radius",
+                                           "coordinates"))):
+                    fail(path, "spectral certificate projector stamp does not match")
+            elif certificate_project is not candidate.project:
+                fail(path, "matrix-set certificate projector does not match the factory")
+            try:
+                shape = tuple(kdata.get("shape", ()))
+                if family == "spectral_ball":
+                    rows, cols = stamp["shape"]
+                    radius = float(stamp["radius"])
+                    valid = (shape == (rows, cols)
+                             and float(kdata.get("radius", np.nan)) == radius
+                             and np.isfinite(radius) and radius >= 0)
+                else:
+                    rows = cols = stamp["n"]
+                    radius = None
+                    valid = (shape == (rows, cols)
+                             and kdata.get("packed_dimension") == rows * (rows + 1) // 2)
+                valid = (valid and isinstance(rows, (int, np.integer))
+                         and isinstance(cols, (int, np.integer))
+                         and rows > 0 and cols > 0)
+            except (TypeError, ValueError, KeyError):
+                valid = False
+            if not valid:
+                fail(path, "matrix-set shape/radius metadata does not match the factory stamp")
+            if rows > 8 or cols > 8:
+                cap = "8x8" if family == "spectral_ball" else "n=8"
+                fail(path, f"{family} exceeds the native {cap} cap")
+            size = rows * cols if family == "spectral_ball" else rows * (rows + 1) // 2
+            coords = candidate.coordinates
+            if coords is None:
+                if self.problem.n_vars != size:
+                    fail(path, f"matrix block needs {size} entries, "
+                         f"but the ambient state has {self.problem.n_vars}")
+                coord_offset, coord_count = 0, 0
+            else:
+                if len(coords) != size:
+                    fail(path, f"matrix block coordinates must cover {size} entries")
+                coord_offset, coord_count = add_coords(coords)
+            data_offset, data_count = add_data([] if radius is None else [radius])
+            kind = (7 if is_cutter else 6) if family == "spectral_ball" else 8
+            return [kind, coord_offset, coord_count, -1, 0, 0,
+                    rows, cols if family == "spectral_ball" else 0, 0,
+                    data_offset, data_count]
+
+        def descriptor(candidate, path: str, destination: List[List[int]]) -> int:
+            if not isinstance(candidate, (CutterCandidate, ProjectorCandidate)):
+                fail(path, f"unsupported type {type(candidate).__name__!r}")
+            kdata = getattr(candidate, "kkt_data", None)
+            if isinstance(candidate, CutterCandidate):
+                if (destination is member_meta or not isinstance(kdata, dict)
+                        or kdata.get("set") != "spectral_ball"):
+                    fail(path, "callbacks/cutters require backend='python'")
+                destination.append(matrix_set_descriptor(candidate, path, kdata))
+                return len(destination) - 1
+            if isinstance(candidate, DykstraProjector):
+                members = tuple(candidate.members)
+                member_offset = len(member_meta)
+                for i, member in enumerate(members):
+                    member_path = f"{path} member {i}"
+                    if isinstance(member, DykstraProjector):
+                        fail(member_path, "nested Dykstra projectors are not native built-ins")
+                    if candidate.coordinates is not None:
+                        block = set(candidate.coordinates)
+                        member_coords = getattr(member, "coordinates", None)
+                        if member_coords is None:
+                            if len(block) != self.problem.n_vars:
+                                fail(member_path,
+                                     "ambient member is outside the scoped Dykstra block")
+                        elif not set(member_coords).issubset(block):
+                            fail(member_path,
+                                 "member coordinates are outside the scoped Dykstra block")
+                    descriptor(member, member_path, member_meta)
+                kdata = getattr(candidate, "kkt_data", None)
+                tolerance = float(getattr(candidate, "tolerance", 0.0))
+                max_iterations = int(getattr(candidate, "max_iterations", 0))
+                if (not np.isfinite(tolerance) or tolerance <= 0
+                        or max_iterations <= 0):
+                    fail(path, "invalid Dykstra tolerance or iteration cap")
+                coord_offset, coord_count = add_coords(candidate.coordinates)
+                data_offset, data_count = add_data([tolerance])
+                row = [5, coord_offset, coord_count, -1,
+                       member_offset, len(members), max_iterations, 0, 0,
+                       data_offset, data_count]
+                destination.append(row)
+                return len(destination) - 1
+
+            kdata = getattr(candidate, "kkt_data", None)
+            if not isinstance(kdata, dict):
+                fail(path, "opaque projector callbacks require backend='python'")
+            set_name = kdata.get("set")
+            if set_name in ("spectral_ball", "psd_cone"):
+                destination.append(matrix_set_descriptor(candidate, path, kdata))
+                return len(destination) - 1
+            coords = getattr(candidate, "coordinates", None)
+            coord_offset, coord_count = add_coords(coords)
+            if set_name == "ball":
+                if coords is None:
+                    fail(path, "ball projector is missing its coordinate declaration")
+                radius = float(kdata.get("radius"))
+                center = np.asarray(kdata.get("center"), dtype=float).reshape(-1)
+                if center.size != len(coords):
+                    fail(path, "ball center and coordinates have different lengths")
+                data_offset, data_count = add_data([radius, *center])
+                row = [0, coord_offset, coord_count, -1, 0, 0, 0, 0, 0,
+                       data_offset, data_count]
+            elif set_name in ("soc", "scaled_soc"):
+                if coords is None or len(coords) < 2:
+                    fail(path, "SOC projector needs scalar and lateral coordinates")
+                t_index = int(coords[0])
+                if set(coords[1:]) & {t_index}:
+                    fail(path, "SOC scalar coordinate overlaps its lateral block")
+                mu = float(kdata.get("mu", 1.0))
+                data_offset, data_count = add_data(
+                    [mu] if set_name == "scaled_soc" else [])
+                row = [1 if set_name == "soc" else 2, coord_offset,
+                       coord_count, t_index, 0, 0, 0, 0, 0,
+                       data_offset, data_count]
+            elif isinstance(candidate, AffineSubspaceProjector) or set_name == "affine_subspace":
+                if coords is not None and tuple(coords) != tuple(range(self.problem.n_vars)):
+                    fail(path, "affine coordinates must be in ambient order")
+                B = np.asarray(getattr(candidate, "B", None), dtype=float)
+                h = np.asarray(getattr(candidate, "h", None), dtype=float).reshape(-1)
+                correction = np.asarray(
+                    getattr(candidate, "_projection_correction_map", None),
+                    dtype=float)
+                graph_inverse = np.asarray(
+                    getattr(candidate, "_graph_inverse", None), dtype=float)
+                if (B.ndim != 2 or h.size != B.shape[0]
+                        or correction.shape != (B.shape[1], B.shape[0])
+                        or graph_inverse.shape != (B.shape[1], B.shape[1])):
+                    fail(path, "affine projector is missing precomputed factors")
+                local_size = (len(coords)
+                              if coords is not None else self.problem.n_vars)
+                if local_size not in (B.shape[1], B.shape[1] + B.shape[0]):
+                    fail(path, "affine coordinates do not match equality or graph dimension")
+                graph_map = graph_inverse @ B.T
+                data_offset, data_count = add_data(
+                    [*B.reshape(-1), *h, *correction.reshape(-1),
+                     *graph_map.reshape(-1)])
+                row = [3, coord_offset, coord_count, -1, 0, 0,
+                       B.shape[1], B.shape[0], 0, data_offset, data_count]
+            elif set_name == "halfspace":
+                normal = np.asarray(kdata.get("normal"), dtype=float).reshape(-1)
+                offset = float(kdata.get("offset"))
+                if coords is not None and len(coords) != normal.size:
+                    fail(path, "halfspace normal and coordinates have different lengths")
+                if coords is None and normal.size != self.problem.n_vars:
+                    fail(path, "ambient halfspace normal has the wrong dimension")
+                # Halfspace coordinates are stored in the same packed array as
+                # every other descriptor; the normal itself stays in data.
+                if coords is None:
+                    coord_offset, coord_count = 0, 0
+                data_offset, data_count = add_data([*normal, offset])
+                row = [4, coord_offset, coord_count, -1, 0, 0,
+                       normal.size, 0, 0, data_offset, data_count]
+            else:
+                fail(path, f"unsupported projector set {set_name!r}")
+
+            destination.append(row)
+            return len(destination) - 1
+
+        for q, candidate in enumerate(self._nonlinear_candidates):
+            descriptor(candidate, str(q), top_meta)
+        if not top_meta:
+            raise ValueError("backend='c' native descriptor list is empty")
+        return (
+            np.ascontiguousarray(np.asarray(top_meta, dtype=np.int64)),
+            np.ascontiguousarray(np.asarray(member_meta, dtype=np.int64)
+                                 .reshape((-1, self._EXT_DESCRIPTOR_WIDTH))),
+            np.ascontiguousarray(np.asarray(coords_data, dtype=np.int64)),
+            np.ascontiguousarray(np.asarray(numeric_data, dtype=np.float64)),
+        )
+
+    def _candidate_id(self, index: int) -> int:
+        """Canonical ID for a nonlinear candidate (bound slots stay reserved)."""
+        return self.problem.n_constraints + 2 * self.problem.n_vars + int(index)
+
+    def _candidate_vector(self, raw: Any, candidate, *, label: str,
+                          allow_scalar: bool = False) -> np.ndarray:
+        """Coerce a callback vector to ambient coordinates."""
+        n = self.problem.n_vars
+        arr = np.asarray(raw, dtype=float)
+        if arr.ndim == 0:
+            if allow_scalar:
+                return arr.reshape(1)
+            raise ValueError(f"nonlinear candidate {label} returned a scalar vector")
+        arr = arr.reshape(-1)
+        coords = getattr(candidate, "coordinates", None)
+        if arr.size == n:
+            out = arr
+        elif coords is not None and arr.size == len(coords):
+            out = np.zeros(n, dtype=float)
+            out[list(coords)] = arr
+        else:
+            expected = f"{n}"
+            if coords is not None:
+                expected += f" or {len(coords)} local"
+            raise ValueError(
+                f"nonlinear candidate {label} returned a vector of length "
+                f"{arr.size}; expected {expected}")
+        if not np.all(np.isfinite(out)):
+            raise ValueError(f"nonlinear candidate {label} returned non-finite data")
+        return np.asarray(out, dtype=float)
+
+    def _evaluate_nonlinear_candidate(self, index: int, x: np.ndarray) -> dict:
+        """Evaluate and validate one candidate, returning a cached score/data dict."""
+        candidate = self._nonlinear_candidates[index]
+        kind = self._candidate_kind(candidate)
+        label = getattr(candidate, "name", f"candidate[{index}]")
+        if kind == "cutter":
+            try:
+                value_raw = candidate.value(x)
+                value_arr = np.asarray(value_raw, dtype=float).reshape(-1)
+            except Exception as exc:
+                raise ValueError(
+                    f"cutter candidate {index} ({label!r}) value callback failed") from exc
+            if value_arr.size != 1 or not np.isfinite(value_arr[0]):
+                raise ValueError(
+                    f"cutter candidate {index} ({label!r}) value must be one finite scalar")
+            try:
+                jac = self._candidate_vector(
+                    candidate.jacobian(x), candidate,
+                    label=f"{index} ({label!r}) jacobian")
+            except Exception as exc:
+                if isinstance(exc, ValueError):
+                    raise
+                raise ValueError(
+                    f"cutter candidate {index} ({label!r}) jacobian callback failed") from exc
+            norm_sq = float(jac @ jac)
+            value = float(value_arr[0])
+            if not np.isfinite(norm_sq):
+                raise ValueError(
+                    f"cutter candidate {index} ({label!r}) jacobian norm is non-finite")
+            if value > self.config.constraint_tol and norm_sq <= 1e-24:
+                raise ValueError(
+                    f"cutter candidate {index} ({label!r}) has a near-zero gradient "
+                    "at a violated point")
+            norm = float(np.sqrt(norm_sq))
+            score = max(value, 0.0) / norm if norm > 1e-12 else 0.0
+            return {"candidate": candidate, "kind": kind, "index": index,
+                    "value": value, "jacobian": jac, "norm": norm,
+                    "norm_sq": norm_sq, "score": float(score)}
+
+        # Exact projector candidate.
+        try:
+            projected_raw = candidate.project(x)
+        except Exception as exc:
+            raise ValueError(
+                f"projector candidate {index} ({label!r}) project callback failed") from exc
+        projected = self._candidate_vector(
+            projected_raw, candidate, label=f"{index} ({label!r}) projection")
+        delta = projected - x
+        coords = getattr(candidate, "coordinates", None)
+        if coords is not None:
+            outside = np.ones(self.problem.n_vars, dtype=bool)
+            outside[list(coords)] = False
+            if np.any(np.abs(delta[outside]) > 1e-12):
+                raise ValueError(
+                    f"projector candidate {index} ({label!r}) changed coordinates "
+                    "outside its declaration")
+            score = float(np.linalg.norm(delta[list(coords)]))
+        else:
+            score = float(np.linalg.norm(delta))
+        if not np.isfinite(score):
+            raise ValueError(
+                f"projector candidate {index} ({label!r}) returned non-finite data")
+        # DykstraProjector keeps a callback-local diagnostics record so its
+        # exact-set projection can remain a normal one-vector callback.  Copy
+        # the event list here because subsequent score probes reuse the same
+        # mutable record in place.
+        dykstra_diag = getattr(candidate.project, "_dykstra_diagnostics", None)
+        if isinstance(dykstra_diag, dict):
+            dykstra_diag = dict(dykstra_diag)
+            dykstra_diag["events"] = [
+                dict(event) for event in dykstra_diag.get("events", ())]
+        return {"candidate": candidate, "kind": kind, "index": index,
+                "projected": projected, "delta": delta, "score": score,
+                "dykstra_diagnostics": dykstra_diag}
+
+    def _validate_nonlinear_callbacks(self, x: np.ndarray) -> None:
+        """Run a construction-time state check for callback dimensions/finiteness."""
+        for index in range(len(self._nonlinear_candidates)):
+            self._evaluate_nonlinear_candidate(index, x)
+
+    def _record_nonlinear_event(self, kind: str, index: int) -> None:
+        """Increment the public candidate-kind/name event counters."""
+        counts = self._nonlinear_event_counts
+        counts[kind] = int(counts.get(kind, 0)) + 1
+        key = f"{kind}:{int(index)}"
+        counts[key] = int(counts.get(key, 0)) + 1
+        candidate = self._nonlinear_candidates[index]
+        name = getattr(candidate, "name", None)
+        if name and str(name) != kind:
+            counts[str(name)] = int(counts.get(str(name), 0)) + 1
+
+    def _append_spike_event_history(self, info: dict) -> None:
+        """Append parallel kind/index metadata for committed spike info."""
+        ids = np.asarray(info.get("constraints", ()), dtype=int).reshape(-1)
+        m = self.problem.n_constraints
+        n = self.problem.n_vars
+        for candidate_id in ids:
+            cid = int(candidate_id)
+            if cid < m:
+                kind, index = "row", cid
+            elif cid < m + n:
+                kind, index = "lo", cid - m
+            elif cid < m + 2 * n:
+                kind, index = "hi", cid - m - n
+            else:
+                q = cid - m - 2 * n
+                # The projection methods only emit valid IDs; retain a clear
+                # internal error if a future method violates that invariant.
+                if q < 0 or q >= len(self._nonlinear_candidates):
+                    raise AssertionError(f"invalid nonlinear candidate id {cid}")
+                kind = self._candidate_kind(self._nonlinear_candidates[q])
+                index = q
+            self._spike_event_kinds.append(kind)
+            self._spike_event_indices.append(int(index))
+
     def _reset_projection_event_observer(self) -> None:
         """Reset the optional constant-memory projection-event observer."""
+        self._nonlinear_event_counts = {}
         if self.config.observe_projection_events:
             self._explicit_row_event_counts = np.zeros(
                 self.problem.n_constraints, dtype=np.int64)
@@ -709,6 +1282,29 @@ class SNNSolver:
             self._projection_first_candidate_id = None
             self._projection_last_candidate_id = None
             self._projection_cap_rechecks = None
+
+    def _observe_nonlinear_event(self, kind: str, index: int,
+                                 outer_iteration: int, ordinal: int,
+                                 correction_norm: float) -> None:
+        """Record one committed opt-in candidate event.
+
+        The legacy row/facet observer remains untouched.  This companion uses
+        the same canonical digest token format and reserves the candidate ID
+        range above all row and bound slots.
+        """
+        self._record_nonlinear_event(kind, index)
+        if self._explicit_row_event_counts is None:
+            return
+        candidate_id = self._candidate_id(index)
+        if self._projection_first_candidate_id is None:
+            self._projection_first_candidate_id = int(candidate_id)
+        self._projection_last_candidate_id = int(candidate_id)
+        for word in (outer_iteration, ordinal, candidate_id):
+            self._projection_event_digest = (
+                (self._projection_event_digest ^ (int(word) + 1))
+                * _EVENT_DIGEST_PRIME
+            ) & _UINT64_MASK
+        self._observed_total_projection_distance += float(correction_norm)
 
     def _observe_projection_event(self, kind: str, index: int,
                                   outer_iteration: int, ordinal: int,
@@ -820,7 +1416,42 @@ class SNNSolver:
         rows only, in raw units, and never sees the box.
         """
         _, dist, box = self._violation_split(x)
+        if self._nonlinear_candidates:
+            return max(dist, box, self._max_nonlinear_violation(x))
         return max(dist, box)
+
+    def _exact_projector_violation(self, x: np.ndarray) -> float:
+        """Largest ||x - Pi(x)|| over candidates that carry an exact projector.
+
+        The candidate score comes from the event oracle, which may be inexact
+        (e.g. a truncated power iteration underestimates a spectral norm and
+        reports an infeasible point as feasible). When
+        ``kkt_data['euclidean_project']`` is supplied, the convergence gate
+        measures primal feasibility with the exact set instead.
+        """
+        worst = 0.0
+        xv = np.asarray(x, dtype=float).ravel()
+        for candidate in self._nonlinear_candidates:
+            metadata = getattr(candidate, "kkt_data", None)
+            if not isinstance(metadata, dict):
+                continue
+            project = metadata.get("euclidean_project")
+            if not callable(project):
+                continue
+            projected = self._certificate_project(
+                {"candidate": candidate, "project": project}, xv)
+            worst = max(worst, float(np.linalg.norm(xv - projected)))
+        return worst
+
+    def _max_nonlinear_violation(self, x: np.ndarray) -> float:
+        """Return the largest normalized violation in the opt-in family."""
+        if not self._nonlinear_candidates:
+            return 0.0
+        best = 0.0
+        for q in range(len(self._nonlinear_candidates)):
+            data = self._evaluate_nonlinear_candidate(q, np.asarray(x, dtype=float))
+            best = max(best, float(data["score"]))
+        return float(best)
 
     def _stationarity_residual(self, x: np.ndarray) -> float:
         """eps-KKT residual at x (host-side instrumentation).
@@ -896,6 +1527,8 @@ class SNNSolver:
             kkt_scale=cert.scale,
             kkt_tolerance=cert.tolerance,
             kkt_fit_status=cert.fit_status,
+            kkt_multipliers=(None if cert.multipliers is None
+                             else np.asarray(cert.multipliers, dtype=float).copy()),
         )
 
     # Dense-path guard for the certificate: refuse to materialize an augmented
@@ -1058,13 +1691,18 @@ class SNNSolver:
         to ||g||. Failures (non-finite data, NNLS failure) return fit_status
         != "ok" and the convergence gate fails closed.
         """
+        # The released row/box certificate below is intentionally left as the
+        # ordinary path.  Candidate normals are assembled by a separate
+        # extension only when the caller has explicitly opted in.
+        if self._nonlinear_candidates:
+            return self._compute_kkt_certificate_extended(np.asarray(x, dtype=float))
         conv = self.config.convergence
         g = np.asarray(self.problem.gradient(x), dtype=float).ravel()
         b = np.asarray(self.problem.b, dtype=float).ravel()
         Ax = g - b
         scale_gb = max(float(np.linalg.norm(Ax)), float(np.linalg.norm(b)))
 
-        def _cert(res, stat, comp, scale, status):
+        def _cert(res, stat, comp, scale, status, multipliers=None):
             tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
             # Fail closed on ANY non-finite reported scalar: a certificate
             # whose numbers cannot be trusted must not read as "ok".
@@ -1074,7 +1712,9 @@ class SNNSolver:
                 status = "non_finite"
             return KKTCertificate(residual=res, stationarity=stat,
                                   complementarity=comp, scale=scale,
-                                  tolerance=tol, fit_status=status)
+                                  tolerance=tol, fit_status=status,
+                                  multipliers=(None if multipliers is None else
+                                               np.asarray(multipliers, dtype=float).copy()))
 
         if not np.all(np.isfinite(x)) or not np.all(np.isfinite(g)):
             return _cert(float("nan"), float("nan"), float("nan"),
@@ -1134,7 +1774,784 @@ class SNNSolver:
         comp = float(np.abs(s) @ mu / lx)
         resid = float(np.hypot(stat, comp))
         scale = max(scale_gb, float(np.linalg.norm(Ntmu)))
-        return _cert(resid, stat, comp, scale, "ok")
+        return _cert(resid, stat, comp, scale, "ok", mu)
+
+    def _candidate_kkt_rows(self, x: np.ndarray, *, return_models: bool = False,
+                            polar_fallback: bool = False):
+        """Collect active candidate normals and exact normal-cone models.
+
+        The returned rows are unit-normalized and oriented outwards.  A
+        cutter may provide a finite row stack.  A candidate carrying an exact
+        ``kkt_data['euclidean_project']`` callback is represented by a natural
+        map instead of a guessed finite normal stack.  Built-in SOC candidates
+        can use a polar-cone model near their apex after the radial-ray fit
+        fails.  The optional fourth
+        return value is intentionally internal; the three-value form is kept
+        for callers that only need the legacy row collection.
+        """
+        n = self.problem.n_vars
+        grad = np.asarray(self.problem.gradient(x), dtype=float).ravel()
+        active_tol = max(self.config.constraint_tol * 10.0,
+                         3.0 * self._k0 * float(np.linalg.norm(grad)))
+        rows: List[np.ndarray] = []
+        slacks: List[float] = []
+        models: List[dict] = []
+
+        def metadata_slack(candidate, xx, count: int, default: float,
+                           *, require_per_row: bool = False):
+            data = getattr(candidate, "kkt_data", None)
+            fn = None
+            if isinstance(data, dict):
+                fn = data.get("slack")
+            elif callable(data):
+                fn = data
+            if fn is None:
+                if require_per_row:
+                    raise LookupError("not_available")
+                values = np.full(count, default, dtype=float)
+            else:
+                try:
+                    values = np.asarray(fn(xx), dtype=float).reshape(-1)
+                except Exception as exc:
+                    raise ValueError("candidate KKT slack callback failed") from exc
+                if values.size == 1 and require_per_row:
+                    raise LookupError("not_available")
+                if values.size == 1:
+                    values = np.repeat(values, count)
+                elif values.size != count:
+                    if require_per_row:
+                        raise LookupError("not_available")
+                    raise ValueError(
+                        "candidate KKT slack callback returned an incompatible length")
+            if not np.all(np.isfinite(values)):
+                raise ValueError("candidate KKT slack is non-finite")
+            return values
+
+        for q, candidate in enumerate(self._nonlinear_candidates):
+            data = self._evaluate_nonlinear_candidate(q, x)
+            metadata = getattr(candidate, "kkt_data", None)
+            metadata_dict = metadata if isinstance(metadata, dict) else {}
+            exact_project = metadata_dict.get("euclidean_project")
+            if exact_project is not None:
+                if not callable(exact_project):
+                    raise ValueError("candidate euclidean_project must be callable")
+                models.append({"kind": "natural", "project": exact_project,
+                               "candidate": candidate, "index": q})
+                # The exact projector is the authoritative normal-cone model;
+                # adding a single callback normal here would make a spectral
+                # tie depend on an arbitrary SVD basis.
+                continue
+            if data["kind"] == "cutter":
+                signed_distance = float(data["value"] / data["norm"]
+                                         if data["norm"] > 1e-12 else 0.0)
+                # A cutter's analytic gradient is always a valid supporting
+                # normal.  The optional hook may refine its active-set policy.
+                normal_raw = None
+                if candidate.normal is not None:
+                    try:
+                        normal_raw = candidate.normal(x)
+                    except Exception as exc:
+                        raise ValueError("cutter normal callback failed") from exc
+                if normal_raw is None:
+                    normal_raw = data["jacobian"]
+                arr = np.asarray(normal_raw, dtype=float)
+                if arr.ndim == 1:
+                    arr = arr.reshape(1, -1)
+                elif arr.ndim != 2:
+                    raise ValueError(
+                        "cutter normal must be a vector or a 2-D row stack")
+                if signed_distance < -active_tol:
+                    continue
+                candidate_rows = []
+                kept_indices = []
+                for row_index, row in enumerate(arr):
+                    normal_arr = self._candidate_vector(
+                        row, candidate,
+                        label=f"{q} ({getattr(candidate, 'name', 'cutter')!r}) normal")
+                    norm = float(np.linalg.norm(normal_arr))
+                    if norm > 1e-12:
+                        candidate_rows.append(normal_arr / norm)
+                        kept_indices.append(row_index)
+                if not candidate_rows:
+                    if data["value"] >= -self.config.constraint_tol:
+                        raise ValueError("active cutter normal is near zero")
+                    continue
+                rows.extend(candidate_rows)
+                values = metadata_slack(
+                    candidate, x, arr.shape[0], -signed_distance,
+                    require_per_row=(arr.shape[0] > 1))
+                slacks.extend(float(values[i]) for i in kept_indices)
+                continue
+
+            # Try the ordinary radial normal first, even when a smooth SOC
+            # boundary lies inside the apex band.  The complete polar model
+            # is a fallback only if that first fit fails to certify.  It
+            # records the local point and prices its complementarity.
+            polar_project = metadata_dict.get("polar_project")
+            coords = getattr(candidate, "coordinates", None)
+            if polar_project is not None and callable(polar_project) and coords:
+                local = np.asarray(x, dtype=float).ravel()[list(coords)]
+                if polar_fallback and float(np.linalg.norm(local)) <= active_tol:
+                    models.append({"kind": "polar", "project": polar_project,
+                                   "candidate": candidate, "index": q,
+                                   "coordinates": tuple(coords),
+                                   "local_point": local.copy()})
+                    continue
+
+            # A zero-radius ball is a singleton.  Its normal cone is the
+            # entire local space, so a radial representative would be
+            # incomplete even at the exact center.
+            if (metadata_dict.get("set") == "ball"
+                    and float(metadata_dict.get("radius", -1.0)) == 0.0
+                    and coords is not None):
+                center = np.asarray(metadata_dict.get("center", 0.0), dtype=float)
+                local = np.asarray(x, dtype=float).ravel()[list(coords)]
+                if center.size == 1:
+                    center = np.repeat(center, len(coords))
+                singleton_tol = 64.0 * np.finfo(float).eps * max(
+                    1.0, float(np.linalg.norm(local)), float(np.linalg.norm(center)))
+                if (center.size == len(coords)
+                        and np.linalg.norm(local - center) <= singleton_tol):
+                    models.append({"kind": "free", "candidate": candidate,
+                                   "index": q, "coordinates": tuple(coords)})
+                    continue
+
+            # Projector candidates without a normal model remain deliberately
+            # conservative: solving is valid, but the certificate must not
+            # invent a normal for an unknown set.
+            if candidate.normal is None:
+                raise LookupError("not_available")
+            try:
+                normal_raw = candidate.normal(x)
+            except Exception as exc:
+                raise ValueError("projector normal callback failed") from exc
+            if normal_raw is None:
+                if data["score"] > active_tol:
+                    raise LookupError("not_available")
+                continue
+            arr = np.asarray(normal_raw, dtype=float)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            elif arr.ndim != 2:
+                raise ValueError("candidate normal must be a vector or a 2-D row stack")
+            candidate_rows = []
+            for row in arr:
+                vec = self._candidate_vector(
+                    row, candidate,
+                    label=f"{q} ({getattr(candidate, 'name', 'set')!r}) normal")
+                norm = float(np.linalg.norm(vec))
+                if norm > 1e-12:
+                    candidate_rows.append(vec / norm)
+            if not candidate_rows:
+                if data["score"] > active_tol:
+                    raise LookupError("not_available")
+                continue
+            default_slack = -float(data["score"])
+            values = metadata_slack(candidate, x, len(candidate_rows), default_slack)
+            rows.extend(candidate_rows)
+            slacks.extend(float(v) for v in values)
+
+        if not rows:
+            result = (np.empty((0, n), dtype=float), np.empty((0,), dtype=float),
+                      "ok")
+        else:
+            result = (np.asarray(rows, dtype=float), np.asarray(slacks, dtype=float),
+                      "ok")
+        if return_models:
+            return (*result, models)
+        return result
+
+    def _certificate_project(self, model: dict, y: np.ndarray) -> np.ndarray:
+        """Call an exact-set certificate projector and restore ambient shape."""
+        candidate = model["candidate"]
+        coords = getattr(candidate, "coordinates", None)
+        try:
+            raw = model["project"](np.asarray(y, dtype=float).copy())
+        except Exception as exc:
+            raise ValueError("candidate euclidean_project callback failed") from exc
+        arr = np.asarray(raw, dtype=float).reshape(-1)
+        n = self.problem.n_vars
+        if arr.size == n:
+            out = arr
+        elif coords is not None and arr.size == len(coords):
+            out = np.asarray(y, dtype=float).copy()
+            out[list(coords)] = arr
+        else:
+            raise ValueError(
+                "candidate euclidean_project returned an incompatible dimension")
+        if not np.all(np.isfinite(out)):
+            raise ValueError("candidate euclidean_project returned non-finite data")
+        if coords is not None:
+            outside = np.ones(n, dtype=bool)
+            outside[list(coords)] = False
+            if np.any(np.abs(out[outside] - np.asarray(y)[outside]) > 1e-10):
+                raise ValueError(
+                    "candidate euclidean_project changed coordinates outside its declaration")
+        return np.asarray(out, dtype=float)
+
+    def _fit_certificate_models(self, x: np.ndarray, N, s: np.ndarray, g: np.ndarray,
+                                lx: float, models: List[dict],
+                                tolerance: float):
+        """Fit row multipliers jointly with polar and natural-map models.
+
+        ``N`` contains the ordinary row/bound normals and any finite normal
+        stacks from other candidates.  A polar model contributes an arbitrary
+        vector in a supplied cone; a natural model contributes the curvature-
+        scaled projected-gradient residual of an exact set, with the gap
+        between the feasible base and the projected trial point priced as
+        complementarity.  Alternating the nonnegative row fit and each cone
+        update is a small block-coordinate solve.  The pass cap is
+        deliberately finite and a non-settling fit fails closed.
+        """
+        n = self.problem.n_vars
+        row_count = int(N.shape[0])
+        if row_count:
+            mu = np.zeros(row_count, dtype=float)
+        else:
+            mu = np.empty(0, dtype=float)
+        cone_vectors = [np.zeros(n, dtype=float) for _ in models]
+        cone_sum = np.zeros(n, dtype=float)
+        natural_comp = 0.0
+        previous_h = None
+        previous_mu = None
+
+        def row_fit(target):
+            if row_count == 0:
+                return np.empty(0, dtype=float), "ok"
+            return self._fit_cone_multipliers(
+                N, s, target, lx, tolerance)
+
+        try:
+            # Evaluate each natural map at a feasible base point.  Otherwise
+            # a sub-tolerance primal defect appears as infeasibility/alpha in
+            # stationarity even though primal feasibility has its own gate.
+            natural_bases = {
+                id(model): self._certificate_project(model, x)
+                for model in models if model["kind"] == "natural"
+            }
+            settled = False
+            for _ in range(512):
+                target = np.asarray(g, dtype=float) + cone_sum
+                mu_new, status = row_fit(target)
+                if mu_new is None or status != "ok":
+                    return None, None, None, status
+                mu_new = np.asarray(mu_new, dtype=float).reshape(-1)
+                if not np.all(np.isfinite(mu_new)):
+                    return None, None, None, "fit_failed"
+                row_term = (np.asarray(N.T @ mu_new).ravel()
+                            if row_count else np.zeros(n, dtype=float))
+                base_h = np.asarray(g, dtype=float) + row_term
+                new_vectors = []
+                running = np.zeros(n, dtype=float)
+                old_processed = np.zeros(n, dtype=float)
+                iter_natural_comp = 0.0
+                for model, old_vec in zip(models, cone_vectors):
+                    # Replace already-updated blocks in the running sum while
+                    # removing the current block's previous contribution.
+                    h_without = (base_h + running +
+                                 (cone_sum - old_processed - old_vec))
+                    kind = model["kind"]
+                    if kind == "polar":
+                        coords = tuple(model["coordinates"])
+                        local = np.asarray(h_without, dtype=float)[list(coords)]
+                        normal_local = np.asarray(
+                            model["project"](-local), dtype=float).reshape(-1)
+                        if normal_local.size != len(coords):
+                            raise ValueError(
+                                "SOC polar projector returned an incompatible dimension")
+                        vec = np.zeros(n, dtype=float)
+                        vec[list(coords)] = normal_local
+                    elif kind == "free":
+                        coords = tuple(model["coordinates"])
+                        vec = np.zeros(n, dtype=float)
+                        vec[list(coords)] = -np.asarray(h_without)[list(coords)]
+                    elif kind == "natural":
+                        base = natural_bases[id(model)]
+                        direction_norm = float(np.linalg.norm(h_without))
+                        if direction_norm <= 1e-14:
+                            vec = np.zeros(n, dtype=float)
+                            new_vectors.append(vec)
+                            running += vec
+                            old_processed += old_vec
+                            continue
+                        # alpha = 1/L (see _natural_map_step). A fixed
+                        # 1e-5 state step divides a face gap delta by that
+                        # step and rejects a point 1e-9 inside an
+                        # ill-conditioned face. The normal below is
+                        # supported at the projected trial point; the gap
+                        # back to the feasible base is complementarity,
+                        # same units as slack * multiplier, and is what
+                        # keeps a swallowed long step from certifying.
+                        alpha = self._natural_map_step(base, direction_norm)
+                        y = base - alpha * np.asarray(h_without, dtype=float)
+                        projected = self._certificate_project(model, y)
+                        vec = (y - projected) / alpha
+                        coords = getattr(model["candidate"], "coordinates", None)
+                        if coords is not None:
+                            outside = np.ones(n, dtype=bool)
+                            outside[list(coords)] = False
+                            vec[outside] = 0.0
+                        gap = np.asarray(base, dtype=float) - np.asarray(
+                            projected, dtype=float)
+                        iter_natural_comp += abs(float(np.dot(vec, gap))) / lx
+                    else:  # pragma: no cover - defensive for future metadata
+                        raise ValueError(f"unknown certificate model kind {kind!r}")
+                    if not np.all(np.isfinite(vec)):
+                        return None, None, None, "fit_failed"
+                    new_vectors.append(vec)
+                    running += vec
+                    old_processed += old_vec
+                natural_comp = iter_natural_comp
+                h = base_h + running
+                h_norm = float(np.linalg.norm(h))
+                comp_iter = (float(np.abs(s) @ mu_new / lx)
+                             if row_count else 0.0)
+                scale = max(1.0, float(np.linalg.norm(g)),
+                            float(np.linalg.norm(row_term)),
+                            float(np.linalg.norm(running)))
+                if previous_h is not None:
+                    delta_h = float(np.linalg.norm(h - previous_h))
+                    delta_mu = float(np.linalg.norm(mu_new - previous_mu))
+                    delta_n = (float(np.sqrt(sum(
+                        np.sum((a - b) ** 2)
+                        for a, b in zip(new_vectors, cone_vectors))))
+                               if new_vectors else 0.0)
+                    # The fit only needs to settle at the certificate's
+                    # acceptance resolution.  Requiring machine epsilon here
+                    # would reject a perfectly valid alternating cone fit
+                    # after the finite pass cap (the SOC/row apex case is
+                    # geometrically a linear contraction).
+                    settle = max(1e-12 * scale, 1e-3 * max(tolerance, 0.0))
+                    if (max(delta_h, delta_mu, delta_n) <= settle
+                            or (h_norm <= tolerance and comp_iter <= tolerance)):
+                        settled = True
+                previous_h = h.copy()
+                previous_mu = mu_new.copy()
+                mu = mu_new
+                cone_vectors = new_vectors
+                cone_sum = running
+                if settled:
+                    break
+            if not settled:
+                return None, None, None, "fit_failed"
+            model_comp = float(natural_comp)
+            for model, vec in zip(models, cone_vectors):
+                if model["kind"] != "polar":
+                    continue
+                coords = tuple(model["coordinates"])
+                local_point = np.asarray(model["local_point"], dtype=float)
+                local_vec = np.asarray(vec, dtype=float)[list(coords)]
+                model_comp += abs(float(np.dot(local_point, local_vec))) / lx
+            return mu, cone_sum, model_comp, "ok"
+        except Exception:
+            return None, None, None, "fit_failed"
+
+    def _compute_kkt_certificate_extended(self, x: np.ndarray) -> KKTCertificate:
+        """KKT certificate with a polar fallback for near-apex SOC points."""
+        first = self._compute_kkt_certificate_extended_once(x)
+        if first.passed:
+            return first
+        grad = np.asarray(self.problem.gradient(x), dtype=float).ravel()
+        apex_band = max(self.config.constraint_tol * 10.0,
+                        3.0 * self._k0 * float(np.linalg.norm(grad)))
+        eligible = False
+        for candidate in self._nonlinear_candidates:
+            metadata = getattr(candidate, "kkt_data", None)
+            if not isinstance(metadata, dict):
+                continue
+            if not callable(metadata.get("polar_project")):
+                continue
+            coords = getattr(candidate, "coordinates", None)
+            if coords is not None and np.linalg.norm(
+                    np.asarray(x, dtype=float).ravel()[list(coords)]) <= apex_band:
+                eligible = True
+                break
+        if not eligible:
+            return first
+        fallback = self._compute_kkt_certificate_extended_once(
+            x, polar_fallback=True)
+        if (fallback.passed or first.fit_status != "ok"
+                or (fallback.fit_status == "ok"
+                    and fallback.residual < first.residual)):
+            return fallback
+        return first
+
+    def _compute_kkt_certificate_extended_once(
+            self, x: np.ndarray, *, polar_fallback: bool = False
+            ) -> KKTCertificate:
+        """Fit one radial or polar model for the opt-in candidate union."""
+        conv = self.config.convergence
+        g = np.asarray(self.problem.gradient(x), dtype=float).ravel()
+        b = np.asarray(self.problem.b, dtype=float).ravel()
+        scale_gb = max(float(np.linalg.norm(g - b)), float(np.linalg.norm(b)))
+
+        def cert(res, stat, comp, scale, status, multipliers=None):
+            tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+            if status == "ok" and not all(
+                    np.isfinite(v) for v in (res, stat, comp, scale, tol)):
+                return KKTCertificate(float("nan"), float("nan"), float("nan"),
+                                      scale, tol, "non_finite", None)
+            return KKTCertificate(residual=res, stationarity=stat,
+                                  complementarity=comp, scale=scale,
+                                  tolerance=tol, fit_status=status,
+                                  multipliers=(None if multipliers is None else
+                                               np.asarray(multipliers, dtype=float).copy()))
+
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(g)):
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, "non_finite")
+        try:
+            base_N, base_s, base_sparse = self._certificate_facets(x)
+            cand_N, cand_s, status, models = self._candidate_kkt_rows(
+                x, return_models=True, polar_fallback=polar_fallback)
+        except LookupError:
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, "not_available")
+        except ValueError:
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, "non_finite")
+
+        if cand_N.shape[0]:
+            if base_sparse:
+                N = _sp.vstack([base_N, _sp.csr_matrix(cand_N)], format="csr")
+                sparse = True
+            else:
+                N = np.vstack([base_N, cand_N])
+                sparse = False
+            s = np.concatenate([base_s, cand_s])
+        else:
+            N, s, sparse = base_N, base_s, base_sparse
+
+        if not np.all(np.isfinite(s)):
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, "non_finite")
+        # A product of disjoint exact-set models has an exact projector.
+        # Its fixed-point residual admits a state error bound; normal-cone
+        # magnitude must not set the accuracy of that bound. Explicit rows and
+        # boxes may be ignored only after the resulting state bound proves
+        # every such facet strictly inactive at x.
+        all_natural = (bool(models)
+                       and len(models) == len(self._nonlinear_candidates))
+        if all_natural:
+            projected_cert = self._exact_projector_certificate(x, models)
+            if projected_cert is not None:
+                if projected_cert.fit_status != "ok":
+                    return projected_cert
+                if (base_N.shape[0] == 0
+                        or np.all(np.asarray(base_s, dtype=float)
+                                  > projected_cert.residual)):
+                    return projected_cert
+        if N.shape[0] == 0:
+            if not models:
+                norm_g = float(np.linalg.norm(g))
+                return cert(norm_g, norm_g, 0.0, scale_gb, "ok")
+        if (not sparse and (g.size + 1) * N.shape[0]
+                > self._DENSE_CERT_MAX_ENTRIES):
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, "too_large")
+        lx = max(1.0, float(np.linalg.norm(x)))
+        tol_hint = conv.kkt_abs_tol + conv.kkt_rel_tol * scale_gb
+        if models:
+            mu, model_term, model_comp, fit_status = self._fit_certificate_models(
+                x, N, s, g, lx, models, tol_hint)
+        else:
+            mu, fit_status = self._fit_cone_multipliers(
+                N, s, g, lx, tol_hint)
+            model_term = np.zeros_like(g)
+            model_comp = 0.0
+        if mu is None:
+            return cert(float("nan"), float("nan"), float("nan"),
+                        scale_gb, fit_status)
+        Ntmu = np.asarray(N.T @ mu).ravel()
+        model_term = np.asarray(model_term, dtype=float).ravel()
+        stat = float(np.linalg.norm(g + Ntmu + model_term))
+        comp = float(np.abs(s) @ mu / lx) + float(model_comp)
+        resid = float(np.hypot(stat, comp))
+        scale = max(scale_gb, float(np.linalg.norm(Ntmu)),
+                    float(np.linalg.norm(model_term)))
+        return cert(resid, stat, comp, scale, "ok", mu)
+
+    def _strong_convexity(self) -> float:
+        """Resolved minimum curvature, cached with L for the solver lifetime.
+
+        Dense symmetric Hessians need one eigvalsh (also supplies L); sparse
+        ones use extremal eigsh calls without densifying. Curvature below a
+        relative roundoff floor retains the ordinary convex KKT path, so a
+        rank-deficient Hessian cannot acquire a spurious state-error bound.
+        """
+        cached = getattr(self, "_strong_convexity_cache", None)
+        if cached is not None:
+            return cached
+        A = self.problem.A
+        n = A.shape[0]
+        self._strong_convexity_status = "ok"
+        try:
+            if _issparse(A):
+                delta = (A - A.T).tocsr()
+                asym = float(np.max(np.abs(delta.data))) if delta.nnz else 0.0
+                S = ((A + A.T) * 0.5).tocsr().astype(float)
+                S.eliminate_zeros()
+                # A zero sparse Hessian is a resolved merely-convex case.
+                # ARPACK can report a zero starting vector on this operator.
+                if S.nnz == 0:
+                    self._strong_convexity_status = "not_spd"
+                    self._strong_convexity_cache = 0.0
+                    return 0.0
+                if n == 1:
+                    eigen_min = float(S[0, 0])
+                    eigen_max = abs(eigen_min)
+                else:
+                    from scipy.sparse.linalg import ArpackNoConvergence, eigsh
+                    # ``SA`` is the algebraically smallest eigenvalue. A
+                    # shift-invert solve at zero instead returns the nearest
+                    # eigenvalue and can turn an unbounded Hessian into a
+                    # falsely positive state-unit certificate.
+                    eigsh_kw = dict(k=1, tol=1e-8,
+                                    maxiter=max(2000, 20 * n),
+                                    # A wider Krylov space resolves graded
+                                    # spectra without shift-invert.
+                                    ncv=min(n, 40),
+                                    return_eigenvectors=False)
+                    try:
+                        eigen_min = float(eigsh(S, which="SA", **eigsh_kw)[0])
+                    except ArpackNoConvergence:
+                        # ARPACK's non-convergence is recoverable for a
+                        # symmetric operator: the Gershgorin lower bound is
+                        # conservative and remains valid for the contraction
+                        # proof. Other exceptions still fail closed below.
+                        diagonal = np.asarray(S.diagonal(), dtype=float)
+                        radius = np.asarray(np.abs(S).sum(axis=1)).ravel() \
+                            - np.abs(diagonal)
+                        eigen_min = float(np.min(diagonal - radius))
+                    try:
+                        eigen_max = float(abs(eigsh(S, which="LM", **eigsh_kw)[0]))
+                    except ArpackNoConvergence:
+                        diagonal = np.asarray(S.diagonal(), dtype=float)
+                        radius = np.asarray(np.abs(S).sum(axis=1)).ravel() \
+                            - np.abs(diagonal)
+                        eigen_max = float(np.max(np.abs(diagonal) + radius))
+                mu = eigen_min - 0.5 * n * asym
+                self._state_lipschitz_cache = eigen_max
+            else:
+                asym = float(np.max(np.abs(A - A.T))) if A.size else 0.0
+                S = (np.asarray(A, dtype=float)
+                     + np.asarray(A, dtype=float).T) * 0.5
+                eigenvalues = np.linalg.eigvalsh(S)
+                mu = float(eigenvalues[0] - 0.5 * n * asym)
+                self._state_lipschitz_cache = float(np.max(np.abs(eigenvalues)))
+        except Exception:
+            # An eigensolver failure is different from a resolved zero or
+            # negative eigenvalue: the exact-projector path must fail closed,
+            # rather than silently falling through to the old scale.
+            self._strong_convexity_status = "solve_failed"
+            self._strong_convexity_cache = 0.0
+            return 0.0
+        L_state = float(getattr(self, "_state_lipschitz_cache", 0.0))
+        if not np.isfinite(L_state) or L_state <= 0.0:
+            self._strong_convexity_status = "not_spd"
+            self._strong_convexity_cache = 0.0
+            return 0.0
+        if not np.isfinite(mu) or mu > L_state:
+            self._strong_convexity_status = "solve_failed"
+            self._strong_convexity_cache = 0.0
+            return 0.0
+        floor = 64.0 * np.finfo(float).eps * n * L_state
+        if not np.isfinite(mu) or mu <= floor:
+            mu = 0.0
+        self._strong_convexity_cache = mu
+        return mu
+
+    def _exact_projector_certificate(self, x: np.ndarray, models: List[dict]):
+        """State-unit certificate for a strongly convex QP on an exact set.
+
+        Disjoint coordinate projectors compose to the exact product-set
+        projector P. For 0 < alpha <= 1/L, T = P(I - alpha*grad f) is a
+        contraction of factor at most 1-alpha*mu. Thus
+
+            ||x-x*|| <= ||x-T(x)|| / (alpha*mu).
+
+        Use 1/L for direct projectors. Iterative Dykstra projectors keep the
+        bounded trial step, and first move to a nearby witness z. This clears
+        tiny inward face gaps without dividing them by the capped step:
+
+            ||x-x*|| <= ||x-z|| + ||z-T(z)|| / (alpha*mu).
+
+        The two terms are reported as complementarity and stationarity in
+        STATE units. Their sum is the triangle bound on state error (constant
+        1). Row/cone mixtures and
+        non-strongly-convex objectives retain the ordinary KKT residual.
+
+        A converged Dykstra projection is trusted to its configured
+        positional tolerance, just as a direct projector callback is trusted
+        to implement its exact set. The positional error is not amplified or
+        otherwise bounded through the capped Euler step; the certificate only
+        admits a configured tolerance below one percent of the requested
+        state window.
+        """
+        occupied = set()
+        iterative = False
+        for model in models:
+            if model["kind"] != "natural":
+                return None
+            coords = getattr(model["candidate"], "coordinates", None)
+            coords = set(range(x.size) if coords is None else coords)
+            if occupied.intersection(coords):
+                return None
+            occupied.update(coords)
+            iterative |= bool(getattr(model["project"],
+                                      "_is_dykstra_projector", False))
+        mu = self._strong_convexity()
+        if getattr(self, "_strong_convexity_status", "ok") == "solve_failed":
+            scale = max(1.0, float(np.linalg.norm(x)))
+            tolerance = self.config.convergence.kkt_abs_tol + self.config.convergence.kkt_rel_tol * scale
+            return KKTCertificate(float("nan"), float("nan"), float("nan"),
+                                  scale, tolerance, "fit_failed", None)
+        if mu <= 0.0:
+            return None
+        L = float(getattr(self, "_state_lipschitz_cache", 0.0))
+        conv = self.config.convergence
+        scale = max(1.0, float(np.linalg.norm(x)))
+        tolerance = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+
+        iterative_tolerance = None
+        for model in models:
+            if getattr(model["project"], "_is_dykstra_projector", False):
+                configured = getattr(model["candidate"], "tolerance", None)
+                if configured is None:
+                    return KKTCertificate(float("nan"), float("nan"),
+                                          float("nan"), scale, tolerance,
+                                          "fit_failed", None)
+                iterative_tolerance = max(float(configured),
+                                          float(iterative_tolerance or 0.0))
+        # Resolve the same capped step that the iterative trial will use
+        # before pricing its stopping tolerance. The Dykstra tolerance is a
+        # positional error (already in state units), so it must be strictly
+        # below one percent of the requested state window. A tolerance at the
+        # boundary is rejected closed after rounding in the inner cycle.
+        gate_alpha = 1.0 / L
+        gate_gradient = np.asarray(self.problem.gradient(x), dtype=float)
+        if iterative:
+            gate_norm_g = float(np.linalg.norm(gate_gradient))
+            if gate_norm_g > 0.0:
+                gate_alpha = min(
+                    gate_alpha,
+                    max(1.0, float(np.linalg.norm(x))) / gate_norm_g)
+        gate_input = x - gate_alpha * gate_gradient
+        z_scale = max(1.0, float(np.linalg.norm(gate_input)))
+        # Use the full state tolerance, including kkt_abs_tol. The 0.999
+        # factor is an intentional strict-inequality guard at the 100x
+        # positional margin, so a configured tolerance exactly on the
+        # boundary fails closed after inner-cycle rounding.
+        state_budget = 0.999 * 0.01 * tolerance
+        if (iterative_tolerance is not None
+                and iterative_tolerance * z_scale
+                >= state_budget):
+            return KKTCertificate(float("nan"), float("nan"), float("nan"),
+                                  scale, tolerance, "fit_failed", None)
+
+        # A direct projector has an eps-level positional floor. If dividing
+        # that floor by alpha*mu would consume 25% of the requested state
+        # tolerance, the state bound is numerically unresolved; preserve the
+        # ordinary gradient-unit certificate instead.
+        alpha_floor = 1.0 / L
+        if iterative:
+            norm_g = float(np.linalg.norm(self.problem.gradient(x)))
+            if norm_g > 0.0:
+                alpha_floor = min(alpha_floor,
+                                  max(1.0, float(np.linalg.norm(x))) / norm_g)
+        roundoff = (64.0 * np.finfo(float).eps * np.sqrt(x.size)
+                    * max(1.0, float(np.linalg.norm(x))))
+        if roundoff / (alpha_floor * mu) > 0.25 * tolerance:
+            return None
+
+        def trial(point):
+            g = np.asarray(self.problem.gradient(point), dtype=float)
+            alpha = 1.0 / L
+            if iterative:
+                norm_g = float(np.linalg.norm(g))
+                if norm_g > 0.0:
+                    alpha = min(alpha, self._natural_map_step(point, norm_g))
+            projected = point - alpha * g
+            for model in models:
+                projected = self._certificate_project(model, projected)
+                diagnostics = getattr(model["project"],
+                                      "_dykstra_diagnostics", None)
+                if diagnostics is not None and not diagnostics["converged"]:
+                    raise ValueError("certificate projector did not converge")
+            return projected, alpha
+
+        try:
+            witness = x
+            displacement = 0.0
+            if iterative:
+                witness, _ = trial(x)
+                displacement = float(np.linalg.norm(x - witness))
+            projected, alpha = trial(witness)
+            stationarity = float(np.linalg.norm(witness - projected) / (alpha * mu))
+            residual = float(stationarity + displacement)
+            if not all(np.isfinite(v) for v in (residual, scale, tolerance)):
+                raise ValueError("non-finite projected certificate")
+            return KKTCertificate(residual, stationarity, displacement,
+                                  scale, tolerance, "ok", np.empty(0))
+        except Exception:
+            return KKTCertificate(float("nan"), float("nan"), float("nan"),
+                                  scale, tolerance, "fit_failed", None)
+
+    def _gradient_lipschitz(self) -> float:
+        """Spectral norm of the QP Hessian, the Lipschitz constant of ∇f.
+
+        Returns 0 when the Hessian is absent. Cached: ``A`` is fixed for
+        the life of the solver, and the certificate must not redo an
+        ``n x n`` eigensolve on every call.
+        """
+        cached = getattr(self, "_lipschitz_cache", None)
+        if cached is not None:
+            return cached
+        A = self.problem.A
+        if _issparse(A):
+            if A.nnz == 0:
+                L = 0.0
+            else:
+                from scipy.sparse.linalg import eigsh
+                try:
+                    eigenvalues, _ = eigsh(A.astype(float), k=1, which="LM")
+                    L = float(np.abs(eigenvalues[0]))
+                except Exception:
+                    L = float(_sp.linalg.norm(A, "fro"))
+        elif not np.any(A):
+            # Exact zero only: a uniformly scaled-down objective must keep a
+            # proportional L, or the certificate would lose scale invariance.
+            L = 0.0
+        elif np.allclose(A, A.T):
+            L = float(np.max(np.abs(np.linalg.eigvalsh(A))))
+        else:
+            L = float(np.linalg.norm(A, 2))
+        if not np.isfinite(L) or L < 0.0:
+            L = 0.0
+        self._lipschitz_cache = L
+        return L
+
+    def _natural_map_step(self, base: np.ndarray, direction_norm: float) -> float:
+        """Step length for an exact-set projected-gradient certificate.
+
+        ``alpha = 1/L`` makes ``||base - P(base - alpha h)|| / alpha`` the
+        curvature-scaled gap ``L * ||base - z||``, in gradient units and
+        independent of the Euler step. Objective scaling multiplies ``L``
+        and ``h`` together, so the trial point ``base - alpha h`` does not
+        move. The trial step is capped at the set's own length scale
+        ``max(1, ||base||)``: that still clears any slack inside the
+        acceptance window (about ``kkt_rel_tol * ||x||``) and reaches the
+        support of ``-h`` on an order-one set, while an iterative projector
+        (Dykstra) is never asked to walk back from a point ``||g||/L`` away,
+        where its cycle cap would return an infeasible point and reject the
+        optimum. A flat Hessian (below the ``_compute_adaptive_k0`` floor)
+        uses the capped step alone.
+        """
+        cap = max(1.0, float(np.linalg.norm(base))) / direction_norm
+        lipschitz = self._gradient_lipschitz()
+        if lipschitz >= 1e-10:
+            return min(1.0 / lipschitz, cap)
+        return cap
 
     def _compute_adaptive_k0(self) -> float:
         """
@@ -1148,39 +2565,13 @@ class SNNSolver:
         We use k0 = k0_scale / L for additional stability margin.
         """
         A = self.problem.A
-
-        # For zero Hessian (linear program), use default step
-        if _issparse(A):
-            if A.nnz == 0:
-                return 0.01
-        elif np.allclose(A, 0):
+        # Zero / negligible Hessian (linear program): fixed default step.
+        if (A.nnz == 0) if _issparse(A) else np.allclose(A, 0):
             return 0.01
-
-        # Compute largest eigenvalue (Lipschitz constant)
-        if _issparse(A):
-            from scipy.sparse.linalg import eigsh
-            try:
-                eigenvalues, _ = eigsh(A.astype(float), k=1, which='LM')
-                L = np.abs(eigenvalues[0])
-            except Exception:
-                # Fallback: use Frobenius norm as upper bound
-                L = _sp.linalg.norm(A, 'fro')
-        elif np.allclose(A, A.T):
-            # For symmetric dense matrices, use eigvalsh (faster)
-            eigenvalues = np.linalg.eigvalsh(A)
-            L = np.max(np.abs(eigenvalues))
-        else:
-            # For non-symmetric dense, use spectral norm
-            L = np.linalg.norm(A, 2)
-        
-        # Avoid division by zero
+        L = self._gradient_lipschitz()
         if L < 1e-10:
             return 0.01
-        
-        # Safe step size with scaling factor
-        k0 = self.config.k0_scale / L
-        
-        return k0
+        return self.config.k0_scale / L
     
     def _compute_projected_gradient_norm(self, x: np.ndarray) -> float:
         """
@@ -1274,6 +2665,9 @@ class SNNSolver:
         # criteria, so nothing else needs evaluating.
         if conv_cfg.require_feasibility:
             max_viol = self._joint_max_violation(x_curr)
+            if self._nonlinear_candidates:
+                max_viol = max(max_viol,
+                               self._exact_projector_violation(x_curr))
             if max_viol > conv_cfg.feasibility_tol:
                 return False, "still_infeasible", True  # Check happened but failed
 
@@ -1315,7 +2709,11 @@ class SNNSolver:
                 return False, reasons
             window = obj_history[-conv_cfg.window_size:]
             obj_range = max(window) - min(window)
-            obj_scale = max(abs(window[-1]), 1e-10)
+            # Keep the released polyhedral gate aligned with its unchanged C
+            # kernel. The extended path needs a wider near-zero floor because
+            # its native iterates can jitter by a few ulps at a conic apex.
+            obj_scale = max(abs(window[-1]),
+                            1e-8 if self._nonlinear_candidates else 1e-10)
             obj_rel_change = obj_range / obj_scale
             if obj_rel_change >= conv_cfg.obj_rel_tol:
                 return False, reasons
@@ -1391,6 +2789,12 @@ class SNNSolver:
         self._spike_deltas = []
         self._spike_constraints = []
         self._spike_violation_values = []
+        self._spike_event_kinds = []
+        self._spike_event_indices = []
+        self._dykstra_inner_iterations = []
+        self._dykstra_inner_projection_events = []
+        self._dykstra_inner_converged = []
+        self._dykstra_inner_cap_hits = 0
         self._reset_projection_event_observer()
         # Re-validate criterion settings at solve time: the config dataclass
         # is not frozen, and a mutated-invalid selector must fail loudly here
@@ -1402,6 +2806,12 @@ class SNNSolver:
         self._convergence_reason = "max_iterations"
         self._iterations_used = 0
         self._projection_budget_exhausted = False
+        self._projection_truncated_sweeps = 0
+
+        if self._nonlinear_candidates:
+            # Validate callback output dimensions and finiteness against the
+            # actual initial state before entering the iterative path.
+            self._validate_nonlinear_callbacks(x0)
 
         # Transform axis: an explicit problem transform (e.g. eigenbasis) rewrites
         # the problem, solves the equivalent system, and maps the solution back.
@@ -1470,6 +2880,20 @@ class SNNSolver:
         self._projection_first_candidate_id = inner._projection_first_candidate_id
         self._projection_last_candidate_id = inner._projection_last_candidate_id
         self._projection_cap_rechecks = inner._projection_cap_rechecks
+        self._projection_truncated_sweeps = getattr(
+            inner, "_projection_truncated_sweeps", 0)
+        self._spike_event_kinds = list(getattr(inner, "_spike_event_kinds", []))
+        self._spike_event_indices = list(getattr(inner, "_spike_event_indices", []))
+        self._nonlinear_event_counts = dict(
+            getattr(inner, "_nonlinear_event_counts", {}))
+        self._dykstra_inner_iterations = list(
+            getattr(inner, "_dykstra_inner_iterations", []))
+        self._dykstra_inner_projection_events = list(
+            getattr(inner, "_dykstra_inner_projection_events", []))
+        self._dykstra_inner_converged = list(
+            getattr(inner, "_dykstra_inner_converged", []))
+        self._dykstra_inner_cap_hits = int(
+            getattr(inner, "_dykstra_inner_cap_hits", 0))
         return self._build_lean_result(final_x)
 
     def _solve_euler(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
@@ -1499,7 +2923,10 @@ class SNNSolver:
             
             # Phase 2: Project to feasible region
             x_current, n_proj, spike_info = self._project_to_feasible(
-                x_current, outer_iteration=iteration)
+                x_current,
+                build_info=(self.config.record_spike_history
+                            or not self._nonlinear_candidates),
+                outer_iteration=iteration)
             self._n_projections += n_proj
 
             if n_proj > 0 and self.config.record_spike_history:
@@ -1508,6 +2935,7 @@ class SNNSolver:
                     self._spike_deltas.append(info["delta_x"])
                     self._spike_constraints.append(info["constraints"])
                     self._spike_violation_values.append(info["violations"])
+                    self._append_spike_event_history(info)
 
             # (v0.5.0: the former Phase-3 terminal box clip is gone -- bounds
             # are facets inside the Phase-2 sweep; clipping here broke rows.)
@@ -1699,7 +3127,9 @@ class SNNSolver:
             spike_constraints=[],
             spike_violation_values=[],
             total_projection_distance=0.0,
-            joint_feasible=(max(dist_rows, box_viol)
+            joint_feasible=((self._joint_max_violation(final_x)
+                             if self._nonlinear_candidates
+                             else max(dist_rows, box_viol))
                             <= self.config.convergence.feasibility_tol),
             max_violation_rows_raw=raw_rows,
             max_distance_rows=dist_rows,
@@ -1708,7 +3138,21 @@ class SNNSolver:
             optimality_test=self.config.convergence.optimality_test,
             **self._kkt_result_fields(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
+            projection_truncated_sweeps=int(self._projection_truncated_sweeps),
             **self._projection_event_result_fields(),
+            spike_event_kinds=list(self._spike_event_kinds),
+            spike_event_indices=np.asarray(self._spike_event_indices, dtype=int),
+            nonlinear_event_counts=dict(self._nonlinear_event_counts),
+            max_violation_nonlinear=(
+                self._max_nonlinear_violation(final_x)
+                if self._nonlinear_candidates else 0.0),
+            dykstra_inner_iterations=np.asarray(
+                self._dykstra_inner_iterations, dtype=int),
+            dykstra_inner_projection_events=np.asarray(
+                self._dykstra_inner_projection_events, dtype=int),
+            dykstra_inner_converged=np.asarray(
+                self._dykstra_inner_converged, dtype=bool),
+            dykstra_inner_cap_hits=int(self._dykstra_inner_cap_hits),
         )
 
     def _drive_chunked_kernel(self, kernel_call, x0c: np.ndarray):
@@ -1823,6 +3267,9 @@ class SNNSolver:
                 "backend='c' requires the compiled snn_opt._kernel extension. "
                 "Build it with `python setup.py build_ext --inplace`."
             ) from exc
+
+        if self._nonlinear_candidates:
+            return self._solve_euler_c_extended(x0, verbose)
 
         if self.config.projection_method != 'adaptive':
             raise ValueError(
@@ -1977,6 +3424,218 @@ class SNNSolver:
 
         return self._build_lean_result(np.asarray(final_x, dtype=float))
 
+    def _solve_euler_c_extended(self, x0: np.ndarray,
+                                verbose: bool = False) -> SolverResult:
+        """Run the descriptor-driven native path for built-in projectors.
+
+        The C++ side owns the Euler recurrence and extended winner sweep.  The
+        host keeps the stopping policy and KKT certificate, exactly as the
+        released native path does for the polyhedral kernel.  Event arrays are
+        returned per chunk and concatenated here so lean native results still
+        expose the canonical kind/index stream used by parity tests.
+        """
+        try:
+            from . import _kernel
+        except ImportError as exc:
+            raise ImportError(
+                "backend='c' requires the compiled snn_opt._kernel extension. "
+                "Build it with `python setup.py build_ext --inplace`."
+            ) from exc
+
+        if self.config.projection_method != "adaptive":
+            raise ValueError(
+                "backend='c' supports projection_method='adaptive' only "
+                f"(got {self.config.projection_method!r})")
+        if _issparse(self.problem.A) or _issparse(self.problem.C):
+            raise ValueError(
+                "backend='c' requires dense A and C (scipy sparse not supported)")
+
+        n, m = self.problem.n_vars, self.problem.n_constraints
+        A = np.ascontiguousarray(self.problem.A, dtype=np.float64)
+        b = np.ascontiguousarray(self.problem.b, dtype=np.float64)
+        C = np.ascontiguousarray(self.problem.C, dtype=np.float64).reshape(m, n)
+        d = np.ascontiguousarray(self.problem.d, dtype=np.float64)
+        c_norms_sq = np.ascontiguousarray(self._c_norms_sq,
+                                          dtype=np.float64).reshape(m)
+        if self._c_gram is not None:
+            c_gram = np.ascontiguousarray(self._c_gram,
+                                          dtype=np.float64).reshape(m, m)
+        elif m == 0:
+            c_gram = np.zeros((0, 0), dtype=np.float64)
+        else:
+            raise ValueError(
+                f"backend='c' needs the constraint Gram matrix, but m={m} "
+                f"exceeds the precompute cap (_MAX_GRAM_M={_MAX_GRAM_M}); "
+                "use backend='python'")
+
+        candidate_meta, member_meta, descriptor_coords, candidate_data = (
+            self._native_descriptor_cache
+            if self._native_descriptor_cache is not None
+            else self._native_candidate_descriptors())
+        x0c = np.ascontiguousarray(x0, dtype=np.float64)
+        has_lower = self.config.lower_bound is not None
+        has_upper = self.config.upper_bound is not None
+        has_omp = bool(getattr(_kernel, "HAS_OPENMP", False))
+        if self.config.backend == "c_serial":
+            parallel = False
+        elif self.config.backend == "c_openmp":
+            if not has_omp:
+                raise ValueError(
+                    "backend='c_openmp' requires the compiled kernel to be "
+                    "built with OpenMP (-fopenmp), but this build is SIMD-only "
+                    "(_kernel.HAS_OPENMP is False). Use backend='c' (auto) or "
+                    "'c_serial', or rebuild with an OpenMP-capable compiler.")
+            parallel = True
+        else:
+            parallel = has_omp
+
+        empty_i64 = np.empty((0,), dtype=np.int64)
+        row_event_counts = (np.zeros(m, dtype=np.int64)
+                            if self.config.observe_projection_events else empty_i64)
+        lower_event_counts = (np.zeros(n, dtype=np.int64)
+                              if self.config.observe_projection_events else empty_i64)
+        upper_event_counts = (np.zeros(n, dtype=np.int64)
+                              if self.config.observe_projection_events else empty_i64)
+        # The metadata is kept even when the public observer is off: it seeds
+        # the FNV digest across host-driven chunks, while the result simply
+        # omits those fields when observation was not requested.
+        observer_meta = np.zeros(4, dtype=np.uint64)
+        observer_distance = np.zeros(1, dtype=np.float64)
+
+        event_ids: List[int] = []
+        event_kinds: List[int] = []
+        event_members: List[int] = []
+        dykstra_iterations: List[int] = []
+        dykstra_events: List[int] = []
+        dykstra_converged: List[bool] = []
+        dykstra_cap_hits: List[int] = []
+        projection_truncated: List[int] = []
+
+        conv = self.config.convergence
+        W = max(1, conv.window_size)
+
+        def kernel_call(x_start, iterations, *, early_stop=False,
+                        iter_offset=0, resume=False, extra=None):
+            kwargs = {
+                "row_event_counts": row_event_counts,
+                "lower_event_counts": lower_event_counts,
+                "upper_event_counts": upper_event_counts,
+                "observer_meta": observer_meta,
+                "observer_distance": observer_distance,
+                "iter_offset": iter_offset,
+                "resume_observer": resume,
+                "window_size": W,
+                "use_solution_stable": conv.use_solution_stable,
+            }
+            if extra:
+                kwargs.update(extra)
+            raw = _kernel.solve_euler_extended(
+                A, b, C, d, c_norms_sq, np.ascontiguousarray(self._row_scale),
+                c_gram, np.ascontiguousarray(x_start, dtype=np.float64),
+                self._k0, self.config.constraint_tol, int(iterations),
+                self._proj_cap, has_lower,
+                float(self.config.lower_bound) if has_lower else 0.0,
+                has_upper, float(self.config.upper_bound) if has_upper else 0.0,
+                candidate_meta, descriptor_coords, candidate_data,
+                member_meta, self.config.continue_after_projection_budget,
+                parallel, **kwargs)
+            event_ids.extend(int(v) for v in np.asarray(raw[5]).reshape(-1))
+            event_kinds.extend(int(v) for v in np.asarray(raw[6]).reshape(-1))
+            event_members.extend(int(v) for v in np.asarray(raw[7]).reshape(-1))
+            dykstra_iterations.extend(int(v) for v in np.asarray(raw[9]).reshape(-1))
+            dykstra_events.extend(int(v) for v in np.asarray(raw[10]).reshape(-1))
+            dykstra_converged.extend(
+                bool(v) for v in np.asarray(raw[11]).reshape(-1))
+            dykstra_cap_hits.extend(int(v) for v in np.asarray(raw[12]).reshape(-1))
+            projection_truncated.extend(
+                int(v) for v in np.asarray(raw[13]).reshape(-1))
+            return raw[:5]
+
+        chunked = (bool(self._nonlinear_candidates)
+                   and conv.enable_early_stopping
+                   and self.config.max_iterations > 0)
+        if chunked:
+            final_x, iters, n_proj, converged, reason_code = (
+                self._drive_chunked_kernel(kernel_call, x0c))
+        else:
+            final_x, iters, n_proj, converged, reason_code = kernel_call(
+                x0c, self.config.max_iterations, early_stop=False)
+
+        self._n_projections = int(n_proj)
+        if self.config.observe_projection_events:
+            self._explicit_row_event_counts = row_event_counts
+            self._implicit_lower_event_counts = lower_event_counts
+            self._implicit_upper_event_counts = upper_event_counts
+            self._projection_event_digest = int(observer_meta[0])
+            self._observed_total_projection_distance = float(observer_distance[0])
+            no_candidate = np.iinfo(np.uint64).max
+            self._projection_first_candidate_id = (
+                None if observer_meta[1] == no_candidate else int(observer_meta[1]))
+            self._projection_last_candidate_id = (
+                None if observer_meta[2] == no_candidate else int(observer_meta[2]))
+            self._projection_cap_rechecks = int(observer_meta[3])
+
+        self._spike_event_kinds = []
+        self._spike_event_indices = []
+        self._nonlinear_event_counts = {}
+        for candidate_id, event_kind, member_index in zip(
+                event_ids, event_kinds, event_members):
+            cid = int(candidate_id)
+            ek = int(event_kind)
+            if ek == 0:
+                if self.config.record_spike_history:
+                    self._spike_event_kinds.append("row")
+                    self._spike_event_indices.append(cid)
+            elif ek == 1:
+                if self.config.record_spike_history:
+                    self._spike_event_kinds.append("lo")
+                    self._spike_event_indices.append(cid - m)
+            elif ek == 2:
+                if self.config.record_spike_history:
+                    self._spike_event_kinds.append("hi")
+                    self._spike_event_indices.append(cid - m - n)
+            elif ek == 3:
+                q = cid - m - 2 * n
+                if q < 0 or q >= len(self._nonlinear_candidates):
+                    raise RuntimeError(
+                        f"native extended kernel returned invalid candidate id {cid}")
+                candidate = self._nonlinear_candidates[q]
+                kind = self._candidate_kind(candidate)
+                if self.config.record_spike_history:
+                    self._spike_event_kinds.append(kind)
+                    self._spike_event_indices.append(q)
+                self._record_nonlinear_event(kind, q)
+                if (member_index >= 0 and isinstance(candidate, DykstraProjector)
+                        and member_index < len(candidate.members)):
+                    member_name = str(getattr(
+                        candidate.members[member_index], "name", member_index))
+                    key = f"dykstra:{q}:{member_name}"
+                    self._nonlinear_event_counts[key] = int(
+                        self._nonlinear_event_counts.get(key, 0)) + 1
+            else:
+                raise RuntimeError(f"native extended kernel returned event kind {ek}")
+
+        self._dykstra_inner_iterations = dykstra_iterations
+        self._dykstra_inner_projection_events = dykstra_events
+        self._dykstra_inner_converged = dykstra_converged
+        self._dykstra_inner_cap_hits = int(sum(dykstra_cap_hits))
+        self._projection_truncated_sweeps = int(sum(projection_truncated))
+        self._converged = bool(converged)
+        self._iterations_used = int(iters)
+        if reason_code == 2:
+            self._convergence_reason = "projection_budget_exhausted"
+            self._projection_budget_exhausted = True
+        elif reason_code == 1:
+            self._convergence_reason = (self._chunked_reason
+                                        or "converged(c-backend)")
+        else:
+            self._convergence_reason = "max_iterations"
+
+        if verbose:
+            print(f"[c-extended] iterations={iters}, n_projections={n_proj}, "
+                  f"events={len(event_ids)}, converged={bool(converged)}")
+        return self._build_lean_result(np.asarray(final_x, dtype=float))
+
     def _solve_ivp(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
         Solve using continuous ODE integration (original method).
@@ -1996,7 +3655,10 @@ class SNNSolver:
         while t_current < self.config.t_end:
             # Phase 1: Project back into feasible region
             x_current, n_proj, spike_info = self._project_to_feasible(
-                x_current, outer_iteration=projection_sweep_index)
+                x_current,
+                build_info=(self.config.record_spike_history
+                            or not self._nonlinear_candidates),
+                outer_iteration=projection_sweep_index)
             projection_sweep_index += 1
             self._n_projections += n_proj
 
@@ -2006,6 +3668,7 @@ class SNNSolver:
                     self._spike_deltas.append(info["delta_x"])
                     self._spike_constraints.append(info["constraints"])
                     self._spike_violation_values.append(info["violations"])
+                    self._append_spike_event_history(info)
             
             if verbose and n_proj > 0:
                 print(f"t={t_current:.3f}: Applied {n_proj} projections")
@@ -2154,6 +3817,9 @@ class SNNSolver:
         Box-only problems (m == 0) dispatch to the exact vectorized box
         projection (separable, so the clip IS the projection).
         """
+        if self._nonlinear_candidates:
+            return self._project_adaptive_extended(
+                x, build_info=build_info, outer_iteration=outer_iteration)
         cfg = self.config
         lo, hi = cfg.lower_bound, cfg.upper_bound
         has_box = lo is not None or hi is not None
@@ -2283,6 +3949,221 @@ class SNNSolver:
                 self._projection_budget_exhausted = True
 
         return x_proj, n_iters, spike_info
+
+    def _project_adaptive_extended(self, x: np.ndarray,
+                                   build_info: bool = True,
+                                   outer_iteration: int = 0
+                                   ) -> Tuple[np.ndarray, int, List[dict]]:
+        """Adaptive sweep including opt-in cutters and exact-set projectors.
+
+        This is deliberately a sibling of the released implementation rather
+        than a refactor of it.  Row/facet candidates retain their old ordering
+        and arithmetic; nonlinear candidates are appended after the reserved
+        lower/upper-bound slots and use one exact event per winning callback.
+        """
+        cfg = self.config
+        lo, hi = cfg.lower_bound, cfg.upper_bound
+        m = self.problem.n_constraints
+        n = self.problem.n_vars
+        tol = cfg.constraint_tol
+        x_proj = np.asarray(x, dtype=float).copy()
+        spike_info: List[dict] = []
+        n_iters = 0
+
+        # The extended branch has at least one candidate by construction, so
+        # unlike the legacy path it must not dispatch to the box-only clip.
+        gram = self._c_gram
+        g = np.asarray(self.problem.constraint_values(x_proj), dtype=float).ravel()
+        sweep_dykstra_iterations = 0
+        sweep_dykstra_events = 0
+        sweep_dykstra_converged = True
+
+        def update_rows(delta: np.ndarray, *, row_index: Optional[int] = None,
+                        row_step: Optional[float] = None) -> None:
+            nonlocal g
+            if m == 0:
+                return
+            if row_index is not None and row_step is not None and gram is not None:
+                # Preserve the released Gram update for a row winner.  Every
+                # arbitrary direction, including a candidate reset, uses the
+                # actual displacement below.
+                g = g - row_step * gram[row_index]
+            else:
+                delta_g = self.problem.C @ delta
+                g = g + np.asarray(delta_g, dtype=float).ravel()
+
+        for _ in range(self._proj_cap):
+            if gram is None and m:
+                g = np.asarray(self.problem.constraint_values(x_proj),
+                               dtype=float).ravel()
+
+            # Frozen winner order: explicit rows, lower facets, upper facets,
+            # then nonlinear candidates in input order.  Candidate scores are
+            # cached so the winner's exact step does not call a callback twice.
+            j_row = int(np.argmax(g * self._row_scale)) if m else -1
+            best_val = float(g[j_row] * self._row_scale[j_row]) if m else -np.inf
+            kind = "row"
+            j = j_row
+            if lo is not None:
+                v_lo = lo - x_proj
+                i = int(np.argmax(v_lo))
+                if float(v_lo[i]) > best_val:
+                    best_val, kind, j = float(v_lo[i]), "lo", i
+            if hi is not None:
+                v_hi = x_proj - hi
+                i = int(np.argmax(v_hi))
+                if float(v_hi[i]) > best_val:
+                    best_val, kind, j = float(v_hi[i]), "hi", i
+
+            candidate_cache = []
+            for q in range(len(self._nonlinear_candidates)):
+                data = self._evaluate_nonlinear_candidate(q, x_proj)
+                candidate_cache.append(data)
+                if float(data["score"]) > best_val:
+                    best_val = float(data["score"])
+                    kind = data["kind"]
+                    j = q
+
+            if best_val <= tol:
+                break
+
+            if kind == "row":
+                c_j = self.problem.C[j]
+                if _issparse(c_j):
+                    c_j = np.asarray(c_j.todense()).ravel()
+                else:
+                    c_j = np.asarray(c_j).ravel()
+                violation = float(g[j])
+                k1_adaptive = violation / self._c_norms_sq[j]
+                delta_x = -k1_adaptive * c_j
+                x_proj = x_proj + delta_x
+                update_rows(delta_x, row_index=j, row_step=k1_adaptive)
+                event_distance = abs(k1_adaptive) * self._c_norms[j]
+                event_id, event_viol = j, violation
+                if self._explicit_row_event_counts is not None:
+                    self._observe_projection_event(
+                        "row", j, outer_iteration, n_iters, event_distance)
+            elif kind in ("lo", "hi"):
+                delta = best_val if kind == "lo" else -best_val
+                delta_x = np.zeros(n, dtype=float)
+                delta_x[j] = delta
+                x_proj = x_proj + delta_x
+                update_rows(delta_x)
+                event_distance = abs(delta)
+                event_id = (m + j) if kind == "lo" else (m + n + j)
+                event_viol = best_val
+                if self._explicit_row_event_counts is not None:
+                    self._observe_projection_event(
+                        kind, j, outer_iteration, n_iters, event_distance)
+            else:
+                data = candidate_cache[j]
+                if kind == "cutter":
+                    value = float(data["value"])
+                    delta_x = (-value / data["norm_sq"]) * data["jacobian"]
+                    x_proj = x_proj + delta_x
+                    update_rows(delta_x)
+                    event_distance = float(np.linalg.norm(delta_x))
+                    event_viol = value
+                else:  # exact set/projector reset
+                    delta_x = np.asarray(data["delta"], dtype=float)
+                    x_proj = np.asarray(data["projected"], dtype=float).copy()
+                    update_rows(delta_x)
+                    event_distance = float(data["score"])
+                    event_viol = float(data["score"])
+                event_id = self._candidate_id(j)
+                dykstra_diag = data.get("dykstra_diagnostics")
+                if isinstance(dykstra_diag, dict):
+                    # Dykstra is one candidate in the outer winner family,
+                    # while every member projection remains a visible event.
+                    inner_events = tuple(dykstra_diag.get("events", ()))
+                    inner_count = int(dykstra_diag.get("iterations", 0))
+                    inner_event_count = len(inner_events)
+                    sweep_dykstra_iterations += inner_count
+                    sweep_dykstra_events += inner_event_count
+                    sweep_dykstra_converged = (
+                        sweep_dykstra_converged
+                        and bool(dykstra_diag.get("converged", False)))
+                    self._dykstra_inner_cap_hits += int(
+                        bool(dykstra_diag.get("cap_hit", False)))
+                    if (dykstra_diag.get("cap_hit", False)
+                            and not cfg.continue_after_projection_budget):
+                        self._projection_budget_exhausted = True
+                    member_names = dykstra_diag.get("member_names", ())
+                    # The callback already applied the full Dykstra result.
+                    # The per-member deltas are telemetry only, so use the
+                    # cached final delta for the row residual update above.
+                    if inner_events:
+                        for local_ordinal, inner in enumerate(inner_events):
+                            correction_norm = float(
+                                inner.get("correction_norm", 0.0))
+                            self._observe_nonlinear_event(
+                                kind, j, outer_iteration,
+                                n_iters + local_ordinal, correction_norm)
+                            member_index = int(inner.get("member_index", -1))
+                            member_name = (str(member_names[member_index])
+                                           if 0 <= member_index < len(member_names)
+                                           else str(inner.get("member_name", member_index)))
+                            key = f"dykstra:{j}:{member_name}"
+                            self._nonlinear_event_counts[key] = int(
+                                self._nonlinear_event_counts.get(key, 0)) + 1
+                            if build_info:
+                                inner_delta = np.asarray(
+                                    inner.get("delta", delta_x), dtype=float)
+                                spike_info.append({
+                                    "constraints": np.array([event_id], dtype=int),
+                                    "delta_x": inner_delta,
+                                    "violations": np.array([correction_norm], dtype=float),
+                                })
+                        n_iters += inner_event_count
+                    else:
+                        self._observe_nonlinear_event(
+                            kind, j, outer_iteration, n_iters, event_distance)
+                        n_iters += 1
+                        if build_info:
+                            spike_info.append({
+                                "constraints": np.array([event_id], dtype=int),
+                                "delta_x": np.asarray(delta_x, dtype=float),
+                                "violations": np.array([event_viol], dtype=float),
+                            })
+                else:
+                    # This helper also updates the nonlinear count dictionary
+                    # when observation is disabled; the legacy observer remains
+                    # separate from the released row/facet stream.
+                    self._observe_nonlinear_event(
+                        kind, j, outer_iteration, n_iters, event_distance)
+                    n_iters += 1
+                    if build_info:
+                        spike_info.append({
+                            "constraints": np.array([event_id], dtype=int),
+                            "delta_x": np.asarray(delta_x, dtype=float),
+                            "violations": np.array([event_viol], dtype=float),
+                        })
+            if kind in ("row", "lo", "hi"):
+                n_iters += 1
+                if build_info:
+                    spike_info.append({
+                        "constraints": np.array([event_id], dtype=int),
+                        "delta_x": np.asarray(delta_x, dtype=float),
+                        "violations": np.array([event_viol], dtype=float),
+                    })
+        else:
+            # The loop exhausted its event budget without taking the normal
+            # tolerance break.  Count this diagnostic on the extended path
+            # even when the subsequent recheck happens to find the point
+            # feasible.  Only the explicit continuation opt-in suppresses the
+            # legacy abort flag; the released branch below is unchanged.
+            self._projection_truncated_sweeps += 1
+            if self._projection_cap_rechecks is not None:
+                self._projection_cap_rechecks += 1
+            if (not cfg.continue_after_projection_budget
+                    and self._joint_max_violation(x_proj) > tol):
+                self._projection_budget_exhausted = True
+
+        self._dykstra_inner_iterations.append(int(sweep_dykstra_iterations))
+        self._dykstra_inner_projection_events.append(int(sweep_dykstra_events))
+        self._dykstra_inner_converged.append(
+            bool(sweep_dykstra_converged if sweep_dykstra_events else True))
+        return x_proj, n_iters, spike_info
     
     def _project_fixed(self, x: np.ndarray,
                        build_info: bool = True) -> Tuple[np.ndarray, int, List[dict]]:
@@ -2402,7 +4283,9 @@ class SNNSolver:
             spike_constraints=spike_constraints,
             spike_violation_values=spike_violation_values,
             total_projection_distance=total_projection_distance,
-            joint_feasible=(max(dist_rows, box_viol)
+            joint_feasible=((self._joint_max_violation(final_x)
+                             if self._nonlinear_candidates
+                             else max(dist_rows, box_viol))
                             <= self.config.convergence.feasibility_tol),
             max_violation_rows_raw=raw_rows,
             max_distance_rows=dist_rows,
@@ -2411,7 +4294,21 @@ class SNNSolver:
             optimality_test=self.config.convergence.optimality_test,
             **self._kkt_result_fields(final_x),
             projection_budget_exhausted=self._projection_budget_exhausted,
+            projection_truncated_sweeps=int(self._projection_truncated_sweeps),
             **self._projection_event_result_fields(),
+            spike_event_kinds=list(self._spike_event_kinds),
+            spike_event_indices=np.asarray(self._spike_event_indices, dtype=int),
+            nonlinear_event_counts=dict(self._nonlinear_event_counts),
+            max_violation_nonlinear=(
+                self._max_nonlinear_violation(final_x)
+                if self._nonlinear_candidates else 0.0),
+            dykstra_inner_iterations=np.asarray(
+                self._dykstra_inner_iterations, dtype=int),
+            dykstra_inner_projection_events=np.asarray(
+                self._dykstra_inner_projection_events, dtype=int),
+            dykstra_inner_converged=np.asarray(
+                self._dykstra_inner_converged, dtype=bool),
+            dykstra_inner_cap_hits=int(self._dykstra_inner_cap_hits),
         )
 
 
@@ -2426,7 +4323,9 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
              enable_early_stopping: bool = True,
              record_trajectory: bool = True,
              backend: str = 'python',
-             verbose: bool = False) -> SolverResult:
+             verbose: bool = False,
+             nonlinear_candidates: Sequence[Union[CutterCandidate,
+                                                  ProjectorCandidate]] = ()) -> SolverResult:
     """
     Convenience function to solve a QP without creating objects explicitly.
     
@@ -2474,13 +4373,17 @@ def solve_qp(A: np.ndarray, b: np.ndarray, C: np.ndarray, d: np.ndarray,
         'c_openmp' (forced multicore). The C variants are numerically identical.
     verbose : bool
         Print progress
+    nonlinear_candidates : sequence, optional
+        Opt-in differentiable cutters and exact-set projectors.  Supplying any
+        candidate selects the recorded Python Euler adaptive path.
 
     Returns
     -------
     result : SolverResult
         Optimization results
     """
-    problem = OptimizationProblem(A=A, b=b, C=C, d=d)
+    problem = OptimizationProblem(A=A, b=b, C=C, d=d,
+                                  nonlinear_candidates=nonlinear_candidates)
     conv_config = ConvergenceConfig(enable_early_stopping=enable_early_stopping)
     config = SolverConfig(k0=k0, t_end=t_end,
                           max_iterations=max_iterations,

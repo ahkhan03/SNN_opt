@@ -140,12 +140,14 @@ With no XRT headers it defines V06_FORCE_MOCK and builds the in-process
 facade in src/v06_xrt_mock.hpp. Native recurrence and parity use the HLS
 headers:
 
-    HLS_INCLUDE=/home/ameer/RD/dev_projects/platforms/kria/hls_include/2022.1 fpga/kv260_v06/build/run_parity.sh
+    HLS_INCLUDE=/path/to/Vitis_HLS/2022.1/include fpga/kv260_v06/build/run_parity.sh
 
 The parity battery compares raw state and all 16 telemetry words against
 v0.5 across routes, starts, launch modes, refresh-A, range/cap fixtures, and
 PMSM bundles. A passing run ends with
 PARITY SUMMARY cells=271 failures=0 PASS.
+
+`build/build_xclbin.sh` runs `kria-clock pack` after the link, so a rebuild generates the dtbo from the xclbin. The dts checked in here still programs the deployed 200 MHz rate: under the 0.8 clk_wiz that is a 160 MHz kernel, which `kria-clock annotate --historical` records without rebuilding. Every board run loads with `kria-clock load <app> --json-out <results>/clock_measured.json` and aborts if that check fails.
 
 ## Qualification record
 

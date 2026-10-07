@@ -65,6 +65,10 @@ if [[ ${unload_rc} -ne 0 || ${load_rc} -ne 0 ]]; then
   echo "xmutil recovery failed unload=${unload_rc} load=${load_rc}" >&2
   exit 4
 fi
+if [[ -n "${APP_NAME}" ]]; then
+  kria_clock="${KRIA_CLOCK:-kria-clock}"
+  "${kria_clock}" check "${APP_NAME}" --json-out "${OUT}/clock_measured.json" || exit $?
+fi
 
 echo "starting fresh configure/solve host"
 "${HOST}" "${XCLBIN}" "${PROBLEM}" "${OUT}/fresh.fixed.bin" \

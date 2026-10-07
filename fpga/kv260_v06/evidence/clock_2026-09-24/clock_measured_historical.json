@@ -1,0 +1,16 @@
+{
+  "verdict": "HISTORICAL",
+  "kernel_hz_measured": 159999998,
+  "source": "manifest",
+  "reason": null,
+  "note": "historical dtbo, name may overstate the clock",
+  "app": "snn_qp_v06_200m_37f33fcfe2ca",
+  "measured_pl0_ref_hz": 199999998,
+  "historical": true,
+  "xclbin_sha256": "37f33fcfe2ca144390d53dd6352055de770fbebe527911aac050375184cdd801",
+  "xclbin_uuid": "a723dbee-8c3c-2c33-aa74-b9017692695f",
+  "ratio": 0.8,
+  "timestamp": "2026-09-24T16:08:17Z",
+  "tool_version": "1",
+  "tool_sha256": "a96d204112ef450893bd7dfa3f9bd0ea563c4c2334702b60b523246eff03981a"
+}

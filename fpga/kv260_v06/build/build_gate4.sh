@@ -6,11 +6,8 @@ source_dir="$(cd "${script_dir}/../src" && pwd)"
 v05_dir="$(cd "${script_dir}/../../kv260_v05/src" && pwd)"
 output_dir="${1:-${script_dir}/work/gate4/bin}"
 hls_include="${HLS_INCLUDE:-/tools/Xilinx/Vitis_HLS/2022.1/include}"
-if [[ ! -d "${hls_include}" && -d /home/ameer/RD/dev_projects/platforms/kria/hls_include/2022.1 ]]; then
-    hls_include=/home/ameer/RD/dev_projects/platforms/kria/hls_include/2022.1
-fi
 if [[ ! -d "${hls_include}" ]]; then
-    echo "HLS include directory not found: ${hls_include}" >&2
+    echo "HLS include directory not found: ${hls_include} (set HLS_INCLUDE to the Vitis HLS 2022.1 include dir)" >&2
     exit 2
 fi
 if [[ -f /tools/Xilinx/Vitis/2022.1/settings64.sh ]]; then

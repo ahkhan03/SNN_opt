@@ -1,0 +1,16 @@
+{
+  "schema": "kria-clock/1",
+  "historical": true,
+  "reason": "deployed dtbo sets pl0_ref 200 MHz under a 0.8 clk_wiz; kernel measured at 160 MHz on 2026-09-24; numbers measured on this app are 160 MHz numbers",
+  "firmware_name": "snn_qp_v06.bit.bin",
+  "xclbin_sha256": "37f33fcfe2ca144390d53dd6352055de770fbebe527911aac050375184cdd801",
+  "xclbin_uuid": "a723dbee-8c3c-2c33-aa74-b9017692695f",
+  "platform_spec_mhz": 249.997498,
+  "platform_nominal_hz": 250000000,
+  "wizard": true,
+  "requested_hz": 200000000,
+  "ratio": 0.8,
+  "ratio_source": "derived",
+  "required_pl0_ref_hz": 200000000,
+  "expected_kernel_hz": 160000000
+}

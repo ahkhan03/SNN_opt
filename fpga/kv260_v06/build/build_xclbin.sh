@@ -37,8 +37,15 @@ if [[ -f "${script_dir}/msrp_v06.bif" ]]; then
     (cd "${work_dir}" && bootgen -arch zynqmp -image "${script_dir}/msrp_v06.bif" \
         -o "${bitbin}" -w on)
 fi
+kria_clock="${KRIA_CLOCK:-kria-clock}"
+command -v "${kria_clock}" >/dev/null 2>&1 || { echo "kria-clock not found; set KRIA_CLOCK to the tool that derives the dtbo rate" >&2; exit 1; }
+if [[ -f "${bitbin}" ]]; then
+    "${kria_clock}" pack --xclbin "${xclbin}" --firmware-name snn_qp_v06.bit.bin --bitstream "${bitbin}"
+else
+    "${kria_clock}" pack --xclbin "${xclbin}" --firmware-name snn_qp_v06.bit.bin
+fi
 if [[ -x "${dtc_bin}" ]]; then
-    "${dtc_bin}" -@ -I dts -O dtb -o "${dtbo}" "${script_dir}/msrp_v06.dts"
+    "${dtc_bin}" -@ -I dts -O dtb -o "${dtbo}" "${work_dir}/snn_qp_v06.dts"
 fi
 printf '%s\n' '{"shell_type":"XRT_FLAT","num_slots":"1"}' > "${work_dir}/shell.json"
 sha256sum "${xo}" "${xclbin}" "${bitbin}" "${dtbo}" "${work_dir}/shell.json" 2>/dev/null || true

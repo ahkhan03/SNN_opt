@@ -6,6 +6,34 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Convex nonlinear and conic constraints in the same event loop** (opt-in,
+  `snn_opt.nonlinear`). `OptimizationProblem(..., nonlinear_candidates=...)`
+  accepts normalised supporting-halfspace cutters (`affine_cutter`,
+  `spectral_norm_cutter`, `spectral_ball_cutter`) and exact-projector sets:
+  Euclidean ball, second-order cone, scaled second-order cone
+  `||z|| <= mu t` (friction cones), PSD cone, spectral-norm ball and affine
+  subspaces. Intersections use the Dykstra inner projector
+  (`dykstra_projector`, `joint_projector`); `lift_soc_l1` / `lift_soc_l2`
+  build lifted second-order-cone problems. Problems without nonlinear
+  candidates run exactly as before.
+- **KKT certificate for the nonlinear path**: an exact extended certificate on
+  nonsmooth faces (cone apex, cutter row stacks, exact-projector gradient
+  map). For strongly convex problems whose nonlinear candidates all have an
+  exact projector, the certificate bounds the error in state units,
+  `||x - x*|| <= ||x - T(x)|| / (alpha mu)`.
+- **Native (C++) backend for the built-in conic sets** (`backend='c'`),
+  including single-level Dykstra and the spectral-norm ball, spectral cutter
+  and PSD cone up to 8x8 blocks, with Python-parity tests.
+- **KV260 v07 resident kernel** (`fpga/kv260_v07/`): native ball and
+  scaled-SOC resets on the resident datapath, board-qualified at 200 MHz with
+  raw state and telemetry equal to native emulation on cone and cones-off
+  fixtures. `build/run_cone_parity.sh` checks the bit-accurate model against
+  the native build and against binary64 and Clarabel references.
+- The KV260 kernel clock is now derived from the built `xclbin` and checked on
+  the board (v05/v06 build, device-tree and `env.yaml` records).
+
 ### Fixed
 
 - **Corrected the NeurIPS 2020 attribution** in `README.md`, `CITATION.cff`

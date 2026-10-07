@@ -1,0 +1,17 @@
+{
+  "schema": "kria-clock/1",
+  "historical": false,
+  "reason": null,
+  "firmware_name": "snn_qp_v07.bit.bin",
+  "xclbin_sha256": "93eebcad9f2fb183091c520bf14ed8dba463a45be3a02f84bc86f38a65fb6187",
+  "xclbin_uuid": "a7cf7c5f-be2d-a961-39c1-910491888978",
+  "platform_spec_mhz": 249.997498,
+  "platform_nominal_hz": 250000000,
+  "wizard": true,
+  "requested_hz": 200000000,
+  "ratio": 0.8,
+  "ratio_source": "derived",
+  "required_pl0_ref_hz": 250000000,
+  "expected_kernel_hz": 200000000,
+  "bitstream_sha256": "5759ed95f64e4f5e639108cfad88eda9ffbd3fdc052dd928b8e1566440944efc"
+}

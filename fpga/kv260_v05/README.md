@@ -85,3 +85,5 @@ Generated HLS, Vitis, bitstream, and deployment artifacts are ignored. A
 rebuild is validated by source and toolchain identity, timing and utilization
 reports, and fresh board parity. Byte equality with the paper xclbin is not
 required because implementation outputs can depend on path and tool state.
+
+`build/build_xclbin.sh` runs `kria-clock pack` after the link, so a rebuild generates the dtbo from the xclbin. The dts checked in here still programs the deployed 200 MHz rate: under the 0.8 clk_wiz that is a 160 MHz kernel, which `kria-clock annotate --historical` records without rebuilding. Every board run loads with `kria-clock load <app> --json-out <results>/clock_measured.json` and aborts if that check fails.

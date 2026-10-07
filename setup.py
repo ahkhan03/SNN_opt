@@ -92,7 +92,9 @@ else:
             ["src/snn_opt/_native/bindings.cpp"],
             # Track the header so editing the kernel triggers a rebuild
             # (setuptools only watches listed sources otherwise).
-            depends=["src/snn_opt/_native/snn_qp_core.hpp"],
+            depends=["src/snn_opt/_native/snn_qp_core.hpp",
+                     "src/snn_opt/_native/snn_qp_extended.hpp",
+                     "src/snn_opt/_native/snn_qp_sets.hpp"],
             cxx_std=17,
             extra_compile_args=compile_args,
             extra_link_args=link_args,

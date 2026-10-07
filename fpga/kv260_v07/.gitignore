@@ -1,0 +1,7 @@
+build/work/
+results_cache/
+*.bit
+*.bin
+*.dtbo
+*.xo
+*.xclbin

@@ -1,0 +1,16 @@
+{
+  "verdict": "FAIL",
+  "kernel_hz_measured": 159999998,
+  "source": "derived",
+  "reason": "dtbo 200000000 is not platform nominal 250000000 under a clk_wiz",
+  "note": null,
+  "app": "snn_qp_v06_200m_37f33fcfe2ca",
+  "measured_pl0_ref_hz": 199999998,
+  "historical": false,
+  "xclbin_sha256": "37f33fcfe2ca144390d53dd6352055de770fbebe527911aac050375184cdd801",
+  "xclbin_uuid": "a723dbee-8c3c-2c33-aa74-b9017692695f",
+  "ratio": 0.8,
+  "timestamp": "2026-09-24T15:22:27Z",
+  "tool_version": "1",
+  "tool_sha256": "5b948d8ed9b481f757b4947d11ea64593172c0e21324afdc3cda30ea8e775114"
+}

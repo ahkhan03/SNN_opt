@@ -1,0 +1,16 @@
+{
+  "verdict": "OK",
+  "kernel_hz_measured": 199999998,
+  "source": "manifest",
+  "reason": null,
+  "note": null,
+  "app": "snn_qp_v07_200m_93eebcad9f2f",
+  "measured_pl0_ref_hz": 249999998,
+  "historical": false,
+  "xclbin_sha256": "93eebcad9f2fb183091c520bf14ed8dba463a45be3a02f84bc86f38a65fb6187",
+  "xclbin_uuid": "a7cf7c5f-be2d-a961-39c1-910491888978",
+  "ratio": 0.8,
+  "timestamp": "2026-09-24T16:08:00Z",
+  "tool_version": "1",
+  "tool_sha256": "a96d204112ef450893bd7dfa3f9bd0ea563c4c2334702b60b523246eff03981a"
+}
