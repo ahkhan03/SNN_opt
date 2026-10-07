@@ -6,6 +6,8 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-08
+
 ### Added
 
 - **Convex nonlinear and conic constraints in the same event loop** (opt-in,
