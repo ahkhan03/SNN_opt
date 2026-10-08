@@ -17,6 +17,7 @@ python examples/example4_warm_start.py
 python examples/example5_infeasible_recovery.py
 python examples/example6_equality_constraint.py
 python examples/example7_svm_dual.py
+python examples/example8_friction_cone_grasp.py
 python examples/example_raw_mode.py
 
 # Run all examples in sequence
@@ -97,6 +98,14 @@ python example1_simple_2d.py
 - **Output**: Support vector analysis, training accuracy, convergence info
 - **Use Case**: Machine learning classification, demonstrating new solver features
 - **Key Insight**: Box bounds (0 ≤ alpha ≤ C) as facets of the same projection sweep + auto k0 make SVM solving robust and automatic
+
+### Example 8: Grasp Forces in Friction Cones (`example8_friction_cone_grasp.py`)
+**Problem**: Least-effort contact forces for a three-finger grasp of a ball: force and torque balance (6 equalities) plus one Coulomb friction cone `||f_t|| <= mu f_n` per finger
+- **Difficulty**: Advanced
+- **Features**: **Conic constraints** (`scaled_soc_projector`), **equality as a subspace projector** (`AffineSubspaceProjector`), **exact intersection** (`dykstra_projector`), state-unit certificate, optional Clarabel cross-check (needs `cvxpy`)
+- **Output**: Per-finger forces and friction utilisation, certificate, a comparison run without the Dykstra wrapper, `example8_friction_cone_grasp.png`
+- **Use Case**: Second-order-cone programs; robotics contact problems
+- **Key Insight**: Sets that are active together must be projected jointly. Wrapped in one Dykstra candidate the grasp certifies in 201 iterations at machine precision; handed over separately, the sweep alternates between them and stalls
 
 ### Raw vs. optimized modes (`example_raw_mode.py`)
 **Problem**: The same QP solved with hand-set raw parameters vs. the auto-configured defaults

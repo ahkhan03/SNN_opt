@@ -21,7 +21,11 @@ abstract: >
   programs of the form min (1/2) x^T A x + b^T x subject to C x + d <= 0, by
   alternating gradient descent steps with discrete boundary projections, the
   optimization equivalent of leaky integrate-and-fire dynamics with constraint
-  spikes. The framework follows Mancoo, Keemink and Machens (NeurIPS 2020).
+  spikes. Since v0.7.0 the feasible set may also include convex sets with an
+  exact projector (balls, second-order and friction cones, the PSD cone,
+  spectral-norm balls, affine subspaces and their intersections) and
+  differentiable convex inequalities. The framework follows Mancoo, Keemink
+  and Machens (NeurIPS 2020).
 keywords:
   - "spiking neural networks"
   - "convex optimization"
@@ -29,6 +33,7 @@ keywords:
   - "neuromorphic computing"
   - "constrained optimization"
   - "projected gradient"
+  - "second-order cone programming"
 license: Apache-2.0
 version: "0.7.1"
 date-released: "2026-10-08"
@@ -59,3 +64,18 @@ references:
     collection-title: "Advances in Neural Information Processing Systems"
     year: 2020
     notes: "Theoretical foundation: spiking dynamics as a primal-dual solver for convex programs."
+  - type: article
+    title: "An event-driven neurodynamic solver with adaptive projection for constrained quadratic programming"
+    authors:
+      - family-names: "Khan"
+        given-names: "Ameer Hamza"
+      - family-names: "Cao"
+        given-names: "Xinwei"
+      - family-names: "Li"
+        given-names: "Shuai"
+    journal: "Neurocomputing"
+    volume: 703
+    start: 134705
+    year: 2026
+    doi: "10.1016/j.neucom.2026.134705"
+    notes: "The adaptive-projection solver implemented in this software."

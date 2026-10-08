@@ -6,6 +6,41 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Documentation
+
+- **README rewritten around the dynamics.** It opens with an animation of a
+  real run (drift, spikes onto the walls, certification; frames drawn from
+  `result.X` and the recorded spike events) and adds a section on the v0.7
+  conic constraints with a second animation of a force sliding along its
+  friction cone. The v0.5/v0.6 migration narratives moved to
+  `docs/correctness.md`; the accuracy section gains the exact
+  `joint_projector` option, which removes the step-size offset of the
+  greedy row sweep.
+- `docs/api.md`: full reference for `snn_opt.nonlinear` (candidate kinds,
+  built-in sets, Dykstra intersections, SOC lifts, backend support, the
+  nonlinear certificate and its state-unit error bound, result fields).
+- `docs/theory.md`: new Section 8 on nonlinear and conic constraints
+  (cutters, exact projectors, why exact projection removes the step-size
+  offset, Dykstra's algorithm, certification).
+- New worked example `examples/example8_friction_cone_grasp.py`: the
+  least-effort three-finger grasp with friction cones, solved with one
+  Dykstra candidate and compared with separate candidates and Clarabel.
+- The Neurocomputing 2026 paper describing the adaptive-projection solver
+  is listed in `docs/applications.md`, the README and `CITATION.cff`.
+- New `benchmarks/05_exact_projection.py`: on the Figure 1 problem, one
+  `joint_projector` candidate removes the step-size floor of the greedy row
+  sweep (objective gap 6.7e-4 -> 2.1e-10).
+- Corrected the scope of the v0.7.0 state-unit certificate (stated too
+  broadly in the 0.7.0 notes): it applies to strongly convex problems whose
+  candidates carry an exact certificate projector (`DykstraProjector`, PSD
+  cone, spectral ball or cutter) on disjoint coordinates; bare balls and
+  cones use the gradient-unit fit. Also documented: `kkt_fit_status`
+  `"not_available"`, the candidate term of the projection watchdog, that a
+  capped Dykstra call aborts the solve unless
+  `continue_after_projection_budget`, the non-default check schedule behind
+  the warm-start figure, and the measured v0.5 KV260 kernel clock
+  (160 MHz).
+
 ## [0.7.1] - 2026-10-08
 
 ### Changed

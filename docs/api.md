@@ -13,6 +13,9 @@ from snn_opt import (
 )
 ```
 
+The opt-in nonlinear and conic constraint family (v0.7.0) is also exported
+from the top-level package; see [Nonlinear and conic constraints](#nonlinear-and-conic-constraints).
+
 ## `solve_qp(A, b, C, d, x0, ...) -> SolverResult`
 
 Convenience function that wraps `OptimizationProblem` + `SolverConfig` +
@@ -35,13 +38,18 @@ Convenience function that wraps `OptimizationProblem` + `SolverConfig` +
 | `enable_early_stopping` | `bool` | Convergence-based termination, default on. |
 | `record_trajectory` | `bool` | Keep the full iterate trajectory + spike events (default `True`). `False` runs the lean path; the compiled backends imply `False`. |
 | `backend` | `str` | `'python'` (default), `'c'` (auto), `'c_serial'`, or `'c_openmp'`. See [`SolverConfig`](#solverconfig). |
+| `nonlinear_candidates` | sequence | Optional cutters and exact-set projectors, see [Nonlinear and conic constraints](#nonlinear-and-conic-constraints). Default: none. |
 | `verbose` | `bool` | Print solver progress. |
 
 Returns: a [`SolverResult`](#solverresult).
 
 ## `OptimizationProblem`
 
-Dataclass holding `A, b, C, d`. Methods:
+Dataclass holding `A, b, C, d` and, optionally,
+`nonlinear_candidates` (a tuple of `CutterCandidate` / `ProjectorCandidate`
+objects; empty by default, in which case the problem runs exactly as before
+v0.7.0). Use `np.zeros((0, n))`, `np.zeros(0)` for `C`, `d` when every
+constraint is a candidate. Methods:
 
 - `objective(x)`: evaluate `½ xᵀAx + bᵀx`
 - `gradient(x)`: `Ax + b`
@@ -61,7 +69,7 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 | `t_end` | `100.0` | IVP mode horizon. |
 | `max_step` | `0.1` | IVP mode max ODE step. |
 | `constraint_tol` | `1e-6` | Tolerance for "constraint violated". |
-| `max_projection_iters` | `None` | Safety watchdog on the inner projection sweep; `None` auto-sizes it to `max(1000, 10 * (m + #box facets))`. Hitting it **aborts** the solve with `convergence_reason='projection_budget_exhausted'`; it is not routine truncation. |
+| `max_projection_iters` | `None` | Safety watchdog on the inner projection sweep; `None` auto-sizes it to `max(1000, 10 * (m + #box facets + #nonlinear candidates))`. Hitting it **aborts** the solve with `convergence_reason='projection_budget_exhausted'` (on the nonlinear path, unless `continue_after_projection_budget=True`); it is not routine truncation. |
 | `integration_method` | `'euler'` | `'euler'` or `'ivp'`. |
 | `max_iterations` | `2000` | Outer-iteration cap (Euler). |
 | `projection_method` | `'adaptive'` | `'adaptive'` or `'fixed'`. |
@@ -72,6 +80,7 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 | `transform` | `None` | Optional problem transform (the *transform axis*). `None` = canonical solve. A name (`'eigenbasis'`) or a `Transform` instance opts in; the problem is solved in transformed coordinates and mapped back. Composes with any backend; implies the lean result. See [Transforms](#transforms). |
 | `record_spike_history` | `True` | Keep per-spike arrays (`spike_times`, `spike_deltas`, ...). `False` drops them to bound memory on large projection budgets. |
 | `observe_projection_events` | `False` | Opt-in constant-memory observer of committed projection events; populates the observer fields below. Default off preserves v0.5 numerical and allocation behavior. |
+| `continue_after_projection_budget` | `False` | Nonlinear path only, experiment mode: a capped extended sweep returns its truncated point and the outer loop continues instead of aborting. The polyhedral path ignores it. |
 | `convergence` | `ConvergenceConfig()` | See below. |
 
 ## `ConvergenceConfig`
@@ -189,7 +198,7 @@ checkpoints.
 | `kkt_complementarity_residual` | `|s|ᵀμ / max(1, ‖x‖)` component (gradient units). |
 | `kkt_scale` | `max(‖A x‖, ‖b‖, ‖Nᵀμ‖)`, the relative-tolerance reference. |
 | `kkt_tolerance` | `kkt_abs_tol + kkt_rel_tol * kkt_scale` in force at the final point. |
-| `kkt_fit_status` | `"ok"`, `"non_finite"`, `"fit_failed"`, or `"too_large"` (dense facet family beyond the certificate's memory guard). Anything but `"ok"` fails the gate closed. |
+| `kkt_fit_status` | `"ok"`, `"non_finite"`, `"fit_failed"`, `"too_large"` (dense facet family beyond the certificate's memory guard), or `"not_available"` (a nonlinear candidate supplies no certificate data). Anything but `"ok"` fails the gate closed. |
 
 Interpretation caveat: a small KKT residual does not bound the solution error
 without a conditioning constant; on a nearly singular Hessian a large
@@ -204,7 +213,7 @@ checks.
 
 | Field | Meaning |
 |---|---|
-| `joint_feasible` | Feasibility of the rows of `C` **and** the bounds together. Before v0.5.0 the convergence gate was rows-only, so a bound violation could not fail it. This is the flag to check. |
+| `joint_feasible` | Feasibility of the rows of `C`, the bounds, and (since v0.7.0) any nonlinear candidates, together, within `feasibility_tol`. Before v0.5.0 the convergence gate was rows-only, so a bound violation could not fail it. This is the flag to check. |
 | `stationarity_residual` | LEGACY (pre-v0.6) eps-KKT diagnostic: the maximum of NNLS stationarity, complementarity, and primal defects on an eps-active set. Its three terms carry different units and its value can depend on constraint row order at rank-deficient active sets; retained for one compatibility release. Prefer `kkt_residual`. |
 | `final_proj_grad_norm` | LEGACY heuristic: per-facet independent gradient projection. Structurally nonzero at constrained optima with correlated active normals; not an optimality measure. |
 | `projection_budget_exhausted` | The inner sweep hit its `max_projection_iters` watchdog. The solve **aborts** with `convergence_reason='projection_budget_exhausted'` rather than reporting success from a knowingly infeasible point. |
@@ -217,6 +226,194 @@ frozen order: rows in input order, then lower facets `0..n-1`, then upper facets
 
 See the README's [Accuracy and tuning](../README.md#accuracy-and-tuning) section
 for how to interpret the residual and tune `k0_scale` with the iteration budget.
+
+## Nonlinear and conic constraints
+
+*New in v0.7.0. Opt-in: a problem without `nonlinear_candidates` runs
+exactly the v0.6 polyhedral solver.*
+
+`snn_opt.nonlinear` extends the projection sweep beyond halfspaces. A
+**candidate** is one more constraint that competes in the same
+winner-take-all sweep as the rows of `C` and the box facets: at every event
+of the sweep the most-violated candidate fires one spike, the spike applies that
+candidate's own correction, and the sweep repeats until every constraint
+holds. Two kinds exist.
+
+| Kind | Describes | Correction applied by a spike |
+|---|---|---|
+| `CutterCandidate` | a differentiable convex inequality `g(x) <= 0` | a step to the supporting halfspace at the current point, `x <- x - g(x) / ‖∇g(x)‖² · ∇g(x)` (exact for affine `g`) |
+| `ProjectorCandidate` | a closed convex set `K` with a known Euclidean projector | an exact reset `x <- P_K(x)` |
+
+The winner is chosen by **distance**, so all candidates and rows are
+comparable: rows score `(c_j x + d_j) / ‖c_j‖`, box facets their violation,
+cutters `max(g, 0) / ‖∇g‖`, and projectors `‖P_K(x) - x‖`. Ties keep the
+frozen order: rows, lower facets, upper facets, then candidates in input
+order.
+
+```python
+import numpy as np
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, scaled_soc_projector
+
+# A contact force f = (f_t1, f_t2, f_n) kept in the friction cone ||f_t|| <= 0.5 f_n.
+cone = scaled_soc_projector(t_index=2, z_indices=[0, 1], mu=0.5, name="friction cone")
+p = np.array([1.53, -0.39, 1.29])             # desired force, outside the cone
+problem = OptimizationProblem(np.eye(3), -p, np.zeros((0, 3)), np.zeros(0),
+                              nonlinear_candidates=(cone,))
+result = SNNSolver(problem, SolverConfig()).solve(np.array([0.0, 0.0, 1.0]))
+```
+
+### Coordinates
+
+Every callback receives and returns the **full** state vector. A candidate
+may declare `coordinates` (a tuple of state indices); it then acts on those
+entries only, may return just the local block, and the solver checks that
+nothing outside the declaration moved. Built-in factories set this for you.
+
+### Built-in sets
+
+| Factory | Set | Notes |
+|---|---|---|
+| `halfspace_projector(c, d=0.0, coordinates=None)` | `c x + d <= 0` | Exact projector; the set-valued twin of a row. |
+| `affine_cutter(c, d=0.0, coordinates=None)` | `c x + d <= 0` | Cutter with the same residual and normalisation as a row (identity fixture). |
+| `ball_projector(indices, radius, center=None)` | `‖x_I - center‖ <= radius` | Radial projector on the coordinates `I`. |
+| `soc_projector(t_index, z_indices)` | `‖z‖ <= t` | Second-order (Lorentz) cone; exact closed form including the apex. |
+| `scaled_soc_projector(t_index, z_indices, mu)` | `‖z‖ <= mu · t` | Friction cones; `mu > 0`. |
+| `psd_cone_projector(shape, coordinates=None)` (alias `psd_projector`) | symmetric `X ⪰ 0` | State holds `svec(X)`: upper triangle row by row, off-diagonals times `√2`, so Euclidean distance equals Frobenius distance. Projection clips negative eigenvalues. |
+| `spectral_ball_projector(shape, radius=1.0, coordinates=None)` | `‖X‖₂ <= radius` | State holds `X` row-major (`shape` = `(rows, cols)` or an int for square). Exact SVD clip. |
+| `spectral_norm_cutter(shape, radius=1.0, coordinates=None)` (alias `spectral_ball_cutter`) | `‖X‖₂ <= radius` | Cutter on the leading singular pair; carries the exact projector for the certificate, including tied singular values. |
+| `AffineSubspaceProjector(B, h)` | `B x = h` | Equality projector. If the state is `(x, q)` with `len(q) = len(h)`, it instead projects onto the graph `q = B x + h`. Used by the SOC lifts. |
+
+Custom sets use the base classes directly:
+`CutterCandidate(value, jacobian, name=..., normal=None, coordinates=None)` and
+`ProjectorCandidate(project, name=..., coordinates=None, normal=None)`.
+`normal(x)` is optional certificate metadata (an outward unit normal, or
+`None` away from the boundary). A custom projector with neither `normal` nor
+`kkt_data={"euclidean_project": project}` still runs, but its certificate
+reports `kkt_fit_status="not_available"` and fails closed, so the solve never
+reports `converged=True` under the default test. Supplying
+`euclidean_project` (the exact Euclidean projector, usually the same callable)
+also makes the candidate eligible for the state-unit certificate below.
+
+### Intersections: `dykstra_projector`
+
+Projecting onto `K_1 ∩ ... ∩ K_r` one set at a time does **not** give the
+projection onto the intersection, and when several sets are active at the
+optimum, separate candidates make the sweep alternate between them. Wrap
+interacting sets in one Dykstra candidate instead:
+
+```python
+from snn_opt import AffineSubspaceProjector, dykstra_projector
+
+grasp_set = dykstra_projector([AffineSubspaceProjector(G, -w), *cones], name="grasp set")
+problem = OptimizationProblem(np.eye(9), np.zeros(9), np.zeros((0, 9)), np.zeros(0),
+                              nonlinear_candidates=(grasp_set,))
+```
+
+`dykstra_projector(members, tolerance=1e-12, max_iterations=10000,
+coordinates=None, name="dykstra")` returns a `DykstraProjector`, which runs
+Dykstra's algorithm from zero corrections on every call (results never
+depend on earlier calls). Members are `ProjectorCandidate`s or plain
+callables. `joint_dykstra_projector(C, d, members=(), ...)` (short alias
+`joint_projector`) adds one exact halfspace member per row of `C x + d <= 0`,
+so rows and cones are projected jointly. The inner loop stops when the
+member and cycle residuals fall below `tolerance * max(1, ‖state‖)`. If it
+hits `max_iterations` first, the projector returns its last iterate and
+records `cap_hit`; the solver then aborts with
+`convergence_reason='projection_budget_exhausted'` unless
+`SolverConfig(continue_after_projection_budget=True)`.
+[`examples/example8_friction_cone_grasp.py`](../examples/example8_friction_cone_grasp.py)
+runs the same grasp both ways: wrapped, it certifies in 201 iterations,
+within 4e-13 of a Newton-polished reference; as separate candidates, it
+stops at the iteration cap with a relative KKT defect of 5e-2.
+
+### Second-order-cone lifts
+
+`lift_soc_l1(A, b, K, c, e, f)` and `lift_soc_l2(A, b, K, c, e, f)` turn the
+QP `min ½xᵀAx + bᵀx` subject to `‖K x + c‖ <= eᵀx + f` into a lifted problem
+over `(x, z[, t])`, where `z = K x + c` and, when `‖e‖ > 1e-14`, `t = eᵀx + f`
+(a smaller `e` is treated as zero).
+
+* `lift_soc_l1` keeps the coupling as a pair of opposed rows in `C` and adds
+  the cone (or, when `e` is zero, the ball `‖z‖ <= f`) as a projector.
+* `lift_soc_l2` replaces the coupling rows by one `AffineSubspaceProjector`
+  on the graph.
+
+Both return a `LiftedSOCResult(problem, coordinates, cone)`: the lifted
+`OptimizationProblem`, a dict of index arrays (`"x"`, `"z"`, `"t"`,
+`"dimension"`, `"t_variable"`), and the cone candidate. Recover the original
+variables with `result.final_x[coordinates["x"]]`.
+
+### Backends and restrictions
+
+The nonlinear path runs on the Euler integrator with adaptive projection.
+
+| | `backend='python'` | `backend='c'` (and `'c_serial'`, `'c_openmp'`) |
+|---|---|---|
+| Custom callbacks (`CutterCandidate`, `ProjectorCandidate`) | yes | no: rejected at construction with the candidate index |
+| Built-in sets (halfspace, ball, SOC, scaled SOC, affine subspace) | yes | yes |
+| PSD cone, spectral ball, spectral cutter | any size | blocks up to 8×8; the spectral cutter at top level only |
+| `DykstraProjector` | yes, including nested | one level (members must be built-ins) |
+| `record_trajectory=False` (lean result) | not supported | yes |
+| `transform=...`, `integration_method='ivp'`, `projection_method='fixed'` | not supported | not supported |
+
+Unsupported combinations raise `ValueError` naming the offending setting.
+The compiled path is checked against the Python path by the parity tests in
+`tests/test_c_backend_conic_parity.py` and
+`tests/test_c_backend_spectral_psd_parity.py`.
+
+### Certificate on the nonlinear path
+
+`converged` still means the certificate passed, together with feasibility
+and the plateau rule, at `patience` consecutive checkpoints. Which
+certificate runs depends on the candidates.
+
+**Gradient units (the default).** The NNLS fit of the polyhedral path is
+extended by adding each candidate's normal cone to the facet normals: the
+unit normal of a cutter or of a smooth boundary point, and the full polar
+cone at nonsmooth points such as a cone apex or tied singular values. All
+fields keep the meaning given under [KKT certificate fields](#kkt-certificate-fields-v060),
+and the decision is invariant to objective scaling. Balls, second-order and
+friction cones, halfspaces and affine subspaces passed as bare candidates
+are certified this way.
+
+**State units.** The certificate instead bounds the error in the state
+when all of the following hold: the objective is strongly convex (modulus
+`μ` above a roundoff floor); every candidate carries an exact certificate
+projector, `kkt_data["euclidean_project"]`, and the candidates act on
+disjoint coordinates; and every row and bound is slack by more than the
+resulting residual. The built-ins that carry one are `DykstraProjector`
+(so any set wrapped in `dykstra_projector`), `psd_cone_projector`,
+`spectral_ball_projector` and `spectral_norm_cutter`. With
+`T(x) = P(x - α∇f(x))` and `0 < α <= 1/L`, `T` is a contraction with factor
+at most `1 - αμ`, so
+
+```
+‖x - x*‖ <= ‖x - T(x)‖ / (α μ).
+```
+
+On this path `kkt_stationarity_residual = ‖z - T(z)‖ / (αμ)`,
+`kkt_complementarity_residual = ‖x - z‖` (the displacement to a Dykstra
+witness `z`; zero for a direct projector), `kkt_residual` is their **sum**
+(the bound), `kkt_scale = max(1, ‖x‖)` and does not follow the objective,
+and `kkt_multipliers` is empty. A Dykstra bound does not include the inner
+projection error, so with the default `tolerance = 1e-12` the true error
+can exceed a reported bound that is smaller than that; a tolerance coarser
+than about one percent of the state acceptance window is refused
+(`kkt_fit_status="fit_failed"`) rather than trusted. Non-strongly-convex
+objectives, and problems with active or nearly active rows or bounds, use
+the gradient-unit fit.
+
+### Result fields for candidates
+
+| Field | Meaning |
+|---|---|
+| `spike_event_kinds`, `spike_event_indices` | Per spike: kind (`"row"`, `"lo"`, `"hi"`, `"cutter"`, `"set"`) and index within that kind. Prefer these to `spike_constraints` for candidates. |
+| `spike_constraints` | Canonical IDs: rows `j`, lower facets `m + i`, upper facets `m + n + i`, candidate `q` at `m + 2n + q` (bound slots stay reserved even without bounds). |
+| `nonlinear_event_counts` | Event counts by kind and by candidate name; Dykstra members appear as `dykstra:<q>:<member name>`. |
+| `max_violation_nonlinear` | Largest normalised candidate violation at the final point. |
+| `dykstra_inner_iterations`, `dykstra_inner_projection_events`, `dykstra_inner_converged` | Per projection sweep: Dykstra cycles, member projections, and whether the inner loop met its tolerance. |
+| `dykstra_inner_cap_hits` | Number of inner calls that hit `max_iterations`. |
+| `kkt_multipliers` | Nonnegative certificate coefficients, candidate normals included (gradient-unit path); empty on the state-unit path. |
 
 ## Transforms
 

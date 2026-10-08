@@ -725,17 +725,150 @@ The adaptive projection $\lambda_j = g_j / \Vert\mathbf{c}_j\Vert^2$ is analogou
 
 ---
 
-## 8. Conclusions and Future Directions
+## 8. Beyond Polytopes: Nonlinear and Conic Constraints
 
-### 8.1 Summary
+Sections 2 to 7 treat a feasible set cut out by halfspaces. Nothing in the
+drift-and-spike picture needs that: the drift is gradient descent on $f$,
+and a spike is any correction that returns the state to the feasible set.
+From v0.7.0 the solver accepts a feasible set
+
+```math
+\mathcal{F} = \{x : Cx + d \le 0\} \;\cap\; K_1 \cap \dots \cap K_r,
+```
+
+where each $K_q$ is a closed convex set supplied as a *candidate*. In the
+neural picture each candidate is one more population of constraint neurons
+competing in the same winner-take-all sweep; what changes is the correction
+its spike applies.
+
+### 8.1 Two kinds of spike
+
+**Cutters.** For a differentiable convex inequality $g(x) \le 0$, a spike
+steps to the supporting halfspace at the current point,
+
+```math
+x \leftarrow x - \frac{g(x)}{\|\nabla g(x)\|^2}\,\nabla g(x),
+```
+
+which is exactly the row spike of Section 2.3 when $g$ is affine. Convexity
+means the linearisation never cuts away feasible points, so repeated cuts
+approach $\lbrace g \le 0 \rbrace$ from outside.
+
+**Exact projectors.** When the Euclidean projector $P_K$ has a closed form,
+a spike is the reset $x \leftarrow P_K(x)$. The built-in sets are:
+
+* **Ball** $\lbrace \Vert x_I - c\Vert \le r \rbrace$: radial scaling onto the sphere, $x_I \leftarrow c + r\,(x_I - c)/\Vert x_I - c\Vert$, when $\Vert x_I - c\Vert > r$; the identity otherwise.
+* **Second-order cone** $\lbrace (t, z) : \Vert z\Vert \le \mu t \rbrace$ (friction cones; $\mu = 1$ is the Lorentz cone).
+  A point outside both the cone and its polar maps to
+
+  ```math
+  t' = \frac{t + \mu\|z\|}{1 + \mu^2}, \qquad z' = \mu t'\,\frac{z}{\|z\|},
+  ```
+
+  and a point in the polar cone ($t + \mu\Vert z\Vert \le 0$) maps to the apex.
+* **PSD cone** $\lbrace X \succeq 0 \rbrace$: eigendecompose and clip negative eigenvalues. The state holds
+  $\operatorname{svec}(X)$ (off-diagonals scaled by $\sqrt{2}$), so state distance equals Frobenius distance.
+* **Spectral-norm ball** $\lbrace \Vert X\Vert_2 \le r \rbrace$: SVD and clip singular values at $r$.
+* **Affine subspace** $\lbrace Bx = h \rbrace$: $x \leftarrow x - B^\top (BB^\top)^{-1}(Bx - h)$.
+
+Winners are chosen by distance: a row scores $(c_j^\top x + d_j)/\Vert c_j\Vert$,
+a cutter $\max(g,0)/\Vert \nabla g\Vert$, a projector $\Vert P_K(x) - x\Vert$, so every
+candidate competes on the same geometric scale.
+
+### 8.2 Why exact projection removes the step-size offset
+
+For convex $f$ and closed convex $\mathcal{F}$, $x^\star$ is optimal if and
+only if it is a fixed point of the projected-gradient map
+
+```math
+T(x) = P_{\mathcal{F}}\big(x - \alpha \nabla f(x)\big) \quad\text{for any } \alpha > 0 .
+```
+
+So if one Euler step followed by the projection sweep implements $T$ with
+the **exact** projection onto $\mathcal{F}$, the fixed point is exactly
+$x^\star$, whatever $k_0$ is. The greedy sweep of Section 2.3 is exact when
+one constraint is active, but at a point where several are active it lands
+on a feasible point that is generally not $P_{\mathcal{F}}$ of the input.
+That is where the $O(k_0)$ offset reported in the README's *Accuracy and tuning* section comes from.
+On the README's Figure 1 problem (50 variables, 30 rows, seven active at the
+optimum) the greedy sweep's objective gap sits at $6.7\times10^{-4}$ and does
+not move between 4k and 40k iterations. Passing the same rows as one exact
+joint projector (Section 8.3) removes the floor: with the default
+certificate the run stops at iteration 5051 with a gap of $2.1\times10^{-10}$,
+and with `kkt_rel_tol=1e-9` it reaches $3.8\times10^{-10}$ from $x^\star$ at
+iteration 9901. The price is an inner Dykstra loop per Euler step
+(`benchmarks/05_exact_projection.py` reproduces these numbers).
+
+### 8.3 Intersections: Dykstra's algorithm
+
+Projecting onto each set in turn finds *a* point of $K_1 \cap K_2$
+(alternating projections: von Neumann for subspaces, Bregman for general
+convex sets), but not the *nearest* one. Dykstra's
+algorithm (Boyle and Dykstra, 1986, reference 8) does, by carrying one correction
+$p_i$ per set:
+
+```math
+\begin{aligned}
+& y \leftarrow x, \quad p_i \leftarrow 0 \quad (i = 1,\dots,r) \\
+& \text{repeat: for } i = 1,\dots,r: \quad z \leftarrow P_{K_i}(y + p_i),\;\; p_i \leftarrow y + p_i - z,\;\; y \leftarrow z,
+\end{aligned}
+```
+
+and $y \to P_{K_1 \cap \dots \cap K_r}(x)$. `dykstra_projector` packages this
+loop as one projector candidate, restarted from $p_i = 0$ on every call. Use
+it whenever several sets can be active together. Left as separate
+candidates, the winner-take-all sweep alternates between them and, with the
+drift in between, can stall away from the optimum: on the friction-cone
+grasp of `examples/example8_friction_cone_grasp.py` the separate form stops
+at its iteration cap with a relative KKT defect of $5\times10^{-2}$, while
+the Dykstra form certifies in 201 iterations, within $4\times10^{-13}$ of a
+Newton-polished reference.
+
+### 8.4 Certification
+
+The KKT certificate of Section 7.7 extends by adding the normal cone of each
+candidate to the facet normals: the unit normal for a cutter or a smooth
+boundary point, and the full polar cone at nonsmooth points (a cone apex,
+tied singular values). That fit stays in gradient units.
+
+When $f$ is $\mu$-strongly convex, every candidate carries an exact
+certificate projector (any Dykstra wrapper, the PSD cone, the spectral ball
+or cutter) on disjoint coordinates, and rows and bounds are strictly slack,
+the certificate uses state units instead. For $0 < \alpha \le 1/L$, $T$ is a
+contraction with factor at most $1 - \alpha\mu$, so
+
+```math
+\|x - x^\star\| \;\le\; \frac{\|x - T(x)\|}{\alpha\,\mu},
+```
+
+which bounds the error directly. A bare ball or second-order cone keeps the
+gradient-unit fit; wrapping it in `dykstra_projector` qualifies it. A
+Dykstra projector is trusted to its inner tolerance (default $10^{-12}$,
+relative to $\max(1, \Vert x\Vert)$); the bound does not account for that
+error.
+
+### 8.5 The neural reading
+
+Nothing in the event structure changes. A cone or ball candidate is a
+population whose spike resets the state onto a curved wall instead of a
+flat one, and the raster still shows which constraints are recruited and
+released as the network searches for the active set. Inside a Dykstra
+candidate each member projection is recorded as its own event, so the
+raster of a jointly projected constraint family stays readable.
+
+---
+
+## 9. Conclusions and Future Directions
+
+### 9.1 Summary
 
 We have developed a computationally efficient algorithm for real-time constrained optimization inspired by spiking neural network dynamics. The method alternates between gradient descent on a quadratic or linear objective and discrete projections to enforce inequality constraints. The simplicity of the computational primitives makes the algorithm suitable for embedded implementation, achieving sub-millisecond solve times for moderate-sized problems.
 
 The receding horizon control framework enables application to dynamic systems, with warm starting from previous solutions providing rapid convergence. We demonstrated the approach on robotic manipulator velocity control, where the method computes optimal joint velocities satisfying end-effector constraints at kilohertz rates.
 
-### 8.2 Advantages
+### 9.2 Advantages
 
-**Computational simplicity:** Only matrix-vector operations, no matrix factorizations or complex data structures
+**Computational simplicity:** The polyhedral sweep needs only matrix-vector products, comparisons and rank-one row updates; the conic sets of Section 8 add an eigendecomposition (PSD), an SVD (spectral ball) or a small factorisation (affine subspaces)
 
 **Real-time suitability:** Predictable computational cost, easily implemented on embedded processors
 
@@ -743,23 +876,23 @@ The receding horizon control framework enables application to dynamic systems, w
 
 **Interpretability:** Direct connection to physical/neural dynamics aids understanding and debugging
 
-### 8.3 Limitations
+### 9.3 Limitations
 
 **Approximate solutions:** The method finds solutions within a neighborhood of the optimum, with error depending on discretization parameters
 
 **Parameter tuning:** Step sizes require empirical tuning for each problem class
 
-**Convexity requirement:** The convergence analysis assumes convex objectives and constraint sets
+**Convexity requirement:** The convergence analysis assumes convex objectives and convex constraint sets (polyhedral, or conic and other convex sets as in Section 8)
 
 **Velocity-level control limitations:** For the manipulator application, operating in velocity space leads to position drift over long horizons
 
-### 8.4 Future Research Directions
+### 9.4 Future Research Directions
 
 Several extensions merit investigation:
 
 **Per-iteration adaptive $k_0$:** The current implementation computes $k_0$ once from the Hessian eigenvalue. Per-iteration methods like Barzilai-Borwein could further accelerate convergence.
 
-**Equality constraints:** The current approach converts equality constraints to pairs of inequalities. Direct projection onto equality constraint manifolds may improve efficiency for problems with many equalities.
+**Equality constraints:** Equalities can be written as pairs of inequalities, or (since v0.7.0) projected directly with an affine-subspace projector; see Section 8.
 
 **Nonconvex extensions:** Exploring whether the projection-based approach extends to nonconvex problems, possibly guaranteeing local optimality.
 
@@ -890,3 +1023,5 @@ title('Optimization Trajectory');
 6. Eliasmith, C., & Anderson, C. H. (2004). *Neural engineering: Computation, representation, and dynamics in neurobiological systems*. MIT Press.
 
 7. Lynch, K. M., & Park, F. C. (2017). *Modern robotics: Mechanics, planning, and control*. Cambridge University Press.
+
+8. Boyle, J. P., & Dykstra, R. L. (1986). A method for finding projections onto the intersection of convex sets in Hilbert spaces. In *Advances in Order Restricted Statistical Inference*, Lecture Notes in Statistics 37, 28-47. Springer.

@@ -30,6 +30,7 @@ EXAMPLES = [
     ("example5_infeasible_recovery.py", "Infeasible initialization recovery"),
     ("example6_equality_constraint.py", "Equality constraint handling"),
     ("example7_svm_dual.py", "SVM dual (auto k0, bounds as implicit facets)"),
+    ("example8_friction_cone_grasp.py", "Grasp forces in friction cones (conic, Dykstra)"),
     ("example_raw_mode.py", "Raw vs optimized mode (README figure)"),
 ]
 

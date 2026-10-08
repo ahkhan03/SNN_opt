@@ -8,6 +8,13 @@ print.
 
 ## Published
 
+- **Khan, Cao & Li (2026)**, *An Event-Driven Neurodynamic Solver with
+  Adaptive Projection for Constrained Quadratic Programming.*
+  **Neurocomputing**, 703:134705.
+  [doi:10.1016/j.neucom.2026.134705](https://doi.org/10.1016/j.neucom.2026.134705).
+  The adaptive-projection solver implemented in this repository: event-driven
+  dynamics in which a spike is an exact step onto the violated constraint.
+
 - **Khan, Mohammed & Li (2025)**, *Portfolio Optimization: A Neurodynamic
   Approach Based on Spiking Neural Networks.* **Biomimetics**, 10(12):808.
   [doi:10.3390/biomimetics10120808](https://doi.org/10.3390/biomimetics10120808).
@@ -35,7 +42,8 @@ publication.
 The recommended pattern for a new application is to write a small
 *formulation module* that exposes a single `build_problem(...)` function
 returning `(A, b, C, d, x0)`, plus any post-processing needed to map the
-solver output back to the original problem variables. The downstream
+solver output back to the original problem variables (for conic
+constraints, also return the `nonlinear_candidates`). The downstream
 solve is then:
 
 ```python

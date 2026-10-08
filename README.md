@@ -2,50 +2,104 @@
 
 **A spiking neural network solver for constrained convex optimization.**
 
+[![PyPI](https://img.shields.io/pypi/v/snn-opt.svg?label=PyPI)](https://pypi.org/project/snn-opt/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Version](https://img.shields.io/badge/version-0.7.1-informational.svg)](CHANGELOG.md)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
 [![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
----
+![A real snn_opt trajectory on a quadratic bowl fenced by four walls](docs/media/descent_landscape.gif)
+
+*A real run, not an illustration. The bowl is the objective of a 2-D
+quadratic program; the coloured walls are its four linear constraints. Each
+Euler step drifts down the gradient (the marker has no momentum: this is a
+first-order flow drawn on the surface). When a step crosses a wall, the
+state is reset onto it, and that reset is a **spike** (right, top). The
+network *searches*: wall 4 fires for three steps and falls silent, then wall
+1 is recruited and fires on every step until the optimum. The run certifies at iteration 201, 2e-16 from an optimum computed independently
+(right, bottom). Default settings, `snn_opt` 0.7.1. Interactive 3-D version:
+[snn.ahkhan.me](https://snn.ahkhan.me).*
 
 ## Abstract
 
-`snn_opt` is a Python implementation of the **spiking neural network (SNN) → convex optimization** equivalence, developed as part of an ongoing research program on neuromorphic computation for classical machine-learning problems. It solves quadratic and linear programs of the form
+`snn_opt` implements the **spiking neural network (SNN) → convex optimization**
+equivalence as a practical solver. It minimises a convex quadratic
 
 ```math
 \min_{x \in \mathbb{R}^n}\ \tfrac{1}{2}\, x^\top A x + b^\top x
-\quad\text{subject to}\quad C x + d \le 0,
+\quad\text{subject to}\quad C x + d \le 0,\quad x \in K_1 \cap \dots \cap K_r,
 ```
 
-by alternating gradient descent, which plays the role of leaky-integrate membrane drift, with discrete projection events that clamp the trajectory to the constraint boundary, the optimization analogue of an integrate-and-fire **spike**. The construction follows Mancoo, Keemink and Machens ([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html)) and is the canonical solver underlying the **SNN-X** research program, a series of classical machine-learning problems recast as constrained convex programs and solved by these dynamics (see [Applications](#applications)).
+by alternating gradient descent, the leaky-integrate *drift* of a membrane
+potential, with discrete projection events that reset the state onto the
+constraint it crossed, the optimization analogue of an integrate-and-fire
+**spike**. The $K_q$ are optional convex sets added in v0.7.0: balls,
+second-order and friction cones, the PSD cone, spectral-norm balls, affine
+subspaces, intersections of these, and user-supplied differentiable convex
+inequalities. The construction follows Mancoo, Keemink and Machens
+([NeurIPS 2020](https://papers.nips.cc/paper/2020/hash/64714a86909d401f8feb83e8c2d94b23-Abstract.html));
+the solver itself is described in Khan, Cao and Li,
+[*Neurocomputing* 2026](https://doi.org/10.1016/j.neucom.2026.134705), and
+underlies the **SNN-X** research program, classical machine-learning and
+control problems recast as constrained convex programs and solved by these
+dynamics (see [Applications](#applications)).
 
-This repository is intended both as a **research artifact**, since every published SNN-X paper can be reproduced from the code here, and as a **teaching resource** for students entering the area: it ships with annotated examples, a self-contained mathematical writeup, and a benchmark suite that visualizes convergence, projection dynamics, and the solver's accuracy limits.
+The repository is both a **research artifact**, since published SNN-X results
+reproduce from the code here, and a **teaching resource**: annotated
+examples, a self-contained mathematical writeup, and benchmarks that show
+convergence, projection dynamics and the solver's accuracy limits against
+exact references.
 
-## The problem
+## The idea in three moves
 
-Given a positive semi-definite Hessian $A \in \mathbb{R}^{n\times n}$, a linear cost $b \in \mathbb{R}^n$, and $m$ linear inequality constraints stacked into $C \in \mathbb{R}^{m \times n}$ and $d \in \mathbb{R}^m$, we seek
+1. **Drift.** Between spikes the state follows the negative gradient,
+   $x \leftarrow x - k_0 \nabla f(x)$, with $\nabla f(x) = Ax + b$. This is
+   a population of leaky integrators driven by the objective.
+2. **Spike.** When a step leaves the feasible set, the most-violated
+   constraint fires and applies a minimal correction back onto its boundary:
+   a step along $c_j$ for a row, an exact projection for a cone or ball.
+   Firings repeat within the step until every constraint holds.
+3. **Settle.** At the optimum the drift into the active walls is exactly
+   balanced by their spikes. Which constraints keep firing *is* the active
+   set, and their firing balances the gradient as the KKT multipliers do,
+   so the spike raster doubles as a readout of the solution's structure.
 
-```math
-x^\star \;=\; \arg\min_{x}\ \tfrac{1}{2}\, x^\top A x + b^\top x \quad\text{s.t.}\quad c_i^\top x + d_i \le 0,\ i = 1,\dots,m.
+In continuous time this is $\dot x = -\nabla f(x) - C^\top s(t)$ with a
+corrective spike train $s(t)$; discretised with forward Euler and an
+adaptive projection that reaches the boundary exactly, it is a projected
+gradient method whose diagnostics are a neural raster.
+[`docs/theory.md`](docs/theory.md) derives it from LIF dynamics, including
+the eigenvalue-based step size that removes `k0` as a hyperparameter.
+
+## Quick start
+
+```bash
+pip install snn-opt            # prebuilt wheels: Linux, macOS, Windows; CPython 3.9-3.14
 ```
 
-The class subsumes box-constrained QPs (set $C = [I; -I]$), linear programs ($A = 0$), kernel-ridge subproblems, support-vector machine duals, projected-gradient flows on polytopes, and the bulk of the inner solves that arise in receding-horizon control.
+```python
+import numpy as np
+from snn_opt import solve_qp
 
-## The spiking idea, in one picture
+# Minimise ||x||^2 subject to  x_1 + 2 x_2 >= 1, written as -x_1 - 2 x_2 + 1 <= 0.
+A  = np.eye(2)
+b  = np.zeros(2)
+C  = np.array([[-1.0, -2.0]])
+d  = np.array([1.0])
+x0 = np.array([1.0, 1.0])
 
-The continuous-time dynamics
+result = solve_qp(A, b, C, d, x0)
 
-```math
-\dot x \;=\; -\nabla f(x) \;-\; C^\top s(t)
+print(result.summary())             # converged?  iterations?  spikes?  certificate?
+print("x* =", result.final_x)       # [0.2, 0.4]
 ```
 
-models a population of $n$ leaky integrators driven by the gradient $\nabla f(x) = Ax + b$, with a corrective spike train $s(t)$ that fires whenever an inequality $c_i^\top x + d_i$ would otherwise become positive. Each spike applies a *minimal* projection that re-enters the feasible set; spike inter-arrival times encode constraint *traffic*. Discretized with forward Euler and an adaptive step that reaches the boundary exactly, this becomes a fast projected-gradient solver with diagnostics that double as a neural raster plot.
+For repeated solves (warm-started receding-horizon problems), construct an
+`SNNSolver` once and call `.solve(x0)` per instance; see
+[`examples/example4_warm_start.py`](examples/example4_warm_start.py).
 
-See [`docs/theory.md`](docs/theory.md) for the full derivation, including the eigenvalue-based step-size choice that eliminates `k0` as a hyperparameter and the treatment of bound constraints as implicit facets of the same projection sweep.
-
-## Convergence and projection dynamics
+## How it behaves: convergence and projection dynamics
 
 Four diagnostic figures, regenerated from [`benchmarks/`](benchmarks/) with
 `python benchmarks/run_all.py`, give a quick visual sense of what the solver
@@ -83,9 +137,12 @@ is *spiking*.
 ![spike raster](figures/02_spike_raster.png)
 
 **Warm-start speedup** on a sequence of 30 drifting QPs, a stylized MPC
-workload, measured under the v0.6.0 KKT stopping criterion. From the second
-problem onward, warm starting cuts a 221-iteration cold solve to 101
-iterations, an essentially free 2.19x, and wall time falls in step (2.03x).
+workload, measured under the v0.6.0 KKT stopping criterion with checks every
+10 iterations after iteration 20 (`patience=2`; the shipped defaults check
+every 50). From the second problem onward, warm starting cuts a
+221-iteration cold solve to 101 iterations, an essentially free 2.19x, and
+wall time falls in step (2.03x on the benchmark machine). With the shipped
+check schedule the same sequence gives 351 and 201 iterations.
 Iterations are the headline because they are deterministic; the wall-time
 panel is the median of five timed runs per problem, since a single pass picks
 up scheduler noise indistinguishable from signal.
@@ -129,7 +186,143 @@ constraint is active at the solution: the optimized run gets within 1e-16 of the
 exact objective in roughly 25 iterations, while the raw run needs the full 300
 to reach 1e-15.*
 
-## Installation
+## Beyond polytopes: conic constraints (v0.7)
+
+![A contact force sliding along its friction cone to the optimum](docs/media/friction_cone.gif)
+
+*A desired contact force $p$ lies outside the friction cone
+$\Vert f_t\Vert \le 0.5\, f_n$, so it would slip. Gradient flow pulls the
+force toward $p$ in the metric of the objective; each time a step leaves the
+cone, a spike projects it back exactly, and the state slides around the
+curved wall to the closest admissible force. At the end the objective's
+level set through $x^\star$ (orange) just touches the cone, and
+$-\nabla f(x^\star)$ points along the cone's outward normal: the KKT
+condition, made visible. Real run, default settings.*
+
+Any convex set with a cheap Euclidean projection, or any differentiable
+convex inequality, joins the same winner-take-all spike sweep as the rows of
+`C`. Opt in through `nonlinear_candidates`. The same idea as the animation,
+with a Euclidean objective:
+
+```python
+import numpy as np
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig, scaled_soc_projector
+
+cone = scaled_soc_projector(t_index=2, z_indices=[0, 1], mu=0.5)    # ||(f1, f2)|| <= 0.5 f3
+p = np.array([1.53, -0.39, 1.29])                                  # desired force
+problem = OptimizationProblem(np.eye(3), -p, np.zeros((0, 3)), np.zeros(0),
+                              nonlinear_candidates=(cone,))
+result = SNNSolver(problem, SolverConfig()).solve(np.array([0.0, 0.0, 1.0]))
+```
+
+| Family | Constructors |
+|---|---|
+| Balls, halfspaces, affine subspaces | `ball_projector`, `halfspace_projector`, `AffineSubspaceProjector` |
+| Second-order and friction cones | `soc_projector`, `scaled_soc_projector`, `lift_soc_l1`, `lift_soc_l2` |
+| Matrix sets | `psd_cone_projector`, `spectral_ball_projector`, `spectral_norm_cutter` |
+| Intersections | `dykstra_projector`, `joint_projector` (rows and cones projected jointly) |
+| Your own | `CutterCandidate(value, jacobian)`, `ProjectorCandidate(project)` |
+
+**When several sets can be active together, wrap them in one
+`dykstra_projector`.** It projects exactly onto the intersection; left as
+separate candidates, the sweep alternates between them. The worked example
+[`examples/example8_friction_cone_grasp.py`](examples/example8_friction_cone_grasp.py)
+finds the gentlest three-finger grasp of a ball, with force and torque
+balance plus one friction cone per finger. Wrapped, it certifies in 201
+iterations to within 4e-13 of a Newton-polished reference; as separate
+candidates, it stops at the iteration cap with a 5e-2 relative KKT defect.
+
+Built-in sets also run on the compiled backend (`backend='c'`; PSD and
+spectral blocks up to 8×8); custom callbacks need `backend='python'`. The
+full reference, including when the certificate becomes a direct bound on
+the state error (strongly convex objectives with Dykstra, PSD or spectral
+candidates), is in
+[`docs/api.md`](docs/api.md#nonlinear-and-conic-constraints); the
+derivation is [`docs/theory.md` §8](docs/theory.md#8-beyond-polytopes-nonlinear-and-conic-constraints).
+
+## Trusting the result
+
+Three fields answer the questions that matter on any real problem:
+
+```python
+result.joint_feasible              # rows, bounds and candidates all within feasibility_tol
+result.kkt_residual / result.kkt_scale   # scale-invariant optimality defect
+result.converged                   # True means the KKT certificate passed (v0.6.0+)
+```
+
+`converged=True` means a **KKT-cone certificate** passed, together with
+feasibility and a plateau check, at three consecutive checkpoints. For
+polyhedral problems and bare cone or ball candidates it is one nonnegative
+least-squares fit of $-\nabla f(x)$ onto the cone of unit constraint
+normals, with a complementarity guard, accepted relative to the problem's
+own gradient scale. That decision is invariant under objective rescaling,
+row order, row duplication and per-row scaling, so the same problem
+certifies identically at natural scale and at 1e10×. For a strongly convex
+problem whose candidates are exact Dykstra, PSD or spectral projectors, it
+is instead a bound on $\Vert x - x^\star\Vert$ in state units
+([details](docs/api.md#certificate-on-the-nonlinear-path)). A run that reports `converged=False` either hit its iteration cap before
+the certificate passed or aborted on its projection watchdog
+(`projection_budget_exhausted`); `convergence_reason` says which, and
+`kkt_residual / kkt_scale` says how far from optimal it stopped. The
+history of these fields, including the v0.5.0 removal of a terminal bound
+clip that could report an objective *below* the true optimum, is in
+[`docs/correctness.md`](docs/correctness.md).
+
+## Accuracy and tuning
+
+The spiking dynamics converge to a fixed point of the discretised flow, not to
+the exact minimiser of the QP. On well-conditioned problems the two are close;
+they are not identical, and the difference is set by the gradient step size
+`k0 = k0_scale / L`.
+
+Concretely, on the 50-D benchmark of Figure 1 with the shipped defaults, the
+solver reaches a **period-2 limit cycle** whose objective gap against the exact
+optimum alternates between 3.0e-4 and 6.7e-4, and stays there: the value is
+identical to ten significant figures at 20k and at 100k iterations. It is
+jointly feasible the whole time. So the limitation is accuracy of the fixed
+point, not feasibility.
+
+What to do about it, in order of usefulness:
+
+1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
+   scale-invariant KKT defect of the final point, comparable across problems
+   and objective scalings; `converged=True` certifies it below `kkt_rel_tol`.
+   On this benchmark it reports 8.9e-4, an honest measurement of the limit
+   cycle, which is why the run does not certify at the default 1e-4.
+2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
+   the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
+   if the budget is large enough to arrive; at 5k iterations the same 0.02
+   setting is far *worse* than the default. Tune the pair, never `k0_scale`
+   alone.
+3. **Project exactly instead of greedily.** The offset comes from the
+   sequential row sweep, which is not the exact projection onto the polytope
+   when several rows are active. Pass the rows as one
+   `joint_projector(C, d)` candidate (with empty `C`, `d` in the problem).
+   On the Figure 1 problem the objective gap drops from the 6.7e-4 floor to
+   2.1e-10 under the default certificate, and the iterate reaches 3.8e-10
+   from $x^\star$ with `kkt_rel_tol=1e-9`, at the cost of an inner Dykstra
+   loop per step (3.5 s instead of milliseconds on the compiled backend;
+   `benchmarks/05_exact_projection.py`). See
+   [`docs/theory.md` §8.2](docs/theory.md#82-why-exact-projection-removes-the-step-size-offset).
+4. **Polish externally if you need machine precision.** Once the active set is
+   correct (and it usually is, see Figure 2), the exact optimum follows from one
+   equality-constrained KKT solve on those rows. That is exactly what
+   `benchmarks/qpref.py` does, in well under a millisecond on these sizes.
+
+Two known limitations are worth stating plainly. **Ill-conditioned or stiff
+QPs** are the harder case: the native adaptive stepping can fail to reach
+tolerance and return an infeasible point, and naive Jacobi/diagonal
+preconditioning conflicts with the adaptive step-size rule rather than fixing
+it. When a run reports `converged=False`, read the diagnosis in order: check
+`joint_feasible` and `projection_budget_exhausted` first (feasibility failures
+and watchdog aborts are their own categories), then read
+`kkt_residual / kkt_scale`; since v0.6.0 that number is scale-invariant, so
+"how far from optimal" is finally a well-posed question at any problem
+scaling.
+
+## Backends and hardware
+
+### Installation options
 
 `snn_opt` requires Python 3.9+, NumPy, and SciPy. The fastest path is PyPI:
 
@@ -208,164 +401,17 @@ result = SNNSolver(OptimizationProblem(A, b, C, d), cfg).solve(x0)
 
 Since v0.5.0 the transform **does accept box bounds**. Per-coordinate bounds are not rotation-invariant, so they cannot stay implicit: they are materialized as explicit rotated unit-norm rows, growing `m` by up to `2n`. The `O(1)` implicit-facet advantage is deliberately surrendered under a transform, which is the trade to be aware of when combining the two. See [`docs/api.md`](docs/api.md#transforms).
 
-## What v0.5.0 changed
+### FPGA reference kernels
 
-v0.5.0 is a **structural correctness release**, and the behaviour it fixes is
-worth understanding before relying on results from an earlier version.
-
-Before v0.5.0, bound constraints were enforced by a terminal clip applied after
-the halfspace sweep, with nothing re-projecting behind it. Composing the two is
-not a projection onto their intersection (the classical POCS failure), so on a
-problem where a bound and an interacting row are simultaneously active, the
-solver could stall at a point feasible for neither and report an objective that
-*undercuts* the true optimum. Bounds are now implicit unit-normal facets inside
-one unified projection sweep, and the terminal clip is gone.
-
-Three result fields expose feasibility, optimality diagnostics, and projection
-termination on any nontrivial problem:
-
-```python
-result.joint_feasible            # feasibility of rows AND bounds together
-result.kkt_residual              # scale-invariant KKT certificate (v0.6.0)
-result.projection_budget_exhausted
-```
-
-* **`joint_feasible`** is the honest feasibility flag. Pre-0.5 the convergence
-  gate looked at rows only, so a box violation could not fail it.
-* **`kkt_residual`** is the scale-invariant KKT certificate at the final
-  point (see the next section); with the default settings, `converged=True`
-  means exactly that this certificate passed, together with feasibility and
-  the plateau criterion, at three consecutive checkpoints. The older
-  `stationarity_residual` diagnostic is retained for one compatibility
-  release but mixes units and can depend on constraint row order; prefer
-  `kkt_residual`.
-* **`projection_budget_exhausted`** reports that the sweep hit its watchdog.
-  `max_projection_iters` is now a safety cap (default `None`, auto-sized), and
-  hitting it **aborts** the solve rather than being reported as convergence.
-
-`projection_method='fixed'` combined with bounds now raises, because the legacy
-fixed-step path cannot enforce bounds correctly without the clip that was
-removed.
-
-## Scale-invariant convergence certification (v0.6.0)
-
-Before v0.6.0, `converged` required an **absolute** projected-gradient norm
-below `1e-6`. That test had two structural defects, found when an MPC user ran
-QPs whose gradient scale is ~1e10: (a) rescaling the objective rescales every
-gradient, so on large-scale problems the flag could never fire at any solution
-quality; and (b) the projected-gradient heuristic removes each active facet's
-gradient component independently, so at a constrained optimum with correlated
-active normals it stalls at a cross-term residue and is structurally nonzero
-even at the exact optimum. `converged=False` therefore said nothing about
-solution quality; solves on perfectly solvable problems ran to their iteration
-cap by construction.
-
-The v0.6.0 criterion is a **KKT-cone certificate**: one nonnegative
-least-squares fit of `-∇f(x)` onto the cone of all unit-normalized facet
-normals, augmented with a complementarity row so slack facets cannot absorb
-the gradient, accepted when
-
-```
-r_kkt  <=  kkt_abs_tol + kkt_rel_tol * max(‖A x‖, ‖b‖, ‖Nᵀμ‖)
-```
-
-Both sides carry gradient units, so while the relative term dominates the
-threshold the decision is invariant under positive objective rescaling,
-constraint row order, row duplication, and per-row scaling: the same problem
-certifies identically at natural scale and at 1e10x. (The `kkt_abs_tol`
-floor deliberately takes over at near-zero gradient scales, the intentional
-fallback that lets a genuinely-zero problem terminate.) The fit runs host-side on every backend: the compiled kernel advances
-the dynamics in checkpoint-sized chunks and the same Python policy evaluates
-each checkpoint, so `converged` means one thing everywhere (the FPGA
-reference is unchanged and reports fixed-horizon results, which the host can
-certify with the same function). The cheap plateau/feasibility gates are
-evaluated first, so the certificate's NNLS cost is confined to
-near-termination checkpoints, and end-to-end overhead is negligible (see
-`benchmarks/`).
-
-Migration: results from v0.5 remain reproducible with
-`ConvergenceConfig(optimality_test="legacy_projected_gradient")`, which
-preserves the old test verbatim. `converged=False` runs from v0.5 can
-legitimately become `converged=True` (or stop ~100x earlier) under the new
-criterion; nothing about the dynamics changed, only the stopping decision.
-The default `kkt_rel_tol = 1e-4` is calibrated to the O(k0) fixed-point floor
-of the default step size: it certifies the quality the dynamics genuinely
-reach, roughly 1e-3 relative solution error on well-conditioned problems. It
-is a residual tolerance, not an error bound: on a nearly singular Hessian a
-small residual can coexist with a larger solution displacement.
-
-## KV260 reference implementation
-
-[`fpga/kv260_v05/`](fpga/kv260_v05/) contains the restricted fixed-horizon
-Kria K26 reference that was physically qualified for the SNN-MSRP study. It
-preserves the v0.5 unified-projection semantics, binary64 input boundary,
-fixed-point contract, 200 MHz build recipe, and exact compatibility ABI used
-by that experiment. Its README records the measured qualification surface and
-the unsupported cases. It is not a general FPGA backend for `solve_qp`.
-
-## Accuracy and tuning
-
-The spiking dynamics converge to a fixed point of the discretised flow, not to
-the exact minimiser of the QP. On well-conditioned problems the two are close;
-they are not identical, and the difference is set by the gradient step size
-`k0 = k0_scale / L`.
-
-Concretely, on the 50-D benchmark of Figure 1 with the shipped defaults, the
-solver reaches a **period-2 limit cycle** whose objective gap against the exact
-optimum alternates between 3.0e-4 and 6.7e-4, and stays there: the value is
-identical to ten significant figures at 20k and at 100k iterations. It is
-jointly feasible the whole time. So the limitation is accuracy of the fixed
-point, not feasibility.
-
-What to do about it, in order of usefulness:
-
-1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
-   scale-invariant KKT defect of the final point, comparable across problems
-   and objective scalings; `converged=True` certifies it below `kkt_rel_tol`.
-   On this benchmark it reports 8.9e-4, an honest measurement of the limit
-   cycle, which is why the run does not certify at the default 1e-4.
-2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
-   the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
-   if the budget is large enough to arrive; at 5k iterations the same 0.02
-   setting is far *worse* than the default. Tune the pair, never `k0_scale`
-   alone.
-3. **Polish externally if you need machine precision.** Once the active set is
-   correct (and it usually is, see Figure 2), the exact optimum follows from one
-   equality-constrained KKT solve on those rows. That is exactly what
-   `benchmarks/qpref.py` does, in well under a millisecond on these sizes.
-
-Two known limitations are worth stating plainly. **Ill-conditioned or stiff
-QPs** are the harder case: the native adaptive stepping can fail to reach
-tolerance and return an infeasible point, and naive Jacobi/diagonal
-preconditioning conflicts with the adaptive step-size rule rather than fixing
-it. When a run reports `converged=False`, read the diagnosis in order: check
-`joint_feasible` and `projection_budget_exhausted` first (feasibility failures
-and watchdog aborts are their own categories), then read
-`kkt_residual / kkt_scale`; since v0.6.0 that number is scale-invariant, so
-"how far from optimal" is finally a well-posed question at any problem
-scaling.
-
-## Quick start
-
-```python
-import numpy as np
-from snn_opt import solve_qp
-
-# Minimize ||x||^2 subject to  x_1 + 2 x_2 <= 1  (and that's it).
-A  = np.eye(2)
-b  = np.zeros(2)
-C  = np.array([[1.0, 2.0]])
-d  = np.array([-1.0])
-x0 = np.array([1.0, 1.0])
-
-result = solve_qp(A, b, C, d, x0, max_iterations=1000)
-
-print(result.summary())             # converged?  iterations?  spikes?
-print("x* =", result.final_x)
-print("f* =", result.final_objective)
-```
-
-For repeated solves (warm-started receding-horizon problems), construct an `SNNSolver` once and call `.solve(x0)` per problem instance; see [`examples/example4_warm_start.py`](examples/example4_warm_start.py).
+[`fpga/kv260_v05/`](fpga/kv260_v05/) is the restricted fixed-horizon Kria K26
+reference physically qualified for the SNN-MSRP study (v0.5 projection
+semantics, fixed-point contract; routed to close timing at 200 MHz, with the
+deployed kernel clock measured at 160 MHz). [`fpga/kv260_v07/`](fpga/kv260_v07/)
+adds native ball and scaled-second-order-cone resets on the resident
+datapath, board-qualified with the kernel running at 200 MHz and raw state
+and telemetry equal to native emulation. Each README records its measured qualification surface and
+unsupported cases. They are references for the hardware track, not general
+FPGA backends for `solve_qp`.
 
 ## Examples
 
@@ -382,6 +428,7 @@ All scripts live under [`examples/`](examples/) and are runnable as plain `pytho
 | 5 | [`example5_infeasible_recovery.py`](examples/example5_infeasible_recovery.py) | Infeasible initializations | Automatic projection to feasibility |
 | 6 | [`example6_equality_constraint.py`](examples/example6_equality_constraint.py) | Equality via a sandwiched band | $x_1 = a$ as a tight $\pm \varepsilon$ inequality pair |
 | 7 | [`example7_svm_dual.py`](examples/example7_svm_dual.py) | SVM dual with kernel | Implicit box facets + auto step size on a real ML task |
+| 8 | [`example8_friction_cone_grasp.py`](examples/example8_friction_cone_grasp.py) | Three-finger grasp with friction cones | Conic constraints, Dykstra intersection, Clarabel cross-check; writes `example8_friction_cone_grasp.png` |
 | . | [`example_raw_mode.py`](examples/example_raw_mode.py) | Bypass auto-config | Compares raw vs. optimized solver settings |
 
 Run them all in sequence:
@@ -392,28 +439,35 @@ python examples/run_all_examples.py
 
 ## Documentation
 
-- [`docs/theory.md`](docs/theory.md): derivation of the SNN/convex-optimization equivalence, step-size analysis, projection geometry, convergence criteria.
-- [`docs/applications.md`](docs/applications.md): catalogue of the published work that uses this solver.
-- [`docs/api.md`](docs/api.md): hand-curated API reference.
+- [`docs/theory.md`](docs/theory.md): derivation of the SNN/convex-optimization equivalence, step size, projection geometry, convergence criteria, and (§8) the conic extension.
+- [`docs/api.md`](docs/api.md): hand-curated API reference, including `snn_opt.nonlinear`.
+- [`docs/correctness.md`](docs/correctness.md): what the feasibility and certification fields mean, and how they changed in v0.5 and v0.6.
+- [`docs/applications.md`](docs/applications.md): published work that uses this solver.
 - [`benchmarks/README.md`](benchmarks/README.md): what each figure shows and how to regenerate it.
-- [https://snn.ahkhan.me](https://snn.ahkhan.me): companion site, designed for a broader audience (students, curious researchers).
+- [`docs/media/README.md`](docs/media/README.md): how the animations are produced from solver output.
+- [snn.ahkhan.me](https://snn.ahkhan.me): companion site with the interactive 3-D player, written for students and curious researchers.
 
 ## Applications
 
-The framework is currently demonstrated in:
+The framework is demonstrated in:
 
+- **Khan, Cao & Li (2026)**, *An Event-Driven Neurodynamic Solver with
+  Adaptive Projection for Constrained Quadratic Programming*,
+  **Neurocomputing**, 703:134705.
+  [doi:10.1016/j.neucom.2026.134705](https://doi.org/10.1016/j.neucom.2026.134705).
+  The adaptive-projection solver implemented here.
 - **Khan, Mohammed & Li (2025)**, *Portfolio Optimization: A Neurodynamic
   Approach Based on Spiking Neural Networks*, **Biomimetics**, 10(12):808.
   [doi:10.3390/biomimetics10120808](https://doi.org/10.3390/biomimetics10120808).
-  Portfolio selection cast as a constrained QP and solved by the spiking
-  dynamics implemented here.
+  Portfolio selection cast as a constrained QP and solved by these dynamics.
 
-Additional applications are in preparation. As they reach publication
-they will be added to [`docs/applications.md`](docs/applications.md).
+Additional applications are in preparation and will be added to
+[`docs/applications.md`](docs/applications.md) as they appear in print.
 
 ## Citing this work
 
-If `snn_opt` plays a role in your research or teaching, please cite both the software and the framework paper:
+If `snn_opt` plays a role in your research or teaching, please cite the
+software and the solver paper:
 
 ```bibtex
 @software{khan2026snnopt,
@@ -425,6 +479,16 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
   license = {Apache-2.0},
 }
 
+@article{khan2026eventdriven,
+  author  = {Khan, Ameer Hamza and Cao, Xinwei and Li, Shuai},
+  title   = {An Event-Driven Neurodynamic Solver with Adaptive Projection for Constrained Quadratic Programming},
+  journal = {Neurocomputing},
+  volume  = {703},
+  pages   = {134705},
+  year    = {2026},
+  doi     = {10.1016/j.neucom.2026.134705},
+}
+
 @inproceedings{mancoo2020understanding,
   author    = {Mancoo, Allan and Keemink, Sander and Machens, Christian K.},
   title     = {Understanding Spiking Networks Through Convex Optimization},
@@ -432,8 +496,6 @@ If `snn_opt` plays a role in your research or teaching, please cite both the sof
   year      = {2020},
 }
 ```
-
-The full per-paper bibliography of the SNN-X series is maintained at [`docs/applications.md`](docs/applications.md).
 
 ## License
 
