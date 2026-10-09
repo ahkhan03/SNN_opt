@@ -11,6 +11,7 @@ from snn_opt import (
     SNNSolver,
     SolverConfig,
     ball_projector,
+    box_projector,
     halfspace_projector,
     joint_dykstra_projector,
     psd_cone_projector,
@@ -231,3 +232,44 @@ def test_dykstra_far_lens_sweeps_are_exact_or_honest_caps(center_x):
             np.testing.assert_allclose(projected, reference, atol=1e-9)
         else:
             assert diagnostics["cap_hit"]
+
+
+def test_dykstra_box_rows_projection_matches_clarabel():
+    cp = pytest.importorskip("cvxpy")
+    rng = np.random.default_rng(11)
+    n = 6
+    C = rng.standard_normal((3, n))
+    d = -np.abs(rng.standard_normal(3))
+    lower = np.array([-0.5, -1.0, 0.0, -np.inf, -0.2, -0.7])
+    upper = np.array([0.6, 0.3, np.inf, 0.4, 0.2, 0.7])
+    x0 = 3.0 * rng.standard_normal(n)
+    candidate = joint_dykstra_projector(C, d, members=(box_projector(lower, upper),))
+    projected = candidate.project(x0)
+    x = cp.Variable(n)
+    finite_lo = np.isfinite(lower)
+    finite_hi = np.isfinite(upper)
+    problem = cp.Problem(
+        cp.Minimize(0.5 * cp.sum_squares(x - x0)),
+        [C @ x + d <= 0, x[finite_lo] >= lower[finite_lo], x[finite_hi] <= upper[finite_hi]],
+    )
+    problem.solve(solver=cp.CLARABEL, tol_gap_abs=1e-11,
+                  tol_gap_rel=1e-11, tol_feas=1e-11)
+    np.testing.assert_allclose(projected, x.value, atol=2e-8)
+    assert candidate.last_diagnostics["converged"]
+    assert candidate.last_diagnostics["member_names"][-1] == "box"
+
+
+def test_joint_dykstra_sparse_c_names_the_unsupported_setting():
+    import scipy.sparse as sp
+
+    from snn_opt import joint_dykstra_projector
+    with pytest.raises(ValueError, match="scipy sparse C is not supported"):
+        joint_dykstra_projector(sp.csr_matrix(np.ones((1, 3))), np.array([-1.0]))
+
+
+def test_dykstra_cutter_member_keeps_precise_message():
+    from snn_opt import DykstraProjector, spectral_ball_cutter
+    with pytest.raises(TypeError, match="must be a ProjectorCandidate or callable"):
+        DykstraProjector([spectral_ball_cutter(2)])
+    with pytest.raises(TypeError, match="must be an iterable"):
+        DykstraProjector(5)

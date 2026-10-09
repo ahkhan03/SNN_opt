@@ -219,7 +219,7 @@ result = SNNSolver(problem, SolverConfig()).solve(np.array([0.0, 0.0, 1.0]))
 
 | Family | Constructors |
 |---|---|
-| Balls, halfspaces, affine subspaces | `ball_projector`, `halfspace_projector`, `AffineSubspaceProjector` |
+| Balls, boxes, halfspaces, affine subspaces | `ball_projector`, `box_projector`, `halfspace_projector`, `AffineSubspaceProjector` |
 | Second-order and friction cones | `soc_projector`, `scaled_soc_projector`, `lift_soc_l1`, `lift_soc_l2` |
 | Matrix sets | `psd_cone_projector`, `spectral_ball_projector`, `spectral_norm_cutter` |
 | Intersections | `dykstra_projector`, `joint_projector` (rows and cones projected jointly) |
@@ -304,7 +304,9 @@ What to do about it, in order of usefulness:
    2.1e-10 under the default certificate, and the iterate reaches 3.8e-10
    from $x^\star$ with `kkt_rel_tol=1e-9`, at the cost of an inner Dykstra
    loop per step (3.5 s instead of milliseconds on the compiled backend;
-   `benchmarks/05_exact_projection.py`). See
+   `benchmarks/05_exact_projection.py`). Box bounds join the same candidate
+   as one more member, `joint_projector(C, d, members=(box_projector(lo, hi),))`,
+   and the compiled backend runs the whole projection natively. See
    [`docs/theory.md` §8.2](docs/theory.md#82-why-exact-projection-removes-the-step-size-offset).
 4. **Polish externally if you need machine precision.** Once the active set is
    correct (and it usually is, see Figure 2), the exact optimum follows from one

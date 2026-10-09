@@ -104,3 +104,21 @@ def test_eigenbasis_unconstrained():
     ref = _solve(prob, x0, "python", transform=None)
     got = _solve(prob, x0, "python", transform="eigenbasis")
     assert np.max(np.abs(got.final_x - ref.final_x)) < 1e-7
+
+
+def test_eigenbasis_sparse_c_reports_the_precise_check():
+    import scipy.sparse as sp
+
+    from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
+    n = 4
+    problem = OptimizationProblem(np.eye(n), -np.ones(n),
+                                  sp.csr_matrix(np.ones((1, n))), np.array([-1.0]))
+    solver = SNNSolver(problem, SolverConfig(transform="eigenbasis", max_iterations=5))
+    with pytest.raises(ValueError, match="requires dense A and C"):
+        solver.solve(np.zeros(n))
+
+
+def test_capability_probe_sparse_eigenbasis_message():
+    from snn_opt import capabilities as cap
+    with pytest.raises(ValueError, match="requires dense A and C"):
+        cap._solve(cap._with(6, 3, sparse=True), "eigenbasis", "python")

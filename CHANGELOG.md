@@ -6,7 +6,42 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`box_projector(lower, upper, coordinates=None)`: an exact built-in box
+  set**, usable alone or as a Dykstra member. Bounds are scalars or 1-D
+  arrays broadcast to the coordinate block; `-inf`/`+inf` leave a side open,
+  and NaN, an empty set or `lower > upper` raise `ValueError`. It is native
+  on the compiled backend (descriptor kind 9, a clip in
+  `snn_qp_extended.hpp`; one-sided bounds travel as `+-DBL_MAX`), so
+  `joint_dykstra_projector(C, d, members=(box_projector(lo, hi),))` now runs
+  in C with the same Dykstra cycle counts as the Python reference.
+  Previously a box inside Dykstra needed an `np.clip` callable, which the
+  compiled backend rejects; that rejection now names `box_projector`. On the
+  n=40 economic-dispatch band problem the native run is about 20x faster
+  than the Python reference per iteration
+  (`tests/test_ed_band_dykstra_regression.py` bounds the error at most 0.003 MW
+  (measured 0.0028) at 1000 iterations; `SNN_OPT_SLOW_TESTS=1` adds the 20000-iteration reproduction
+  (at most 0.0025 MW, measured 0.0024)). `benchmarks/05_exact_projection.py` gains a rows-plus-box
+  table.
+- `docs/capabilities.md`: the feature by backend capability matrix, generated
+  by `tools/render_capabilities.py`, which runs every software cell through
+  the public API (`snn_opt.capabilities`) and adds the FPGA packages' declared
+  boundaries; `tests/test_capabilities.py` fails when a cell's behaviour
+  differs from its declared expectation or the page is stale.
+
+### Changed
+
+- The hand-kept backend table in `docs/api.md` is replaced by a pointer to the
+  generated matrix.
+
 ### Fixed
+
+- Three misleading errors now name the unsupported setting: a scipy sparse
+  `C` with `transform='eigenbasis'` reports the dense-`A`-and-`C` requirement
+  instead of a NumPy conversion error, `joint_dykstra_projector` rejects a
+  sparse `C` explicitly, and a cutter passed as a Dykstra member reports
+  "must be a ProjectorCandidate or callable" instead of "must be an iterable".
 
 - **`fpga/CURRENT` is back on the released line.** The resolver the paper
   protocols read for the qualified FPGA package existed only on an

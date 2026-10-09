@@ -299,7 +299,7 @@ static py::tuple solve_euler_extended_py(
                     throw std::invalid_argument(label + " field exceeds int range");
             }
             const std::int64_t kind = p[0];
-            if (kind < 0 || kind > 8 || (is_member && (kind == 5 || kind == 7)))
+            if (kind < 0 || kind > 9 || (is_member && (kind == 5 || kind == 7)))
                 throw std::invalid_argument(label + " has unsupported kind");
             if (!valid_range(p[1], p[2], coords.size()))
                 throw std::invalid_argument(label + " has invalid coordinate range");
@@ -354,6 +354,19 @@ static py::tuple solve_euler_extended_py(
                         || (p[2] == 0 && expected == n);
                     if (!coords_ok || candidate_data.data()[p[9]] < 0.0)
                         throw std::invalid_argument(label + " has invalid spectral fields (native cap is 8x8)");
+                }
+                if (kind == 9) {
+                    const std::int64_t count = p[6];
+                    if (count <= 0 || count > n || p[3] != -1 || p[7] != 0
+                            || p[8] != 0 || p[10] != 2 * count
+                            || (p[2] != 0 && p[2] != count)
+                            || (p[2] == 0 && count != n))
+                        throw std::invalid_argument(label + " has invalid box fields");
+                    const double* lower = candidate_data.data() + p[9];
+                    for (std::int64_t k = 0; k < count; ++k) {
+                        if (lower[k] > lower[count + k])
+                            throw std::invalid_argument(label + " has a box lower bound above its upper bound");
+                    }
                 }
                 if (kind == 8) {
                     const std::int64_t dim = p[6];

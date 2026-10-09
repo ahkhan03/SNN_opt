@@ -19,6 +19,7 @@ from snn_opt import (
     SNNSolver,
     SolverConfig,
     ball_projector,
+    box_projector,
     halfspace_projector,
     joint_dykstra_projector,
     lift_soc_l1,
@@ -578,4 +579,105 @@ def test_native_binding_rejects_psd_cap_and_member_cutter_kind():
     top[0, 10] = 1
     args[16] = top
     with pytest.raises(ValueError, match="member_meta row 0 has unsupported kind"):
+        _kernel.solve_euler_extended(*args)
+
+
+def _assert_dykstra_telemetry_equal(py, native):
+    np.testing.assert_array_equal(
+        native.dykstra_inner_iterations_per_step, py.dykstra_inner_iterations_per_step)
+    np.testing.assert_array_equal(
+        native.dykstra_inner_projection_events_per_step,
+        py.dykstra_inner_projection_events_per_step)
+    assert native.dykstra_inner_cap_hits == py.dykstra_inner_cap_hits
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_rows_box_dykstra_parity(seed):
+    rng = np.random.default_rng(seed)
+    n = 6
+    M = rng.standard_normal((n, n))
+    A = M.T @ M + 0.5 * np.eye(n)
+    b = rng.standard_normal(n) * 3
+    C = rng.standard_normal((3, n))
+    d = -np.abs(rng.standard_normal(3))
+    lower = np.array([-0.5, -1.0, 0.0, -np.inf, -0.2, -0.7])
+    upper = np.array([0.6, 0.3, np.inf, 0.4, 0.2, 0.7])
+    problem = OptimizationProblem(
+        A,
+        b,
+        np.zeros((0, n)),
+        np.zeros(0),
+        nonlinear_candidates=(
+            joint_dykstra_projector(C, d, members=(box_projector(lower, upper),)),
+        ),
+    )
+    py, native = _pair(problem, np.zeros(n), convergence={"enable_early_stopping": False})
+    _assert_dykstra_telemetry_equal(py, native)
+    assert int(np.sum(py.dykstra_inner_iterations_per_step)) > 0
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        box_projector(-0.5, 0.25),
+        box_projector([-0.5, 0.0], [0.25, np.inf], coordinates=[2, 0]),
+    ],
+    ids=["ambient-scalar", "scoped-one-sided"],
+)
+def test_standalone_box_candidate_parity(box):
+    n = 3
+    problem = OptimizationProblem(
+        np.eye(n),
+        np.array([-2.0, 1.0, -3.0]),
+        np.zeros((0, n)),
+        np.zeros(0),
+        nonlinear_candidates=(box,),
+    )
+    py, native = _pair(problem, np.array([1.0, -1.0, 0.5]), max_iterations=40)
+    assert native.nonlinear_event_counts.get("set", 0) > 0
+
+
+def test_box_descriptor_encodes_one_sided_bounds_as_dbl_max():
+    box = box_projector([0.0, -np.inf], [np.inf, 1.0], coordinates=[1, 0])
+    args = _raw_extended(box, np.array([5.0, -5.0]))
+    top, data = args[16], args[18]
+    assert top[0].tolist() == [9, 0, 2, -1, 0, 0, 2, 0, 0, 0, 4]
+    big = np.finfo(float).max
+    assert data.tolist() == [0.0, -big, big, 1.0]
+
+
+def test_box_callable_member_still_rejects_with_box_hint():
+    candidate = joint_dykstra_projector(
+        np.array([[1.0, 1.0]]), np.array([-0.5]), members=(lambda x: np.clip(x, 0.0, 1.0),))
+    problem = OptimizationProblem(
+        np.eye(2), np.zeros(2), np.zeros((0, 2)), np.zeros(0), nonlinear_candidates=(candidate,))
+    with pytest.raises(ValueError, match=r"member 1.*use box_projector"):
+        SNNSolver(problem, SolverConfig(backend="c"))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (6, 3),  # count larger than the coordinate block
+        (10, 3),  # data must hold 2 * count values
+        (2, 1),  # coordinate count does not match the block
+        (3, 0),  # box has no scalar coordinate
+    ],
+    ids=["box-count", "box-data", "box-coordinates", "box-t-index"],
+)
+def test_native_binding_rejects_box_fields(field, value):
+    args = _raw_extended(box_projector(0.0, 1.0, coordinates=[0, 1]), np.array([2.0, -1.0]))
+    top = args[16].copy()
+    top[0, field] = value
+    args[16] = top
+    with pytest.raises(ValueError, match="candidate_meta row 0.*(box|data range)"):
+        _kernel.solve_euler_extended(*args)
+
+
+def test_native_binding_rejects_inverted_box_bounds():
+    args = _raw_extended(box_projector(0.0, 1.0, coordinates=[0, 1]), np.array([2.0, -1.0]))
+    data = args[18].copy()
+    data[1] = 2.0  # lower[1] above upper[1] == 1.0
+    args[18] = data
+    with pytest.raises(ValueError, match="box lower bound above its upper bound"):
         _kernel.solve_euler_extended(*args)

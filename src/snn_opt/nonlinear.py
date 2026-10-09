@@ -364,6 +364,105 @@ def ball_projector(indices: Sequence[int], radius: float,
                                                         "center": center_arr.copy()})
 
 
+def _box_bound(value, label: str) -> np.ndarray:
+    try:
+        arr = np.asarray(value, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"box {label} bound must be numeric") from exc
+    if arr.size == 0:
+        raise ValueError(f"box {label} bound must not be empty")
+    if np.any(np.isnan(arr)):
+        raise ValueError(f"box {label} bound must not be NaN")
+    return arr
+
+
+def box_projector(lower, upper,
+                  coordinates: Optional[Sequence[int]] = None,
+                  name: str = "box") -> ProjectorCandidate:
+    """Return the exact projector onto ``lower <= x <= upper`` (elementwise).
+
+    ``lower`` and ``upper`` are scalars or 1-D arrays, broadcast to the
+    coordinate block; ``-inf``/``+inf`` leave that side open.  Without
+    ``coordinates`` the box acts on the ambient state.  The projection is a
+    clip, so a box is one Dykstra member with one correction vector, not
+    ``2n`` halfspaces.  The compiled backend runs it natively (descriptor
+    kind 9), alone or inside :func:`joint_dykstra_projector`.
+    """
+    coords = _normalise_coordinates(coordinates)
+    lo = _box_bound(lower, "lower")
+    hi = _box_bound(upper, "upper")
+    if coords is not None:
+        size = len(coords)
+    elif lo.size == 1 or hi.size == 1 or lo.size == hi.size:
+        size = max(lo.size, hi.size)
+    else:
+        raise ValueError("box lower and upper bounds have different lengths")
+    for arr, label in ((lo, "lower"), (hi, "upper")):
+        if arr.size not in (1, size):
+            raise ValueError(
+                f"box {label} bound must be scalar or have one entry per coordinate")
+    lo = np.broadcast_to(lo, (size,)).copy()
+    hi = np.broadcast_to(hi, (size,)).copy()
+    if np.any(lo == np.inf) or np.any(hi == -np.inf):
+        raise ValueError("box bounds must leave a non-empty set (lower < +inf, upper > -inf)")
+    if np.any(lo > hi):
+        raise ValueError("box lower bound exceeds upper bound")
+    # A scalar ambient box applies to any state dimension; an array ambient
+    # box fixes the dimension, which is checked at call time.
+    scalar_ambient = coords is None and size == 1
+
+    idx_list = None if coords is None else list(coords)
+
+    def _bounds(arr: np.ndarray):
+        if coords is not None:
+            if max(coords, default=-1) >= arr.size:
+                raise ValueError("box projector coordinate exceeds state dimension")
+            return lo, hi, idx_list
+        if scalar_ambient:
+            return lo[0], hi[0], None
+        if arr.size != size:
+            raise ValueError(f"box expects a state of dimension {size}")
+        return lo, hi, None
+
+    def project(x: np.ndarray) -> np.ndarray:
+        arr = np.asarray(x, dtype=float).reshape(-1)
+        lo_b, hi_b, idx = _bounds(arr)
+        if idx is None:
+            return np.clip(arr, lo_b, hi_b)
+        out = arr.copy()
+        out[idx] = np.clip(arr[idx], lo_b, hi_b)
+        return out
+
+    def _local_slacks(x: np.ndarray):
+        arr = np.asarray(x, dtype=float).reshape(-1)
+        lo_b, hi_b, idx = _bounds(arr)
+        local = arr if idx is None else arr[idx]
+        return local - lo_b, hi_b - local, idx
+
+    def slack(x: np.ndarray) -> float:
+        below, above, _ = _local_slacks(x)
+        return float(np.min(np.minimum(below, above)))
+
+    def normal(x: np.ndarray) -> Optional[np.ndarray]:
+        below, above, idx = _local_slacks(x)
+        tight = np.minimum(below, above)
+        k = int(np.argmin(tight))
+        if tight[k] > 0.0:
+            return None
+        out = np.zeros(np.asarray(x).size, dtype=float)
+        j = k if idx is None else idx[k]
+        out[j] = 1.0 if above[k] <= below[k] else -1.0
+        return out
+
+    return ProjectorCandidate(project=project, name=name, coordinates=coords,
+                              normal=normal, kkt_data={"slack": slack,
+                                                        "normal": normal,
+                                                        "set": "box",
+                                                        "lower": lo.copy(),
+                                                        "upper": hi.copy(),
+                                                        "euclidean_project": project})
+
+
 def _soc_polar_projector(mu: float) -> Callable[[np.ndarray], np.ndarray]:
     """Return the Euclidean projector onto the polar of ``||z|| <= mu*t``.
 
@@ -676,10 +775,11 @@ class DykstraProjector(ProjectorCandidate):
                  name: str = "dykstra",
                  coordinates: Optional[Sequence[int]] = None):
         try:
-            members_tuple = tuple(_member_projector(v, i)
-                                  for i, v in enumerate(members))
+            members_list = list(members)
         except TypeError as exc:
             raise TypeError("Dykstra members must be an iterable") from exc
+        members_tuple = tuple(_member_projector(v, i)
+                              for i, v in enumerate(members_list))
         if not members_tuple:
             raise ValueError("DykstraProjector needs at least one member set")
         if tol is not None:
@@ -883,6 +983,11 @@ def joint_dykstra_projector(
     is the preferred name for additional sets; ``projectors`` and ``cones``
     are accepted as readable aliases and are concatenated in that order.
     """
+    from scipy.sparse import issparse
+    if issparse(C):
+        raise ValueError(
+            "joint Dykstra C must be a dense array (scipy sparse C is not "
+            "supported for Dykstra members)")
     C_arr = np.asarray(C, dtype=float)
     d_arr = np.asarray(d, dtype=float).reshape(-1)
     if C_arr.ndim == 1:
@@ -1172,6 +1277,7 @@ __all__ = [
     "affine_cutter",
     "halfspace_projector",
     "ball_projector",
+    "box_projector",
     "soc_projector",
     "scaled_soc_projector",
     "psd_cone_projector",

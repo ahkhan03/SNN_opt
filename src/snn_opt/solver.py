@@ -1027,7 +1027,8 @@ class SNNSolver:
 
             kdata = getattr(candidate, "kkt_data", None)
             if not isinstance(kdata, dict):
-                fail(path, "opaque projector callbacks require backend='python'")
+                fail(path, "opaque projector callbacks require backend='python' "
+                     "(for a box such as np.clip, use box_projector)")
             set_name = kdata.get("set")
             if set_name in ("spectral_ball", "psd_cone"):
                 destination.append(matrix_set_descriptor(candidate, path, kdata))
@@ -1043,6 +1044,26 @@ class SNNSolver:
                     fail(path, "ball center and coordinates have different lengths")
                 data_offset, data_count = add_data([radius, *center])
                 row = [0, coord_offset, coord_count, -1, 0, 0, 0, 0, 0,
+                       data_offset, data_count]
+            elif set_name == "box":
+                lower = np.asarray(kdata.get("lower"), dtype=float).reshape(-1)
+                upper = np.asarray(kdata.get("upper"), dtype=float).reshape(-1)
+                size = len(coords) if coords is not None else self.problem.n_vars
+                if coords is None and lower.size == upper.size == 1:
+                    lower = np.repeat(lower, size)
+                    upper = np.repeat(upper, size)
+                if lower.size != size or upper.size != size:
+                    fail(path, f"box bounds need {size} entries per side")
+                if np.any(np.isnan(lower)) or np.any(np.isnan(upper)) or np.any(lower > upper):
+                    fail(path, "box bounds must be ordered and not NaN")
+                # One-sided bounds travel as +-DBL_MAX so the descriptor data
+                # stays finite.  The kernel only compares against them (a
+                # clip), so the sentinel never enters any arithmetic.
+                big = np.finfo(float).max
+                lower = np.where(lower == -np.inf, -big, lower)
+                upper = np.where(upper == np.inf, big, upper)
+                data_offset, data_count = add_data([*lower, *upper])
+                row = [9, coord_offset, coord_count, -1, 0, 0, size, 0, 0,
                        data_offset, data_count]
             elif set_name in ("soc", "scaled_soc"):
                 if coords is None or len(coords) < 2:

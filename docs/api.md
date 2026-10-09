@@ -273,6 +273,7 @@ nothing outside the declaration moved. Built-in factories set this for you.
 
 | Factory | Set | Notes |
 |---|---|---|
+| `box_projector(lower, upper, coordinates=None)` | `lower <= x_I <= upper` | Coordinatewise clip; scalar or per-coordinate bounds, `±inf` opens a side. Native on the compiled backend, alone or as a Dykstra member (`joint_projector(C, d, members=(box_projector(lo, hi),))`). |
 | `halfspace_projector(c, d=0.0, coordinates=None)` | `c x + d <= 0` | Exact projector; the set-valued twin of a row. |
 | `affine_cutter(c, d=0.0, coordinates=None)` | `c x + d <= 0` | Cutter with the same residual and normalisation as a row (identity fixture). |
 | `ball_projector(indices, radius, center=None)` | `‖x_I - center‖ <= radius` | Radial projector on the coordinates `I`. |
@@ -345,20 +346,12 @@ variables with `result.final_x[coordinates["x"]]`.
 
 ### Backends and restrictions
 
-The nonlinear path runs on the Euler integrator with adaptive projection.
-
-| | `backend='python'` | `backend='c'` (and `'c_serial'`, `'c_openmp'`) |
-|---|---|---|
-| Custom callbacks (`CutterCandidate`, `ProjectorCandidate`) | yes | no: rejected at construction with the candidate index |
-| Built-in sets (halfspace, ball, SOC, scaled SOC, affine subspace) | yes | yes |
-| PSD cone, spectral ball, spectral cutter | any size | blocks up to 8×8; the spectral cutter at top level only |
-| `DykstraProjector` | yes, including nested | one level (members must be built-ins) |
-| `record_trajectory=False` (lean result) | not supported | yes |
-| `transform=...`, `integration_method='ivp'`, `projection_method='fixed'` | not supported | not supported |
-
-Unsupported combinations raise `ValueError` naming the offending setting.
-The compiled path is checked against the Python path by the parity tests in
-`tests/test_c_backend_conic_parity.py` and
+Which set types run on which backend and strategy is in the generated
+[capability matrix](capabilities.md), which also lists the message each
+unsupported combination raises. With nonlinear candidates, `backend='python'`
+needs `record_trajectory=True`; the compiled backends always return the lean
+result. The compiled path is checked against the Python path by the parity
+tests in `tests/test_c_backend_conic_parity.py` and
 `tests/test_c_backend_spectral_psd_parity.py`.
 
 ### Certificate on the nonlinear path

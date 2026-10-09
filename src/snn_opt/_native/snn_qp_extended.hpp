@@ -4,7 +4,7 @@
 // solve_euler entry point and its arithmetic remain untouched; this header
 // contains only the descriptor-driven extension used when the Python host has
 // serialized built-in projectors (ball, SOC, scaled SOC, affine, halfspace,
-// and cold Dykstra compositions of those projectors).
+// box, and cold Dykstra compositions of those projectors).
 
 #pragma once
 
@@ -31,6 +31,7 @@ enum ExtendedCandidateKind {
     EXT_SPECTRAL_BALL = 6,
     EXT_SPECTRAL_CUTTER = 7,
     EXT_PSD_CONE = 8,
+    EXT_BOX = 9,
 };
 
 // The released core observer is intentionally not extended: FPGA asset tests
@@ -471,6 +472,20 @@ inline void extended_project_one(
                 output[static_cast<int>(coords[desc.coord_offset + k])] = projected[k];
         } else {
             for (int k = 0; k < local_dim; ++k) output[k] = projected[k];
+        }
+        return;
+    }
+
+    if (desc.kind == EXT_BOX) {
+        // data = [lower[0..k), upper[0..k)]; one-sided bounds arrive as
+        // +-DBL_MAX and are only compared, never added.
+        const int count = desc.aux0;
+        const double* lower = data + desc.data_offset;
+        const double* upper = lower + count;
+        for (int k = 0; k < count; ++k) {
+            const int j = desc.coord_count > 0
+                ? static_cast<int>(coords[desc.coord_offset + k]) : k;
+            output[j] = std::min(std::max(input[j], lower[k]), upper[k]);
         }
         return;
     }

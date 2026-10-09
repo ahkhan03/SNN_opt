@@ -815,7 +815,11 @@ $p_i$ per set:
 ```
 
 and $y \to P_{K_1 \cap \dots \cap K_r}(x)$. `dykstra_projector` packages this
-loop as one projector candidate, restarted from $p_i = 0$ on every call. Use
+loop as one projector candidate, restarted from $p_i = 0$ on every call.
+A box $\ell \le x \le u$ is separable, so its projection is a coordinatewise
+clip and `box_projector` enters the loop as one set with one correction
+vector; written as $2n$ halfspaces it would cost $2n$ member projections per
+cycle instead of one, so the work per cycle would grow with the dimension. Use
 it whenever several sets can be active together. Left as separate
 candidates, the winner-take-all sweep alternates between them and, with the
 drift in between, can stall away from the optimum: on the friction-cone
