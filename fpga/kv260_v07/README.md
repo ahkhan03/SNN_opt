@@ -16,6 +16,10 @@ bash fpga/kv260_v07/build/run_cone_parity.sh
 
 The v06 parity battery is expected to report `cells=247 failures=0 PASS`. The cone parity wrapper drives the same resident top for an n=8 ball, a mixed row/bound/ball/SOC case, and the q=1/q=4 friction seeds (4903, 4914, 4925). It records raw integer equality, event agreement and state gaps against the binary64 reference, plus Clarabel objective values. It does not claim HLS or board timing; any raw mismatch remains visible in `anchors.json`.
 
+## Qualification record
+
+Board evidence: `evidence/board_2026-09-24_93eebcad9f2f/README.md`. It qualifies raw fixed-point state and all 16 telemetry words equal to the native emulation on the ball, scaled-SOC and mixed-cone fixtures, and, with cones off, equal to the v06 native records on the v06 parity bundle, 6x18 (one-shot, persistent), 20x60 and 64x64 (one-shot). It does not qualify latency or energy, the CG and STREAM tiers with cones, cone tables beyond those fixtures, or forced routes, the route-boundary gate and mailbox stress.
+
 ## VM and board handoff
 
 On the Vitis VM, run `build/run_hls.tcl` for C-simulation/csynth and `build/build_xclbin.sh` for the 200 MHz link. If 200 MHz does not close, rerun with the v13 documented 125 MHz link fallback and record the actual clock and routed WNS in `env.yaml`. The resident cones-off bitstream uses `build/build_xclbin.sh`; board parity remains `build/run_parity.sh`. The XRT host source is `src/host_kv260_v07_xrt.cpp`; the descriptor checker is `src/host_kv260_v07.cpp`.

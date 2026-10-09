@@ -1,0 +1,29 @@
+# fpga/CURRENT: the ONE resolver for the currently qualified FPGA packages.
+#
+# Consumers (template protocol T-fpga.4/5, T-snn.10, paper snapshot tooling)
+# read this file instead of spelling a package path in prose: a version stored
+# in prose drifts the next time the datapath is re-qualified, while this file
+# travels with the repo state it describes. Update it in the same commit that
+# qualifies a new package (tests/test_fpga_current.py checks every path).
+#
+# One block per problem class. polyhedral = rows plus box bounds, no cones;
+# conic = rows and bounds plus native Euclidean-ball and scaled-SOC resets.
+# On the board, v07 with cones off matches the v06 native emulation records on
+# the v06 parity bundle (one-shot), 6x18 (one-shot, persistent), and 20x60 and
+# 64x64 (one-shot). That is not shown for v06's persistent FULL runs at 20x60
+# and 64x64 nor for forced STREAM/CG, so v06 stays the qualified polyhedral
+# package.
+# cpu_baseline: none means no qualified same-solver CPU harness exists for
+# that class; extend and requalify one (T-snn.10 point 2).
+polyhedral:
+  package: fpga/kv260_v06
+  boundary: fpga/kv260_v06/README.md
+  cpu_baseline: fpga/kv260_v05/src/cpu_baseline_v05.cpp
+  datapath_width_source: fpga/kv260_v06/src/dt.h
+  qualified: 2026-09-06
+conic:
+  package: fpga/kv260_v07
+  boundary: fpga/kv260_v07/README.md
+  cpu_baseline: none
+  datapath_width_source: fpga/kv260_v07/src/dt.h
+  qualified: 2026-09-24

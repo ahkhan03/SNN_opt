@@ -6,6 +6,17 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`fpga/CURRENT` is back on the released line.** The resolver the paper
+  protocols read for the qualified FPGA package existed only on an
+  experimental branch and still named v05. It now carries one block per
+  problem class: `polyhedral` (rows and box bounds) resolves to
+  `fpga/kv260_v06`, `conic` (native ball and scaled-SOC resets) to
+  `fpga/kv260_v07`, each with its boundary README, CPU baseline (none yet
+  for conic) and datapath-width source. `tests/test_fpga_current.py` fails
+  if any named path stops existing.
+
 ## [0.8.0] - 2026-10-10
 
 ### Added
