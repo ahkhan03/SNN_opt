@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/snn-opt.svg?label=PyPI)](https://pypi.org/project/snn-opt/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
-[![Version](https://img.shields.io/badge/version-0.7.1-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.8.0-informational.svg)](CHANGELOG.md)
 [![Cite](https://img.shields.io/badge/cite-CITATION.cff-orange.svg)](CITATION.cff)
 [![Docs](https://img.shields.io/badge/docs-snn.ahkhan.me-success.svg)](https://snn.ahkhan.me)
 
@@ -49,7 +49,7 @@ The repository is both a **research artifact**, since published SNN-X results
 reproduce from the code here, and a **teaching resource**: annotated
 examples, a self-contained mathematical writeup, and benchmarks that show
 convergence, projection dynamics and the solver's accuracy limits against
-exact references.
+independent, certified references.
 
 ## The idea in three moves
 
@@ -103,12 +103,14 @@ For repeated solves (warm-started receding-horizon problems), construct an
 
 Four diagnostic figures, regenerated from [`benchmarks/`](benchmarks/) with
 `python benchmarks/run_all.py`, give a quick visual sense of what the solver
-actually does. Every objective gap below is measured against an **exact**
-optimum computed by the active-set KKT solve in
-[`benchmarks/qpref.py`](benchmarks/qpref.py), never against a long run of
+actually does. Every objective gap below is measured against an independent
+reference optimum from `snn_opt.reference` (via
+[`benchmarks/qpref.py`](benchmarks/qpref.py)), never against a long run of
 `snn_opt` itself; scoring the solver against its own fixed point cannot reveal a
 standing offset between that fixed point and the true minimiser, and on these
-problems there is one.
+problems there is one. The reference carries its own certified bound on
+`||x - x*||` (of order 1e-6 here); differences far below that are agreement with
+the reference, not certified errors.
 
 **Convergence on a random 50-D QP with 30 inequalities** (7 active at the
 optimum). The gap descends geometrically for about 1800 iterations, then the
@@ -306,8 +308,9 @@ What to do about it, in order of usefulness:
    [`docs/theory.md` §8.2](docs/theory.md#82-why-exact-projection-removes-the-step-size-offset).
 4. **Polish externally if you need machine precision.** Once the active set is
    correct (and it usually is, see Figure 2), the exact optimum follows from one
-   equality-constrained KKT solve on those rows. That is exactly what
-   `benchmarks/qpref.py` does, in well under a millisecond on these sizes.
+   equality-constrained KKT solve on those rows, in well under a millisecond on
+   these sizes. For an independent reference with an error certificate, use
+   `snn_opt.reference.solve_reference`.
 
 Two known limitations are worth stating plainly. **Ill-conditioned or stiff
 QPs** are the harder case: the native adaptive stepping can fail to reach
@@ -474,7 +477,7 @@ software and the solver paper:
   author  = {Khan, Ameer Hamza and Li, Shuai},
   title   = {snn\_opt: A Spiking Neural Network Solver for Constrained Convex Optimization},
   year    = {2026},
-  version = {0.7.1},
+  version = {0.8.0},
   url     = {https://github.com/ahkhan03/SNN_opt},
   license = {Apache-2.0},
 }

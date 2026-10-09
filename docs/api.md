@@ -436,9 +436,105 @@ cfg = SolverConfig(transform=EigenbasisTransform())            # by instance
 | `Transform` | Base class. Subclass and implement `forward(problem, x0, config)` (and usually `check_applicable`). |
 | `EigenbasisTransform` (`'eigenbasis'`) | Rotates a symmetric-PSD Hessian into its eigenbasis (`A = VΛVᵀ`), so the dominant `O(n²)` `A @ x` gradient step becomes an `O(n)` elementwise product `Λ ⊙ ỹ`; constraints rotate to `Ĉ = CV` with the Gram/row-norms invariant, so the projection is unchanged. Recovers `x = V ỹ`. Since v0.5.0 **box bounds are accepted**: they are not rotation-invariant, so they are materialized as explicit rotated unit-norm rows (`m` grows by up to `2n`), giving up the implicit `O(1)` facet advantage under a transform. Best on the compiled backends and larger `n`. |
 
+## Reference solver: `snn_opt.reference`
+
+An independent, certified reference optimum for the same problem class, for
+measuring solution errors against (it does not use the spiking solver).
+NumPy and SciPy only; import it explicitly:
+
+```python
+from snn_opt.reference import solve_reference, ReferenceNotVerified
+
+ref = solve_reference(A, b, C, d)          # raises if it cannot certify the point
+ref.x, ref.error_bound                     # point and a bound on ||x - x*||
+ref.as_dict()                              # plain lists/floats/str, YAML-ready
+ref = solve_reference(A, b, C, d, on_unverified="return")  # x is None on failure
+```
+
+`A` must be symmetric positive definite and only inequalities `C x + d <= 0`
+are accepted (eliminate equalities first). The QP is turned into a
+least-distance problem by a Cholesky factor of `A` and solved with one
+Lawson-Hanson NNLS call, so linearly dependent or nearly parallel active rows
+need no rank decision.
+
+Every returned point carries a certificate. With `mu = lambda_min(A)`,
+non-negative multipliers `lam`, `r = A x + b + C^T lam` and
+`g = -lam^T (C x + d) >= 0`, a feasible `x` satisfies
+
+```
+‖x - x*‖ <= (‖r‖ + sqrt(‖r‖² + 4 μ g)) / (2 μ).
+```
+
+Derivation, in exact arithmetic: `f(x) >= f(x*) + μ/2 ‖x - x*‖²` because `x` is
+feasible and `x*` optimal; `f(x*) >= L(x*) >= L(x) - ‖r‖ ‖x - x*‖ + μ/2 ‖x - x*‖²`
+for the Lagrangian `L = f + lam^T (C · + d)`, because `lam^T (C x* + d) <= 0`;
+adding the two with `L(x) = f(x) - g` gives the quadratic inequality above.
+Both steps need `x` exactly feasible, and with nearly parallel rows the optimal
+multipliers can be very large, so even a roundoff-sized violation can cost an
+unbounded amount. The implementation therefore certifies only points that are
+provably feasible, and evaluates the bound rigorously:
+
+- `x` counts as feasible only if each computed `(C x + d)_i` is at most
+  `-gamma_k (|C_i| |x| + |d_i|)`, a rigorous forward-error bound, so the exact
+  value is `<= 0`;
+- `‖r‖` and `g` are replaced by upper bounds built from the same kind of
+  forward-error terms (`gamma_k (|A||x| + |b| + |C|^T lam)` for `r`), and
+  `mu` by `lambda_min - 10 n eps lambda_max`;
+- assumptions: IEEE double arithmetic with round-to-nearest and no
+  underflow/overflow, `gamma_k = k u / (1 - k u)` with `u = eps/2`,
+  `k = 2 (n + 2)` for the feasibility gate (an `n`-term dot product plus one
+  addition needs only `gamma_{n+1}`, so this is a valid enclosure) and
+  `k = 2 (n + m + 2)` for `r` and `g`, and a LAPACK symmetric eigensolver with backward error at
+  most `10 n eps ‖A‖`.
+
+`(A, b)` is divided by the power of two nearest `lambda_max(A)` before the
+solve (exact, `x*` unchanged), so the result does not depend on the units of
+the objective; `mu`, `objective`, `stationarity`, `complementarity` and
+`multipliers` are reported in the units of the given problem. What remains
+hard is dimensionless: a constrained optimum far from the unconstrained
+minimiser in the `A`-norm relative to the row offsets, with small
+`lambda_min(A)`. Such calls come back `"unverified"`, not wrong.
+
+Under these assumptions `error_bound` bounds the exact distance from the
+returned floating-point `x` to the exact minimiser of the given problem. The
+least-distance point lands on its active rows to roundoff, on either side, so
+when it is not provably feasible the problem is solved again with slightly
+tightened offsets `d_i + t_i` (a few evaluation floors plus the observed
+violation). The certificate is still taken against the original rows and pays
+for the tightening through `g`. A feasible set too thin for that margin gives
+`"unverified"`.
+
+A point that is not provably feasible, or whose bound exceeds
+`max_error_bound` (default `1e-3 * max(1, ||x||)`, a sanity ceiling rather than
+an accuracy target), is not verified. Because the bound grows like
+`sqrt(g / mu)`, it cannot certify below roughly `sqrt(eps * kappa(A)) * ||x||`
+(of order 1e-6 on the benchmark problems), although the point is usually far
+more accurate. Agreement with another solver below that level is two-solver
+agreement, not a certified error; gate `error_bound` against the smallest error
+you report.
+
+| Field | Meaning |
+|---|---|
+| `x`, `objective` | The point and its objective; `None` unless verified. |
+| `status` | `"verified"`, `"unverified"`, or `"infeasible"`: reported infeasible by an LP (HiGHS, default tolerances); not certified; no point is returned either way. |
+| `error_bound` | Bound on `‖x − x*‖` in the units of `x`. |
+| `mu`, `stationarity`, `complementarity` | `lambda_min(A)` (as computed), and the upper bounds on `‖r‖` and `g` that entered the bound. |
+| `max_violation` | `max(0, max_i (C x + d)_i / ‖C_i‖)`. |
+| `active_rows`, `multipliers` | Rows tight at `x`; one multiplier per row of `C`. |
+| `route`, `version` | `"ldp-nnls"` and the `snn_opt` version, for provenance in stored results. |
+
+Failures: malformed input (shapes, non-finite data, `A` not symmetric positive
+definite) raises `ValueError`; an uncertified point or an LP-reported infeasible set raises
+`ReferenceNotVerified` (a `RuntimeError` carrying the same diagnostic fields
+and `.result` with `x=None`) unless `on_unverified="return"`. The legacy
+`solve_exact(A, b, C, d) -> (x, f, active_rows)` wrapper is kept, also exposed
+as `benchmarks/qpref.py`.
+
 ## Versioning
 
-`snn_opt` follows [SemVer](https://semver.org). The public API listed above
-is the *commitment surface*: anything else (`snn_opt.solver._private_helper`,
+`snn_opt` follows [SemVer](https://semver.org). The public API listed above,
+including `snn_opt.reference` (`solve_reference`, `ReferenceResult`,
+`ReferenceNotVerified`, `solve_exact`, `objective`; since 0.8.0), is the
+*commitment surface*: anything else (`snn_opt.solver._private_helper`,
 internal config defaults that are not in `ConvergenceConfig` /
 `SolverConfig`) may change between minor releases.

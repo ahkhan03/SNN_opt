@@ -8,7 +8,7 @@ Solves a 50-D random PSD QP with 30 linear inequalities and plots, side by side:
         balancing it, the raw gradient norm does not go to zero,
     (c) maximum constraint violation (log y).
 
-The reference f* comes from `qpref.solve_exact`, an active-set KKT solve, and
+The reference f* comes from `qpref.solve_exact` (the certified `snn_opt.reference`), and
 NOT from a long run of `snn_opt` itself. That distinction matters: measuring the
 solver against its own fixed point cannot reveal a standing offset between that
 fixed point and the true minimiser, and on this problem there is one. The gap

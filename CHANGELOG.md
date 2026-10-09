@@ -6,6 +6,35 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-10
+
+### Added
+
+- **`snn_opt.reference`: a certified reference solver.** `solve_reference(A, b,
+  C, d)` solves the strictly convex QP independently of the spiking solver, as
+  a least-distance problem with one Lawson-Hanson NNLS call, and returns the
+  point with an a-posteriori bound on `||x - x*||` plus the multipliers,
+  active rows, `lambda_min(A)`, stationarity and complementarity that enter
+  it. The bound is rigorous for the returned floating-point point: only a
+  provably feasible point is certified, and every term carries a
+  forward-error bound (assumptions stated in `docs/api.md`). `(A, b)` is
+  normalised by a power of two before the solve, so the result does not
+  depend on the units of the objective. An uncertified point raises
+  `ReferenceNotVerified` (or, with `on_unverified="return"`, comes back with
+  `x=None`); it is never returned as an answer. `status == "infeasible"` is
+  an LP verdict (HiGHS), not a certificate. NumPy and SciPy only.
+
+### Changed
+
+- `benchmarks/qpref.py` is now a thin shim over `snn_opt.reference`. The
+  previous active-set KKT solve had no check on its answer: with nearly
+  parallel active rows its KKT system becomes ill-conditioned, and a nearly
+  singular system could return an inaccurate point unchecked. `solve_exact`
+  keeps its `(x, f, active_rows)` signature, raises on an uncertified point,
+  and ignores `x_guess`/`max_swaps`. Its docstring no longer quotes 1e-10
+  agreement with CVXPY/Clarabel as accuracy: below the certificate (of
+  order 1e-6 on the benchmark problems) such agreement is two-solver agreement.
+
 ### Documentation
 
 - **README rewritten around the dynamics.** It opens with an animation of a

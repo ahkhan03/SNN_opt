@@ -43,7 +43,7 @@ def exact_optimum(A, b, C, d):
     """Exact QP optimum by enumerating active sets.
 
     Only sensible because this problem has two rows; the benchmark suite uses
-    the iterative active-set solver in ``benchmarks/qpref.py`` instead.
+    the certified reference solver ``snn_opt.reference`` instead.
     """
     n, m = len(b), len(d)
     best = None
