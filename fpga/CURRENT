@@ -18,7 +18,7 @@
 polyhedral:
   package: fpga/kv260_v06
   boundary: fpga/kv260_v06/README.md
-  cpu_baseline: fpga/kv260_v05/src/cpu_baseline_v05.cpp
+  cpu_baseline: fpga/cpu_baseline/cpu_baseline.cpp
   datapath_width_source: fpga/kv260_v06/src/dt.h
   qualified: 2026-09-06
 conic:
