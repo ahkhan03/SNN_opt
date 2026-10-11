@@ -379,3 +379,32 @@ def test_power_of_two_objective_scaling_is_exact():
     for k in (-40, 40):
         res = solve_reference(2.0**k * A, 2.0**k * b, C, d)
         assert np.array_equal(res.x, base.x) and res.error_bound == base.error_bound
+
+
+@pytest.mark.parametrize("bounds_per_side", [1, 3])
+def test_box_qps_verify(bounds_per_side):
+    """Feasible box QPs certify, including repeated parallel bounds per joint.
+
+    With four tightening attempts 1.2% of single-bound and 3.4% of triple-bound
+    box QPs came back "unverified" (2000 draws each): each re-solve can put
+    the least-distance point on another near-active row, so the violation
+    moves between rows. The triple-bound case is the shape of a manipulator
+    QP whose position, velocity and acceleration limits share the normals
+    +/- e_i.
+    """
+    rng = np.random.default_rng(1)
+    n = 7
+    for _ in range(300):
+        M = rng.standard_normal((n, n))
+        A = M @ M.T / n + 0.02 * np.eye(n)
+        b = 3.0 * rng.standard_normal(n)
+        rows, offs = [], []
+        for i in range(n):
+            for sign in (1.0, -1.0):
+                for lim in rng.uniform(0.05, 1.0, bounds_per_side):
+                    e = np.zeros(n)
+                    e[i] = sign
+                    rows.append(e)
+                    offs.append(-lim)
+        res = solve_reference(A, b, np.array(rows), np.array(offs), on_unverified="return")
+        assert res.verified, res.reason
