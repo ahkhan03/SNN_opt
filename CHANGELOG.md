@@ -52,6 +52,21 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   for conic) and datapath-width source. `tests/test_fpga_current.py` fails
   if any named path stops existing.
 
+## [0.8.1] - 2026-10-11
+
+### Fixed
+
+- **`snn_opt.reference` no longer gives up on feasible box QPs.** The
+  tightening loop that looks for a provably feasible point ran at most four
+  rounds; each re-solve can land the least-distance point on another
+  near-active row, so on box QPs the violation moved between rows and the
+  call returned `"unverified": no provably feasible point after tightening`
+  (1.2% of random feasible box QPs, 3.4% when each side carries three
+  parallel bounds, as manipulator position, velocity and acceleration limits
+  do). It now runs up to twelve rounds; only calls that need them pay for the
+  extra rounds. Certified results are unchanged: the dependent-row regression
+  fixture still verifies 400/400 at the same points.
+
 ## [0.8.0] - 2026-10-10
 
 ### Added

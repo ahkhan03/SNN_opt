@@ -125,7 +125,7 @@ _EPS = float(np.finfo(float).eps)
 _U = _EPS / 2.0
 _ACTIVE_FACTORS = (1e3, 1e6)
 _INFEASIBLE_TOL = 1e-12
-_SHIFT_ATTEMPTS = 4
+_SHIFT_ATTEMPTS = 12
 
 
 def _tri(R: np.ndarray, B: np.ndarray, trans: int = 0) -> np.ndarray:
