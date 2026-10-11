@@ -10,17 +10,18 @@
 # conic = rows and bounds plus native Euclidean-ball and scaled-SOC resets.
 # On the board, v07 with cones off matches the v06 native emulation records on
 # the v06 parity bundle (one-shot), 6x18 (one-shot, persistent), and 20x60 and
-# 64x64 (one-shot). That is not shown for v06's persistent FULL runs at 20x60
-# and 64x64 nor for forced STREAM/CG, so v06 stays the qualified polyhedral
-# package.
+# 64x64 (one-shot). The polyhedral package is v08 (2026-10-11): it returns
+# v06's raw state and telemetry byte for byte on the board (framework fixtures
+# in both launch modes, forced STREAM/CG, and the economic-dispatch band fleet)
+# and supersedes v06, which stays in the tree.
 # cpu_baseline: none means no qualified same-solver CPU harness exists for
 # that class; extend and requalify one (T-snn.10 point 2).
 polyhedral:
-  package: fpga/kv260_v06
-  boundary: fpga/kv260_v06/README.md
+  package: fpga/kv260_v08
+  boundary: fpga/kv260_v08/README.md
   cpu_baseline: fpga/cpu_baseline/cpu_baseline.cpp
-  datapath_width_source: fpga/kv260_v06/src/dt.h
-  qualified: 2026-09-06
+  datapath_width_source: fpga/kv260_v08/src/dt.h
+  qualified: 2026-10-11
 conic:
   package: fpga/kv260_v07
   boundary: fpga/kv260_v07/README.md

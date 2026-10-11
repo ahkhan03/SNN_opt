@@ -94,30 +94,30 @@ limits are read from each package's `env.yaml`. Values: **native** (in the
 kernel), **software** (the package states it stays host-side), **not_qualified**
 (present or unstated, but not board-qualified), **absent** (not provided).
 
-| Feature | `fpga/kv260_v05` | `fpga/kv260_v06` | `fpga/kv260_v07` |
-|---|---|---|---|
-| rows | native | native | native |
-| scalar_lower_bound | native | native | native |
-| scalar_upper_bound | not_qualified | native | native |
-| box_only_m0 | not_qualified | not_qualified | not_qualified |
-| vector_bounds | not_qualified | not_qualified | not_qualified |
-| ball | absent | absent | native |
-| scaled_soc | absent | absent | native |
-| affine_subspace | absent | absent | software |
-| psd_spectral | absent | absent | software |
-| soc_lifts | absent | absent | software |
-| dykstra | absent | absent | software |
-| callbacks | absent | absent | software |
-| eigenbasis_mode | not_qualified | not_qualified | not_qualified |
-| `env.yaml` kernel | snn_qp_v05 | snn_qp_v06 | snn_qp_v07 |
-| `env.yaml` maximum_n | 64 | 1024 | 1024 |
-| `env.yaml` maximum_m | 64 | 1024 | 1024 |
-| `env.yaml` full_square_cap | - | 320 | 320 |
-| `env.yaml` cg_square_cap | - | 372 | 372 |
-| `env.yaml` stream_dimension_cap | - | 1024 | 1024 |
-| current (`fpga/CURRENT`) | no | yes | yes |
+| Feature | `fpga/kv260_v05` | `fpga/kv260_v06` | `fpga/kv260_v07` | `fpga/kv260_v08` |
+|---|---|---|---|---|
+| rows | native | native | native | native |
+| scalar_lower_bound | native | native | native | native |
+| scalar_upper_bound | not_qualified | native | native | native |
+| box_only_m0 | not_qualified | not_qualified | not_qualified | not_qualified |
+| vector_bounds | not_qualified | not_qualified | not_qualified | not_qualified |
+| ball | absent | absent | native | absent |
+| scaled_soc | absent | absent | native | absent |
+| affine_subspace | absent | absent | software | absent |
+| psd_spectral | absent | absent | software | absent |
+| soc_lifts | absent | absent | software | absent |
+| dykstra | absent | absent | software | absent |
+| callbacks | absent | absent | software | absent |
+| eigenbasis_mode | not_qualified | not_qualified | not_qualified | not_qualified |
+| `env.yaml` kernel | snn_qp_v05 | snn_qp_v06 | snn_qp_v07 | snn_qp_v08 |
+| `env.yaml` maximum_n | 64 | 1024 | 1024 | 1024 |
+| `env.yaml` maximum_m | 64 | 1024 | 1024 | 1024 |
+| `env.yaml` full_square_cap | - | 320 | 320 | 320 |
+| `env.yaml` cg_square_cap | - | 372 | 372 | 372 |
+| `env.yaml` stream_dimension_cap | - | 1024 | 1024 | 1024 |
+| current (`fpga/CURRENT`) | no | no | yes | yes |
 
-`fpga/CURRENT` names: `fpga/kv260_v06`, `fpga/kv260_v07`.
+`fpga/CURRENT` names: `fpga/kv260_v07`, `fpga/kv260_v08`.
 No eigenbasis FPGA package exists in this repository.
 
 Evidence cited per package:
@@ -125,3 +125,4 @@ Evidence cited per package:
 - `fpga/kv260_v05`: `fpga/kv260_v05/README.md`
 - `fpga/kv260_v06`: `fpga/kv260_v06/README.md`, `fpga/kv260_v06/evidence/board_2026-09-06_37f33fcfe2ca`
 - `fpga/kv260_v07`: `fpga/kv260_v07/README.md`, `fpga/kv260_v07/evidence/board_2026-09-24_93eebcad9f2f/README.md`
+- `fpga/kv260_v08`: `fpga/kv260_v08/README.md`, `fpga/kv260_v08/evidence/board_2026-10-11_c2321d6f0833/README.md`

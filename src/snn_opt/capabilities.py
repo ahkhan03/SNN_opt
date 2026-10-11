@@ -257,6 +257,10 @@ FPGA_BOUNDARIES = {
         _V0607, evidence=("fpga/kv260_v06/README.md",
                           "fpga/kv260_v06/evidence/board_2026-09-06_37f33fcfe2ca"),
         ball="absent", scaled_soc="absent"),
+    "fpga/kv260_v08": dict(
+        _V0607, evidence=("fpga/kv260_v08/README.md",
+                          "fpga/kv260_v08/evidence/board_2026-10-11_c2321d6f0833/README.md"),
+        ball="absent", scaled_soc="absent"),
     "fpga/kv260_v07": dict(
         _V0607, evidence=("fpga/kv260_v07/README.md",
                           "fpga/kv260_v07/evidence/board_2026-09-24_93eebcad9f2f/README.md"),
