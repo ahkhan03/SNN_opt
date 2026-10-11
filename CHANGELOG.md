@@ -32,6 +32,12 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ### Changed
 
+- `main` carries a development version (`0.9.0.dev0`): the 0.8.1 patch
+  release was merged forward with its release version, so a checkout of
+  `main` (with unreleased work such as `box_projector`) reported `0.8.1`.
+  `tests/test_version.py` now fails when an untagged commit reports a
+  release version; the procedure is in `RELEASING.md`.
+
 - The hand-kept backend table in `docs/api.md` is replaced by a pointer to the
   generated matrix.
 
