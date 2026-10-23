@@ -45,3 +45,10 @@ image arm, same kernel clock), plus the economic-dispatch fleet logs in
 Reproduce: a csynth rerun from `fpga/kv260_v08/build/run_hls.tcl` on the
 Vitis 2022.1 build host takes about 12 minutes (csynth only; no link, no
 implementation).
+
+- 2026-10-24 addendum: `lever_c_board_result_2026-10-24.md` — the Option C
+  continuous event pipeline was built, qualified bit-identical, routed at
+  55.4% LUT, and measured 1.7-2.0x SLOWER per iteration on this fleet: a
+  dead end in that form; the fused-event root cause is open. The BRAM
+  wide-matvec lineage (fpga/kv260_v09_bram) qualified the same day and is
+  the resolver's arm for square matvec-heavy shapes inside n,m <= 128.
