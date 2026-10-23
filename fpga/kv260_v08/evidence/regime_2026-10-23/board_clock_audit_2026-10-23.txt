@@ -1,0 +1,17 @@
+app verdict kernel_mhz dtbo_hz platform_mhz wizard ratio manifest
+completion_2cu_200_95a6720dd96b OK 200 200000000 199.998001 no 1.000 present
+dc96_v05 HISTORICAL 160 200000000 249.997498 yes 0.800 historical
+k26-starter-kits NO-PL-CLOCK n/a - - - - absent
+msrp_v05_200m_d1cf83225e7d HISTORICAL 160 200000000 249.997498 yes 0.800 historical
+msrp_v05_k200_d1cf83225e7d OK 200 250000000 249.997498 yes 0.800 present
+sc_langevin_200 UNDERCLOCK 200 200000000 249.997498 no 1.000 absent
+snn_pca_multi UNVERIFIED unknown 250000000 - - - absent
+snn_pca_solve UNVERIFIED unknown 250000000 - - - absent
+snn_qp_eig250 OK 250 250000000 249.997498 no 1.000 absent
+snn_qp_solve OK 200 200000000 199.998001 no 1.000 absent
+snn_qp_v06_200m_37f33fcfe2ca HISTORICAL 160 200000000 249.997498 yes 0.800 historical
+snn_qp_v06_k200_37f33fcfe2ca OK 200 250000000 249.997498 yes 0.800 present
+snn_qp_v07_200m_93eebcad9f2f OK 200 250000000 249.997498 yes 0.800 present
+snn_qp_v08_k200_c2321d6f0833 OK 200 250000000 249.997498 yes 0.800 present
+snn_qp_v13_125 OK 125 125000000 124.998749 no 1.000 absent
+thn_op UNVERIFIED unknown 250000000 - - - absent
