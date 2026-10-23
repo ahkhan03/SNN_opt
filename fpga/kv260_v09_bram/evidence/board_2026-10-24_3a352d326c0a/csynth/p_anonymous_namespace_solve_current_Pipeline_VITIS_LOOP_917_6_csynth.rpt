@@ -1,0 +1,175 @@
+
+
+================================================================
+== Vitis HLS Report for 'p_anonymous_namespace_solve_current_Pipeline_VITIS_LOOP_917_6'
+================================================================
+* Date:           Sat Oct 24 02:47:04 2026
+
+* Version:        2022.1 (Build 3526262 on Mon Apr 18 15:47:01 MDT 2022)
+* Project:        hls
+* Solution:       solution_200mhz (Vivado IP Flow Target)
+* Product family: zynquplus
+* Target device:  xck26-sfvc784-2LV-c
+
+
+================================================================
+== Performance Estimates
+================================================================
++ Timing: 
+    * Summary: 
+    +--------+---------+----------+------------+
+    |  Clock |  Target | Estimated| Uncertainty|
+    +--------+---------+----------+------------+
+    |ap_clk  |  5.00 ns|  1.418 ns|     2.50 ns|
+    +--------+---------+----------+------------+
+
++ Latency: 
+    * Summary: 
+    +---------+---------+----------+----------+-----+-----+---------+
+    |  Latency (cycles) |  Latency (absolute) |  Interval | Pipeline|
+    |   min   |   max   |    min   |    max   | min | max |   Type  |
+    +---------+---------+----------+----------+-----+-----+---------+
+    |        ?|        ?|         ?|         ?|    ?|    ?|       no|
+    +---------+---------+----------+----------+-----+-----+---------+
+
+    + Detail: 
+        * Instance: 
+        N/A
+
+        * Loop: 
+        +--------------------+---------+---------+----------+-----------+-----------+------+----------+
+        |                    |  Latency (cycles) | Iteration|  Initiation Interval  | Trip |          |
+        |      Loop Name     |   min   |   max   |  Latency |  achieved |   target  | Count| Pipelined|
+        +--------------------+---------+---------+----------+-----------+-----------+------+----------+
+        |- VITIS_LOOP_917_6  |        ?|        ?|         3|          1|          1|     ?|       yes|
+        +--------------------+---------+---------+----------+-----------+-----------+------+----------+
+
+
+
+================================================================
+== Utilization Estimates
+================================================================
+* Summary: 
++-----------------+---------+------+--------+--------+-----+
+|       Name      | BRAM_18K|  DSP |   FF   |   LUT  | URAM|
++-----------------+---------+------+--------+--------+-----+
+|DSP              |        -|     -|       -|       -|    -|
+|Expression       |        -|     -|       0|      37|    -|
+|FIFO             |        -|     -|       -|       -|    -|
+|Instance         |        -|     -|       0|      43|    -|
+|Memory           |        -|     -|       -|       -|    -|
+|Multiplexer      |        -|     -|       -|      36|    -|
+|Register         |        -|     -|      61|       -|    -|
++-----------------+---------+------+--------+--------+-----+
+|Total            |        0|     0|      61|     116|    0|
++-----------------+---------+------+--------+--------+-----+
+|Available        |      288|  1248|  234240|  117120|   64|
++-----------------+---------+------+--------+--------+-----+
+|Utilization (%)  |        0|     0|      ~0|      ~0|    0|
++-----------------+---------+------+--------+--------+-----+
+
++ Detail: 
+    * Instance: 
+    +--------------------+---------------+---------+----+---+----+-----+
+    |      Instance      |     Module    | BRAM_18K| DSP| FF| LUT| URAM|
+    +--------------------+---------------+---------+----+---+----+-----+
+    |mux_83_32_1_1_U674  |mux_83_32_1_1  |        0|   0|  0|  43|    0|
+    +--------------------+---------------+---------+----+---+----+-----+
+    |Total               |               |        0|   0|  0|  43|    0|
+    +--------------------+---------------+---------+----+---+----+-----+
+
+    * DSP: 
+    N/A
+
+    * Memory: 
+    N/A
+
+    * FIFO: 
+    N/A
+
+    * Expression: 
+    +----------------------+----------+----+---+----+------------+------------+
+    |     Variable Name    | Operation| DSP| FF| LUT| Bitwidth P0| Bitwidth P1|
+    +----------------------+----------+----+---+----+------------+------------+
+    |add_ln917_fu_203_p2   |         +|   0|  0|  15|           8|           1|
+    |icmp_ln917_fu_197_p2  |      icmp|   0|  0|  20|          32|          32|
+    |ap_enable_pp0         |       xor|   0|  0|   2|           1|           2|
+    +----------------------+----------+----+---+----+------------+------------+
+    |Total                 |          |   0|  0|  37|          41|          35|
+    +----------------------+----------+----+---+----+------------+------------+
+
+    * Multiplexer: 
+    +-------------------------+----+-----------+-----+-----------+
+    |           Name          | LUT| Input Size| Bits| Total Bits|
+    +-------------------------+----+-----------+-----+-----------+
+    |ap_done_int              |   9|          2|    1|          2|
+    |ap_enable_reg_pp0_iter1  |   9|          2|    1|          2|
+    |ap_sig_allocacmp_i       |   9|          2|    8|         16|
+    |i_7_fu_58                |   9|          2|    8|         16|
+    +-------------------------+----+-----------+-----+-----------+
+    |Total                    |  36|          8|   18|         36|
+    +-------------------------+----+-----------+-----+-----------+
+
+    * Register: 
+    +----------------------------------+----+----+-----+-----------+
+    |               Name               | FF | LUT| Bits| Const Bits|
+    +----------------------------------+----+----+-----+-----------+
+    |ap_CS_fsm                         |   1|   0|    1|          0|
+    |ap_done_reg                       |   1|   0|    1|          0|
+    |ap_enable_reg_pp0_iter1           |   1|   0|    1|          0|
+    |ap_enable_reg_pp0_iter2           |   1|   0|    1|          0|
+    |ap_loop_exit_ready_pp0_iter1_reg  |   1|   0|    1|          0|
+    |i_7_fu_58                         |   8|   0|    8|          0|
+    |i_reg_272                         |   8|   0|    8|          0|
+    |i_reg_272_pp0_iter1_reg           |   8|   0|    8|          0|
+    |tmp_85_reg_322                    |  32|   0|   32|          0|
+    +----------------------------------+----+----+-----+-----------+
+    |Total                             |  61|   0|   61|          0|
+    +----------------------------------+----+----+-----+-----------+
+
+
+
+================================================================
+== Interface
+================================================================
+* Summary: 
++-------------------------------------------------+-----+-----+------------+--------------------------------------------------------------+--------------+
+|                    RTL Ports                    | Dir | Bits|  Protocol  |                         Source Object                        |    C Type    |
++-------------------------------------------------+-----+-----+------------+--------------------------------------------------------------+--------------+
+|ap_clk                                           |   in|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|ap_rst                                           |   in|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|ap_start                                         |   in|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|ap_done                                          |  out|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|ap_idle                                          |  out|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|ap_ready                                         |  out|    1|  ap_ctrl_hs|  (anonymous namespace)solve_current_Pipeline_VITIS_LOOP_917_6|  return value|
+|p_anonymous_namespace_configured_n_load          |   in|   32|     ap_none|                       p_anonymous_namespace_configured_n_load|        scalar|
+|x_V_address0                                     |  out|    4|   ap_memory|                                                           x_V|         array|
+|x_V_ce0                                          |  out|    1|   ap_memory|                                                           x_V|         array|
+|x_V_q0                                           |   in|   32|   ap_memory|                                                           x_V|         array|
+|x_V_1_address0                                   |  out|    4|   ap_memory|                                                         x_V_1|         array|
+|x_V_1_ce0                                        |  out|    1|   ap_memory|                                                         x_V_1|         array|
+|x_V_1_q0                                         |   in|   32|   ap_memory|                                                         x_V_1|         array|
+|x_V_2_address0                                   |  out|    4|   ap_memory|                                                         x_V_2|         array|
+|x_V_2_ce0                                        |  out|    1|   ap_memory|                                                         x_V_2|         array|
+|x_V_2_q0                                         |   in|   32|   ap_memory|                                                         x_V_2|         array|
+|x_V_3_address0                                   |  out|    4|   ap_memory|                                                         x_V_3|         array|
+|x_V_3_ce0                                        |  out|    1|   ap_memory|                                                         x_V_3|         array|
+|x_V_3_q0                                         |   in|   32|   ap_memory|                                                         x_V_3|         array|
+|x_V_4_address0                                   |  out|    4|   ap_memory|                                                         x_V_4|         array|
+|x_V_4_ce0                                        |  out|    1|   ap_memory|                                                         x_V_4|         array|
+|x_V_4_q0                                         |   in|   32|   ap_memory|                                                         x_V_4|         array|
+|x_V_5_address0                                   |  out|    4|   ap_memory|                                                         x_V_5|         array|
+|x_V_5_ce0                                        |  out|    1|   ap_memory|                                                         x_V_5|         array|
+|x_V_5_q0                                         |   in|   32|   ap_memory|                                                         x_V_5|         array|
+|x_V_6_address0                                   |  out|    4|   ap_memory|                                                         x_V_6|         array|
+|x_V_6_ce0                                        |  out|    1|   ap_memory|                                                         x_V_6|         array|
+|x_V_6_q0                                         |   in|   32|   ap_memory|                                                         x_V_6|         array|
+|x_V_7_address0                                   |  out|    4|   ap_memory|                                                         x_V_7|         array|
+|x_V_7_ce0                                        |  out|    1|   ap_memory|                                                         x_V_7|         array|
+|x_V_7_q0                                         |   in|   32|   ap_memory|                                                         x_V_7|         array|
+|p_anonymous_namespace_resident_state_V_address0  |  out|    7|   ap_memory|                        p_anonymous_namespace_resident_state_V|         array|
+|p_anonymous_namespace_resident_state_V_ce0       |  out|    1|   ap_memory|                        p_anonymous_namespace_resident_state_V|         array|
+|p_anonymous_namespace_resident_state_V_we0       |  out|    1|   ap_memory|                        p_anonymous_namespace_resident_state_V|         array|
+|p_anonymous_namespace_resident_state_V_d0        |  out|   32|   ap_memory|                        p_anonymous_namespace_resident_state_V|         array|
++-------------------------------------------------+-----+-----+------------+--------------------------------------------------------------+--------------+
+

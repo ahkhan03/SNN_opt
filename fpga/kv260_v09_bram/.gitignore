@@ -1,0 +1,5 @@
+build/work/
+evidence/fixtures/*.bin
+evidence/native_records/fleet_*
+evidence/native_records/square_*
+evidence/board_*/results/

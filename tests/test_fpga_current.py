@@ -40,3 +40,29 @@ def test_current_names_existing_paths_per_problem_class():
             assert (ROOT / value).is_file(), f"{name}.{field}: {value}"
         assert fields["boundary"].startswith(package + "/")
         assert fields["datapath_width_source"].startswith(package + "/")
+
+
+def test_lineage_packages_resolve_like_the_default():
+    """A lineage-prefixed field (bram_package, ...) is a full package entry.
+
+    The polyhedral class routes by size as well as shape and semantics, so
+    the resolver can name more than one qualified package per class. Every
+    <prefix>_package carries its own <prefix>_boundary and
+    <prefix>_datapath_width_source inside that package, checked like the
+    default fields; a lineage that names a path that does not exist fails
+    here rather than at paper-snapshot time.
+    """
+    blocks = _parse((ROOT / "fpga" / "CURRENT").read_text())
+    for name in CLASSES:
+        fields = blocks[name]
+        prefixes = [k[: -len("_package")] for k in fields
+                    if k.endswith("_package") and k != "package"]
+        for prefix in prefixes:
+            package = fields[f"{prefix}_package"]
+            assert (ROOT / package).is_dir(), f"{name}.{prefix}_package: {package}"
+            for suffix in ("boundary", "datapath_width_source"):
+                field = f"{prefix}_{suffix}"
+                assert field in fields, f"{name}.{field} missing"
+                value = fields[field]
+                assert (ROOT / value).is_file(), f"{name}.{field}: {value}"
+                assert value.startswith(package + "/"), f"{name}.{field}"

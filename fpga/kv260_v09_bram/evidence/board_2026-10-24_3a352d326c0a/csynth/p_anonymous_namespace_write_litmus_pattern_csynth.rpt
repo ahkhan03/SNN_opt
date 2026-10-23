@@ -1,0 +1,236 @@
+
+
+================================================================
+== Vitis HLS Report for 'p_anonymous_namespace_write_litmus_pattern'
+================================================================
+* Date:           Sat Oct 24 02:47:29 2026
+
+* Version:        2022.1 (Build 3526262 on Mon Apr 18 15:47:01 MDT 2022)
+* Project:        hls
+* Solution:       solution_200mhz (Vivado IP Flow Target)
+* Product family: zynquplus
+* Target device:  xck26-sfvc784-2LV-c
+
+
+================================================================
+== Performance Estimates
+================================================================
++ Timing: 
+    * Summary: 
+    +--------+---------+----------+------------+
+    |  Clock |  Target | Estimated| Uncertainty|
+    +--------+---------+----------+------------+
+    |ap_clk  |  5.00 ns|  2.500 ns|     2.50 ns|
+    +--------+---------+----------+------------+
+
++ Latency: 
+    * Summary: 
+    +---------+---------+----------+----------+-----+-----+---------+
+    |  Latency (cycles) |  Latency (absolute) |  Interval | Pipeline|
+    |   min   |   max   |    min   |    max   | min | max |   Type  |
+    +---------+---------+----------+----------+-----+-----+---------+
+    |        ?|        ?|         ?|         ?|    ?|    ?|       no|
+    +---------+---------+----------+----------+-----+-----+---------+
+
+    + Detail: 
+        * Instance: 
+        +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+---------+-----------+-----------+-----+-----+---------+
+        |                                                                                 |                                                                      |  Latency (cycles) |   Latency (absolute)  |  Interval | Pipeline|
+        |                                     Instance                                    |                                Module                                |   min   |   max   |    min    |    max    | min | max |   Type  |
+        +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+---------+-----------+-----------+-----+-----+---------+
+        |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_212_1_fu_148  |p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_212_1  |        ?|        ?|          ?|          ?|    ?|    ?|       no|
+        |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_222_2_fu_158  |p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_222_2  |       17|       17|  85.000 ns|  85.000 ns|   17|   17|       no|
+        +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+---------+-----------+-----------+-----+-----+---------+
+
+        * Loop: 
+        N/A
+
+
+
+================================================================
+== Utilization Estimates
+================================================================
+* Summary: 
++-----------------+---------+------+--------+--------+-----+
+|       Name      | BRAM_18K|  DSP |   FF   |   LUT  | URAM|
++-----------------+---------+------+--------+--------+-----+
+|DSP              |        -|     -|       -|       -|    -|
+|Expression       |        -|     -|       0|     580|    -|
+|FIFO             |        -|     -|       -|       -|    -|
+|Instance         |        -|     -|     214|     334|    -|
+|Memory           |        -|     -|       -|       -|    -|
+|Multiplexer      |        -|     -|       -|     509|    -|
+|Register         |        -|     -|     385|       -|    -|
++-----------------+---------+------+--------+--------+-----+
+|Total            |        0|     0|     599|    1423|    0|
++-----------------+---------+------+--------+--------+-----+
+|Available        |      288|  1248|  234240|  117120|   64|
++-----------------+---------+------+--------+--------+-----+
+|Utilization (%)  |        0|     0|      ~0|       1|    0|
++-----------------+---------+------+--------+--------+-----+
+
++ Detail: 
+    * Instance: 
+    +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+----+-----+-----+-----+
+    |                                     Instance                                    |                                Module                                | BRAM_18K| DSP|  FF | LUT | URAM|
+    +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+----+-----+-----+-----+
+    |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_212_1_fu_148  |p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_212_1  |        0|   0|  201|  263|    0|
+    |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_222_2_fu_158  |p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_222_2  |        0|   0|   13|   71|    0|
+    +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+----+-----+-----+-----+
+    |Total                                                                            |                                                                      |        0|   0|  214|  334|    0|
+    +---------------------------------------------------------------------------------+----------------------------------------------------------------------+---------+----+-----+-----+-----+
+
+    * DSP: 
+    N/A
+
+    * Memory: 
+    N/A
+
+    * FIFO: 
+    N/A
+
+    * Expression: 
+    +---------------------------------+----------+----+---+-----+------------+------------+
+    |          Variable Name          | Operation| DSP| FF| LUT | Bitwidth P0| Bitwidth P1|
+    +---------------------------------+----------+----+---+-----+------------+------------+
+    |add_ln221_fu_229_p2              |         +|   0|  0|   71|          64|           5|
+    |add_ln222_fu_301_p2              |         +|   0|  0|   71|          64|           4|
+    |ap_block_state26                 |       and|   0|  0|    2|           1|           1|
+    |ap_block_state4_on_subcall_done  |       and|   0|  0|    2|           1|           1|
+    |empty_318_fu_191_p2              |      icmp|   0|  0|   20|          32|           9|
+    |empty_fu_171_p2                  |      icmp|   0|  0|   20|          32|           1|
+    |icmp_ln211_fu_165_p2             |      icmp|   0|  0|   29|          64|           1|
+    |icmp_ln217_fu_219_p2             |      icmp|   0|  0|   29|          64|           1|
+    |icmp_ln218_fu_224_p2             |      icmp|   0|  0|   29|          64|           1|
+    |lshr_ln221_fu_268_p2             |      lshr|   0|  0|  179|          64|          64|
+    |select_ln212_1_fu_201_p3         |    select|   0|  0|   32|           1|          32|
+    |select_ln212_fu_183_p3           |    select|   0|  0|   32|           1|          32|
+    |xor_ln212_1_fu_196_p2            |       xor|   0|  0|   32|          32|           2|
+    |xor_ln212_fu_177_p2              |       xor|   0|  0|   32|          32|           2|
+    +---------------------------------+----------+----+---+-----+------------+------------+
+    |Total                            |          |   0|  0|  580|         516|         156|
+    +---------------------------------+----------+----+---+-----+------------+------------+
+
+    * Multiplexer: 
+    +-------------------+-----+-----------+-----+-----------+
+    |        Name       | LUT | Input Size| Bits| Total Bits|
+    +-------------------+-----+-----------+-----+-----------+
+    |ap_NS_fsm          |  135|         27|    1|         27|
+    |cond_reg_136       |    9|          2|   40|         80|
+    |g2_blk_n_AR        |    9|          2|    1|          2|
+    |g2_blk_n_AW        |    9|          2|    1|          2|
+    |g2_blk_n_B         |    9|          2|    1|          2|
+    |g2_blk_n_R         |    9|          2|    1|          2|
+    |g2_blk_n_W         |    9|          2|    1|          2|
+    |m_axi_g2_AWADDR    |   26|          5|   64|        320|
+    |m_axi_g2_AWBURST   |   14|          3|    2|          6|
+    |m_axi_g2_AWCACHE   |   14|          3|    4|         12|
+    |m_axi_g2_AWID      |   14|          3|    1|          3|
+    |m_axi_g2_AWLEN     |   26|          5|   32|        160|
+    |m_axi_g2_AWLOCK    |   14|          3|    2|          6|
+    |m_axi_g2_AWPROT    |   14|          3|    3|          9|
+    |m_axi_g2_AWQOS     |   14|          3|    4|         12|
+    |m_axi_g2_AWREGION  |   14|          3|    4|         12|
+    |m_axi_g2_AWSIZE    |   14|          3|    3|          9|
+    |m_axi_g2_AWUSER    |   14|          3|    1|          3|
+    |m_axi_g2_AWVALID   |   20|          4|    1|          4|
+    |m_axi_g2_BREADY    |   20|          4|    1|          4|
+    |m_axi_g2_WDATA     |   20|          4|   64|        256|
+    |m_axi_g2_WID       |   14|          3|    1|          3|
+    |m_axi_g2_WLAST     |   14|          3|    1|          3|
+    |m_axi_g2_WSTRB     |   20|          4|    8|         32|
+    |m_axi_g2_WUSER     |   14|          3|    1|          3|
+    |m_axi_g2_WVALID    |   20|          4|    1|          4|
+    +-------------------+-----+-----------+-----+-----------+
+    |Total              |  509|        105|  244|        978|
+    +-------------------+-----+-----------+-----+-----------+
+
+    * Register: 
+    +----------------------------------------------------------------------------------------------+----+----+-----+-----------+
+    |                                             Name                                             | FF | LUT| Bits| Const Bits|
+    +----------------------------------------------------------------------------------------------+----+----+-----+-----------+
+    |ap_CS_fsm                                                                                     |  26|   0|   26|          0|
+    |cond_reg_136                                                                                  |  40|   0|   64|         24|
+    |g2_addr_read_reg_391                                                                          |  64|   0|   64|          0|
+    |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_212_1_fu_148_ap_start_reg  |   1|   0|    1|          0|
+    |grp_p_anonymous_namespace_write_litmus_pattern_Pipeline_VITIS_LOOP_222_2_fu_158_ap_start_reg  |   1|   0|    1|          0|
+    |icmp_ln211_reg_346                                                                            |   1|   0|    1|          0|
+    |icmp_ln217_reg_367                                                                            |   1|   0|    1|          0|
+    |icmp_ln218_reg_371                                                                            |   1|   0|    1|          0|
+    |select_ln212_1_reg_356                                                                        |  32|   0|   32|          0|
+    |select_ln212_reg_350                                                                          |  32|   0|   32|          0|
+    |trunc_ln18_reg_407                                                                            |  61|   0|   61|          0|
+    |trunc_ln213_1_reg_362                                                                         |  61|   0|   61|          0|
+    |trunc_ln221_2_reg_375                                                                         |  61|   0|   61|          0|
+    |trunc_ln221_reg_380                                                                           |   3|   0|    3|          0|
+    +----------------------------------------------------------------------------------------------+----+----+-----+-----------+
+    |Total                                                                                         | 385|   0|  409|         24|
+    +----------------------------------------------------------------------------------------------+----+----+-----+-----------+
+
+
+
+================================================================
+== Interface
+================================================================
+* Summary: 
++-------------------+-----+-----+------------+-------------------------------------------+--------------+
+|     RTL Ports     | Dir | Bits|  Protocol  |               Source Object               |    C Type    |
++-------------------+-----+-----+------------+-------------------------------------------+--------------+
+|ap_clk             |   in|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|ap_rst             |   in|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|ap_start           |   in|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|ap_done            |  out|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|ap_idle            |  out|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|ap_ready           |  out|    1|  ap_ctrl_hs|  (anonymous namespace)write_litmus_pattern|  return value|
+|m_axi_g2_AWVALID   |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWREADY   |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWADDR    |  out|   64|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWID      |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWLEN     |  out|   32|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWSIZE    |  out|    3|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWBURST   |  out|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWLOCK    |  out|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWCACHE   |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWPROT    |  out|    3|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWQOS     |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWREGION  |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_AWUSER    |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WVALID    |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WREADY    |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WDATA     |  out|   64|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WSTRB     |  out|    8|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WLAST     |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WID       |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_WUSER     |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARVALID   |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARREADY   |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARADDR    |  out|   64|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARID      |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARLEN     |  out|   32|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARSIZE    |  out|    3|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARBURST   |  out|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARLOCK    |  out|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARCACHE   |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARPROT    |  out|    3|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARQOS     |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARREGION  |  out|    4|       m_axi|                                         g2|       pointer|
+|m_axi_g2_ARUSER    |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RVALID    |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RREADY    |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RDATA     |   in|   64|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RLAST     |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RID       |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RFIFONUM  |   in|    9|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RUSER     |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_RRESP     |   in|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_BVALID    |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_BREADY    |  out|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_BRESP     |   in|    2|       m_axi|                                         g2|       pointer|
+|m_axi_g2_BID       |   in|    1|       m_axi|                                         g2|       pointer|
+|m_axi_g2_BUSER     |   in|    1|       m_axi|                                         g2|       pointer|
+|x_raw_out          |   in|   64|     ap_none|                                  x_raw_out|        scalar|
+|telemetry_out      |   in|   64|     ap_none|                              telemetry_out|        scalar|
+|mb_in              |   in|   64|     ap_none|                                      mb_in|        scalar|
+|n                  |   in|   32|     ap_none|                                          n|        scalar|
++-------------------+-----+-----+------------+-------------------------------------------+--------------+
+
