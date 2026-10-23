@@ -194,3 +194,66 @@ STREAM and CG routes on the 6x18 fixture. It does not claim energy, the
 PMSM stream client, or board behaviour beyond those sizes. The resident
 image is the v0.6 URAM plan: eight 32-bit lanes per word, rows padded to
 eight, 56 URAM.
+
+## Regime boundary: where v08 wins and where it loses (measured 2026-10-23)
+
+Full accounting in `evidence/regime_2026-10-23/`. On the alt-investment
+shape (square box QP, n = m = T = 16..80, K = 30000, about 3.3-5.0
+projection events per outer iteration) v08 costs 2.1x the cycles per outer
+iteration of the legacy row-interleave image (board app `snn_qp_solve`,
+MAXN/MAXM 128) at equal board-verified 200 MHz kernel clocks:
+
+| T | legacy cyc/iter | v08 cyc/iter | ratio |
+|---|---|---|---|
+| 16 | 573.8 | 1205.6 | 2.10 |
+| 32 | 947.0 | 1875.7 | 1.98 |
+| 64 | 1773.3 | 3668.5 | 2.07 |
+| 80 | 2239.8 | 4713.8 | 2.10 |
+
+Cause, one line each (citations in the diagnosis):
+
+- Dominant, growing with T: matvec width. v08's resident matvecs issue
+  RG 2 x UF 4 = 8 products/cycle; the legacy image issues RG 4 x UF 8 = 32
+  (n^2/8 against n^2/32 MAC slots, plus +28/+31 cycles of per-row-group
+  glue). 53% of the modeled excess at T = 16, 102% at T = 80.
+- Secondary, roughly flat in T: the m > 8 event body (latency-60 step
+  divider, 58-64 operation-free FSM states, three dependent digest calls;
+  about 205 cycles per row event at T = 80 against the legacy image's about
+  88 per event), and box-in-sweep semantics firing about 1.4x the legacy
+  route's events per iteration (facets are events; the legacy route clips
+  once per iteration after a rows-only sweep).
+- Not causes: the fused scan is the CHEAPER scan (span = max(n, m) in
+  8-lane trips, against a serial scalar argmax over m rows); padding and
+  banking contribute zero at these sizes; telemetry is one call per SOLVE
+  and the mailbox sits outside the solve loop; the paper arms ran route
+  FULL.
+
+The same constant set reproduces the economic-dispatch fleet (m = 2, about
+6.1n events/iter at n = 10, about 2.65n at n >= 40, 84-96% event share)
+within +-3%: the regime v08 wins by 2.9-8.0x over v06. This is a regime
+crossover by shape; `fpga/CURRENT` carries the routing rule.
+
+Box semantics, load-bearing for routing: the legacy image implements the
+RETIRED pre-v0.5.0 box route (rows-only sweep, clip after; a POCS failure
+the library fixed with facets-in-sweep). v08 carries current semantics
+(box-in-sweep, bit-identical to v06, matching the v0.8.1 library to about
+1e-15 on this workload). The legacy image is therefore reproduction-only
+for published numbers under matched-semantics goldens, never a new paper's
+headline arm; v08 is the default for new polyhedral papers on every shape
+(on the square shape it still beats one A53 core by 1.1-4.7x at every
+horizon).
+
+Next-step levers, quantified in `evidence/regime_2026-10-23/remedy_options.md`:
+
+- Widened matvec (RG 4 / UF 8 class) with box-in-sweep semantics is the
+  only lever that attacks the square-shape gap; it changes the qualified
+  MAC product order (`mac_four`'s accumulation is part of the v06
+  bit-identity), so it is a rebuild-and-requalify campaign, not a tweak.
+  Trigger it when a square matvec-heavy paper needs the speed.
+- Continuous event pipeline (forward the changed coordinate so the next
+  scan starts early; about 85 to about 50 cycles/event): 28-42% of an
+  economic-dispatch iteration, 4-13% on the square shape. An event-regime
+  lever.
+- Reciprocal-multiply in place of the 60-cycle step divider: about 56
+  cycles per row event; changes fixed-point bits, so it rides inside any
+  requalification.

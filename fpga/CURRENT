@@ -14,6 +14,36 @@
 # v06's raw state and telemetry byte for byte on the board (framework fixtures
 # in both launch modes, forced STREAM/CG, and the economic-dispatch band fleet)
 # and supersedes v06, which stays in the tree.
+#
+# Routing within the polyhedral class (measured 2026-10-23; full accounting
+# in fpga/kv260_v08/evidence/regime_2026-10-23/). The class has two kernel
+# generations on the board and the latency ranking flips with workload
+# shape, so route by SHAPE and BOX SEMANTICS:
+# - event-heavy (m small; tens to hundreds of projection events per outer
+#   iteration, roughly >= 2n; the economic-dispatch band): v08, 2.9-8.0x
+#   faster than v06 there.
+# - matvec-heavy square (n = m; a handful of events per iteration, roughly
+#   <= 10; the alt-investment horizons T = 16..80): v08 costs 2.1x the
+#   cycles per outer iteration of the legacy row-interleave image (board app
+#   snn_qp_solve, MAXN/MAXM 128) at equal board-verified 200 MHz, because
+#   its resident matvecs issue 8 products/cycle against that image's 32.
+#   v08 is still the default for NEW papers on this shape: it is the only
+#   image carrying current (v0.5.0+) box-in-sweep semantics, and it still
+#   beats one A53 core at every horizon (1.1-4.7x measured). The legacy
+#   image implements the RETIRED pre-v0.5.0 box route (rows-only sweep,
+#   clip after; a POCS failure the library fixed with facets-in-sweep) and
+#   is reproduction-only for published numbers under matched-semantics
+#   goldens, never a new paper's headline arm.
+# - a square matvec-heavy paper whose headline needs a faster
+#   current-semantics kernel is the trigger for the widened-matvec rebuild
+#   (see the v08 README's regime-boundary section), not a route back to the
+#   legacy image.
+# Every measured polyhedral arm records n, m, and events per outer iteration
+# beside the package name, and quotes the kernel clock as the clock record's
+# kernel_hz_measured, never pl0_ref: on a clk_wiz app pl0_ref is the wizard
+# INPUT (this package's board app runs pl0_ref 250 MHz through a 0.8 ratio
+# to a true 200 MHz kernel clock).
+#
 # cpu_baseline: none means no qualified same-solver CPU harness exists for
 # that class; extend and requalify one (T-snn.10 point 2).
 polyhedral:
