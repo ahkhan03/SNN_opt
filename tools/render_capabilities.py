@@ -30,11 +30,13 @@ def _env_value(package, key):
 
 
 def current_packages():
-    """``package:`` values named by fpga/CURRENT, or () when it is absent."""
+    """Package paths named by fpga/CURRENT, including a prefixed field such as
+    ``bram_package:``, or () when the file is absent."""
     path = ROOT / "fpga" / "CURRENT"
     if not path.exists():
         return ()
-    return tuple(sorted(set(re.findall(r"^\s*package:\s*(\S+)", path.read_text(), re.MULTILINE))))
+    return tuple(sorted(set(re.findall(
+        r"^\s*(?:\w+_)?package:\s*(\S+)", path.read_text(), re.MULTILINE))))
 
 
 def _software(mismatches):

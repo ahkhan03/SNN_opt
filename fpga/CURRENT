@@ -10,56 +10,49 @@
 # conic = rows and bounds plus native Euclidean-ball and scaled-SOC resets.
 # On the board, v07 with cones off matches the v06 native emulation records on
 # the v06 parity bundle (one-shot), 6x18 (one-shot, persistent), and 20x60 and
-# 64x64 (one-shot). The polyhedral package is v08 (2026-10-11): it returns
-# v06's raw state and telemetry byte for byte on the board (framework fixtures
-# in both launch modes, forced STREAM/CG, and the economic-dispatch band fleet)
-# and supersedes v06, which stays in the tree.
+# 64x64 (one-shot). v08 (2026-10-11) returns v06's raw state and telemetry
+# byte for byte on the board (framework fixtures in both launch modes, forced
+# STREAM/CG, and the economic-dispatch band fleet) and supersedes v06, which
+# stays in the tree. Which polyhedral image a problem uses is the routing
+# rule below.
 #
-# Routing within the polyhedral class (measured 2026-10-23 and 2026-10-24;
-# the equal-clock accounting is in fpga/kv260_v08/evidence/regime_2026-10-23/,
-# the BRAM-lineage qualification in
+# Routing within the polyhedral class (measured 2026-10-24; the ED fleet
+# comparison is in fpga/kv260_v09_bram/evidence/ed_fleet_2026-10-24/, the
+# square qualification in
 # fpga/kv260_v09_bram/evidence/board_2026-10-24_3a352d326c0a/). The class
-# holds two current-semantics kernel generations whose latency ranking
-# depends on the workload, so route by SIZE first, then by SHAPE and BOX
-# SEMANTICS:
-# - n,m <= 128, matvec-heavy square (n = m, a handful of projection events
-#   per outer iteration, roughly <= 10; the alt-investment horizons
-#   T = 16..80): fpga/kv260_v09_bram, the BRAM wide-matvec lineage
-#   (qualified 2026-10-24; bit-identical to v06 including T=80 at
-#   K=30000; 1.37-2.00x the v08 cycles/iter across T=16..80, and within
-#   5.5% of the legacy row-interleave image at T=80 while carrying current
-#   v0.5.0+ box-in-sweep semantics). Every current paper shape fits its
-#   cap (alt-investment <= 80, MSRP <= 100, traffic <= 100, PCA <= 128).
-# - event-heavy (m small; tens to hundreds of projection events per outer
-#   iteration, roughly >= 2n; the economic-dispatch band) at any size the
-#   v08 routes accept: fpga/kv260_v08 (2.9-8.0x faster than v06 there;
-#   the wide-matvec gain does not exist in this regime, 84-96% events).
+# routes by size and route type:
+# - n,m <= 128 on a FULL route: fpga/kv260_v09_bram unconditionally. The
+#   event-heavy exception is deleted. Measured basis: ED fleet n=10 and
+#   n=40 at m=2, FULL, 12.4 and 15.2 percent faster than v08 at the same
+#   kernel_hz_measured 199999998, and square T=16..80 at 1.37-2.00x v08.
+#   The event-heavy band between n=41 and n=128 is unmeasured; the
+#   measured advantage grows with n (12.4 percent at n=10, 15.2 percent
+#   at n=40) and the square points at n=m=16..80 bracket it at
+#   1.37-2.00x, so the extrapolation runs in v09b's favour.
 # - n or m above 128: fpga/kv260_v08 (FULL square cap 320, CG 372,
-#   STREAM 1024). The BRAM lineage rejects an over-cap CONFIGURE with
-#   ERR_BAD_DIMENSIONS and a removed-route request with ERR_CAPACITY;
-#   it is not a fallback at any size.
+#   STREAM 1024). The BRAM image rejects an over-cap CONFIGURE with
+#   ERR_BAD_DIMENSIONS.
+# - a non-FULL route (CG or STREAM) at any size: fpga/kv260_v08, because
+#   the BRAM image carries no such datapath and rejects it with
+#   ERR_CAPACITY.
 # - the legacy row-interleave image (board app snn_qp_solve, MAXN/MAXM 128)
 #   implements the RETIRED pre-v0.5.0 box route (rows-only sweep, clip
 #   after; a POCS failure the library fixed with facets-in-sweep) and is
 #   reproduction-only for published numbers under matched-semantics
 #   goldens, never a new paper's headline arm.
-# v08 stays the default for a NEW paper whose shape is not yet measured:
-# obtain events/iter first (procedure in the protocol), then route.
-# Every measured polyhedral arm records n, m, and events per outer
-# iteration beside the package name, and quotes the kernel clock as the
-# clock record's kernel_hz_measured, never pl0_ref: on a clk_wiz app
-# pl0_ref is the wizard INPUT (both kernels' board apps run pl0_ref
-# 250 MHz through a 0.8 ratio to a true 200 MHz kernel clock).
+# Every measured polyhedral arm still records n, m, and events per outer
+# iteration beside the package name. events/iter no longer selects the
+# route. It is kept for audit.
+# Quote the kernel clock as the clock record's kernel_hz_measured, never
+# pl0_ref: on a clk_wiz app pl0_ref is the wizard INPUT (both kernels'
+# board apps run pl0_ref 250 MHz through a 0.8 ratio to a true 200 MHz
+# kernel clock).
 polyhedral:
   package: fpga/kv260_v08
   boundary: fpga/kv260_v08/README.md
   cpu_baseline: fpga/cpu_baseline/cpu_baseline.cpp
   datapath_width_source: fpga/kv260_v08/src/dt.h
   qualified: 2026-10-11
-  bram_package: fpga/kv260_v09_bram
-  bram_boundary: fpga/kv260_v09_bram/README.md
-  bram_datapath_width_source: fpga/kv260_v09_bram/src/dt.h
-  bram_qualified: 2026-10-24
   bram_package: fpga/kv260_v09_bram
   bram_boundary: fpga/kv260_v09_bram/README.md
   bram_datapath_width_source: fpga/kv260_v09_bram/src/dt.h
@@ -67,16 +60,6 @@ polyhedral:
 #
 # cpu_baseline: none means no qualified same-solver CPU harness exists for
 # that class; extend and requalify one (T-snn.10 point 2).
-polyhedral:
-  package: fpga/kv260_v08
-  boundary: fpga/kv260_v08/README.md
-  cpu_baseline: fpga/cpu_baseline/cpu_baseline.cpp
-  datapath_width_source: fpga/kv260_v08/src/dt.h
-  qualified: 2026-10-11
-  bram_package: fpga/kv260_v09_bram
-  bram_boundary: fpga/kv260_v09_bram/README.md
-  bram_datapath_width_source: fpga/kv260_v09_bram/src/dt.h
-  bram_qualified: 2026-10-24
 conic:
   package: fpga/kv260_v07
   boundary: fpga/kv260_v07/README.md

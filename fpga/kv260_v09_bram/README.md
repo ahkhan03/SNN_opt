@@ -6,9 +6,10 @@ resident store is the 2026-06-16 WINNER row-interleave BRAM image, capped at
 n, m <= 128. The top function is `snn_qp_v09b`. fpga/kv260_v06/ is the
 byte-level reference and is not modified.
 
-This package is the functional phase. It has an x86 parity gate and an HLS
-script. It has no csynth report, no routed utilization, and no board
-measurement. Do not cite a clock, a latency, or a resource count for it.
+This package is the qualified resident BRAM kernel. It has an x86 parity
+gate, an HLS script, a routed bitstream, and a board measurement. Clock,
+latency, and resource counts are in the qualification section below. CG
+and STREAM are not in this image, and n or m above 128 is rejected.
 
 ## Memory plan
 
@@ -147,8 +148,7 @@ Full records: `evidence/board_2026-10-24_3a352d326c0a/`.
 
 ## What is not claimed
 
-Energy per solve (no INA260 campaign), ED-fleet latency as a v09b arm
-(event-heavy shapes route to the URAM lineage), CG/STREAM routes (removed;
+Energy per solve (no INA260 campaign), CG/STREAM routes (removed;
 rejected with ERR_CAPACITY), sizes above the cap 128, PMSM/stream clients,
 and a lean event body: the row/bound event bodies are the v08 ones, which is
 why small-T cyc/iter sits above the legacy WINNER image (whose ~88-cycle
