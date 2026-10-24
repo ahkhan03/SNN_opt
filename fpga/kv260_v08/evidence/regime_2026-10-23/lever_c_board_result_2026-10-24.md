@@ -88,3 +88,19 @@ SIGN for a restructured event path; the verified ±6% model in
 claims gate on board cycles only. The bit-identity machinery (dual-oracle
 harness, rejection battery, board byte-identity) worked exactly as
 intended and is reusable for any successor attempt.
+
+## Addendum (2026-10-24): the three suspects are superseded
+
+`lever_c_root_cause_2026-10-24.md` is the verbose-schedule walk of this
+image. It supersedes the three untested suspects in the Reading section
+above: dynamic stalls on the shared score units, memory-port pressure
+inside the fused facet loop, and an unreported handshake between the fused
+loops and those units. The Reading section's "flat +67 to +93 cycles per
+event, growing slightly with n" is also superseded: the cost is per bound
+event, about 99 cycles, about zero on row events, and the growth with n
+is the event-kind mix, while the measured cyc/iter table is unchanged.
+The excess is 118 operation-free states on the
+facet arm of the parent FSM, paid on every bound event at every m. The
+schedule is the evidence; this file's measured cycles are unchanged. The
+verdict above stands. The fused pipeline remains a dead end in this form,
+and a successor must not fuse the facet scan into the update loop.
