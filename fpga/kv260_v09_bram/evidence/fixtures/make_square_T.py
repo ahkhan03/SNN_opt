@@ -29,8 +29,9 @@ if not (ANALYSIS / "common" / "alt_invest_qp.py").is_file():
 sys.path.insert(0, str(ANALYSIS))
 
 from common.alt_invest_qp import build_qp  # noqa: E402
-from snn_opt import OptimizationProblem, SNNSolver, SolverConfig  # noqa: E402
+
 import snn_opt  # noqa: E402
+from snn_opt import OptimizationProblem, SNNSolver, SolverConfig  # noqa: E402
 
 OUT = Path(__file__).resolve().parent
 T_VALUES = (16, 32, 64, 80)
