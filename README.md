@@ -284,11 +284,32 @@ identical to ten significant figures at 20k and at 100k iterations. It is
 jointly feasible the whole time. So the limitation is accuracy of the fixed
 point, not feasibility.
 
+On ill-conditioned active sets that floor sits far above 1e-6. This 50-D
+benchmark plateaus near 8.9e-4. An MPC-shaped problem whose active rows are
+near-parallel (active-set KKT condition about 5e4) sits at 5.824e-3 from 500
+iterations through 50000. That floor is flat across `k0_scale` 0.5, 0.25,
+and 0.1 (5.824e-3 at a 20000-iteration budget). It falls only once
+`k0_scale` drops to 0.05 and below (1.457e-3 at 0.05, 7.171e-4 at 0.02,
+3.573e-4 at 0.01), far outside the usable range. Set
+`ConvergenceConfig(kkt_target=1e-6)` and that floor becomes an explicit
+failure (`converged=False`) rather than a loose acceptance under
+`kkt_rel_tol=1e-4`: the gate is `kkt_residual <= kkt_target * kkt_scale`
+with no additive absolute tolerance, and it fails closed when `kkt_scale` is
+not finite and positive (the normalized ratio is undefined at scale 0). The
+target applies only when the KKT optimality test is selected. Read the
+reported `kkt_normalized` (`kkt_residual / kkt_scale` when the scale is
+positive). The documented route to a tighter point is the exact
+`joint_projector` path in item 3.
+
 What to do about it, in order of usefulness:
 
 1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
    scale-invariant KKT defect of the final point, comparable across problems
-   and objective scalings; `converged=True` certifies it below `kkt_rel_tol`.
+   and objective scalings. With `kkt_target` left unset, `converged=True`
+   certifies it below `kkt_rel_tol` (the absolute floor only matters near
+   zero scale). With `kkt_target` set, and only when the KKT optimality
+   test is selected, `converged=True` certifies
+   `kkt_residual <= kkt_target * kkt_scale` and nothing looser.
    On this benchmark it reports 8.9e-4, an honest measurement of the limit
    cycle, which is why the run does not certify at the default 1e-4.
 2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps

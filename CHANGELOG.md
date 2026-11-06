@@ -8,6 +8,23 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ### Added
 
+- **Opt-in strict KKT target.** `ConvergenceConfig.kkt_target` (`None` by
+  default) applies when the KKT optimality test is selected. Combining a
+  set target with any other `optimality_test` raises `ValueError`: a strict
+  target requires the KKT optimality test. A set target accepts a solve only
+  when the fit status is `"ok"`, `kkt_scale` is finite and positive, and
+  `kkt_residual <= kkt_target * kkt_scale`, with no additive absolute
+  tolerance. A non-positive or non-finite scale fails closed, because the
+  normalized ratio is undefined there. The extended nonlinear fit and the
+  Dykstra positional margin (the 100x check) use the stricter of the legacy
+  tolerance and `kkt_target * kkt_scale`, and the fit returns
+  `fit_status="fit_failed"` when that resolution cannot be reached.
+  `SolverResult` reports `kkt_normalized` (`kkt_residual / kkt_scale` when
+  the scale is positive, otherwise NaN) and `kkt_target`. `summary()` prints
+  the normalized line only when a target is set. Defaults, the Euler step,
+  and the projection sweep are unchanged; leaving `kkt_target` unset keeps
+  the previous stopping decision.
+
 - **`box_projector(lower, upper, coordinates=None)`: an exact built-in box
   set**, usable alone or as a Dykstra member. Bounds are scalars or 1-D
   arrays broadcast to the coordinate block; `-inf`/`+inf` leave a side open,

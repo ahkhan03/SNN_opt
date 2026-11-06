@@ -743,3 +743,279 @@ def test_condition_limit_sparse_matches_dense():
             f"point: unconverged fit accepted as ok")
     else:
         assert not sparse_cert.passed  # failing closed is acceptable
+
+
+# ---------------------------------------------------------------------------
+# Strict normalized target (kkt_target). None keeps the legacy decision.
+# ---------------------------------------------------------------------------
+
+def _interior_pair():
+    """2-D QP whose optimum (1, 1) is strictly interior."""
+    A = np.eye(2)
+    b = np.array([-1.0, -1.0])
+    C = np.array([[1.0, 0.0], [0.0, 1.0]])
+    d = np.array([-10.0, -10.0])
+    return A, b, C, d, np.array([1.0, 1.0])
+
+
+def test_strict_target_passes_point_legacy_also_passes():
+    """A point under both the legacy 1e-4 threshold and a 1e-6 target passes."""
+    A, b, C, d, x = _interior_pair()
+    cfg = ConvergenceConfig(kkt_rel_tol=1e-4, kkt_target=1e-6)
+    cert = _certificate(A, b, C, d, x, convergence=cfg)
+    assert cert.fit_status == "ok"
+    assert cert.kkt_target == 1e-6
+    assert cert.scale > 0.0
+    assert cert.residual <= cert.tolerance
+    assert cert.residual <= cert.kkt_target * cert.scale
+    assert cert.passed
+    _, result = _solve(A, b, C, d, max_iterations=400, convergence=cfg)
+    assert result.converged
+    assert result.kkt_target == 1e-6
+    assert result.kkt_residual <= result.kkt_tolerance
+    assert result.kkt_normalized <= result.kkt_target
+
+
+def test_strict_target_rejects_point_legacy_tolerance_accepts():
+    """Free-coordinate offset lands between legacy 1e-4 and a 1e-9 target.
+
+    x = (0, 1e-6) is feasible for x_0 <= 0. The certificate residual is the
+    uncovered second coordinate of the gradient, so the normalized defect
+    sits between 1e-9 and 1e-4. kkt_rel_tol=1e-4 accepts it; kkt_target=1e-9
+    rejects it, with no absolute term to close the gap.
+    """
+    A = np.eye(2)
+    b = np.array([-1.0, 0.0])
+    C = np.array([[1.0, 0.0]])
+    d = np.array([0.0])
+    x = np.array([0.0, 1e-6])
+    strict = _certificate(
+        A, b, C, d, x,
+        convergence=ConvergenceConfig(kkt_rel_tol=1e-4, kkt_target=1e-9))
+    assert strict.fit_status == "ok"
+    assert strict.scale > 0.0
+    normalized = strict.residual / strict.scale
+    assert 1e-9 < normalized <= 1e-4
+    assert strict.residual <= strict.tolerance
+    assert strict.residual > strict.kkt_target * strict.scale
+    assert not strict.passed
+    legacy = _certificate(
+        A, b, C, d, x, convergence=ConvergenceConfig(kkt_rel_tol=1e-4))
+    assert legacy.kkt_target is None
+    assert legacy.passed
+    assert legacy.residual <= legacy.tolerance
+
+
+def test_unset_kkt_target_reproduces_legacy_decision():
+    """kkt_target=None is the same stopping decision as omitting the field."""
+    A, b, C, d, _x = _interior_pair()
+    _, default = _solve(A, b, C, d, max_iterations=400)
+    _, explicit = _solve(
+        A, b, C, d, max_iterations=400,
+        convergence=ConvergenceConfig(kkt_target=None))
+    assert default.kkt_target is None
+    assert explicit.kkt_target is None
+    assert default.converged is explicit.converged
+    assert default.iterations_used == explicit.iterations_used
+    assert default.convergence_reason == explicit.convergence_reason
+    np.testing.assert_array_equal(default.final_x, explicit.final_x)
+    assert default.kkt_residual == explicit.kkt_residual
+    assert default.kkt_tolerance == explicit.kkt_tolerance
+    assert default.kkt_normalized == explicit.kkt_normalized
+    cert = _certificate(A, b, C, d, default.final_x)
+    legacy_pass = (cert.fit_status == "ok"
+                   and np.isfinite(cert.residual)
+                   and bool(cert.residual <= cert.tolerance))
+    assert cert.kkt_target is None
+    assert cert.passed is legacy_pass
+
+
+def test_kkt_normalized_equals_residual_over_scale():
+    A, b, C, d, _x = _interior_pair()
+    _, result = _solve(A, b, C, d, max_iterations=400)
+    assert result.kkt_scale > 0.0
+    assert result.kkt_fit_status == "ok"
+    assert result.kkt_normalized == result.kkt_residual / result.kkt_scale
+    assert result.kkt_target is None
+
+
+def test_strict_target_fails_closed_only_for_nonpositive_scale():
+    """A non-positive scale fails a strict target. A positive scale does not.
+
+    The legacy gate still accepts a machine-accurate zero-scale point through
+    the absolute floor. A strict target does not, because the normalized
+    ratio is undefined at scale 0. A positive scale at the old handover
+    kkt_abs_tol / kkt_rel_tol passes when the residual meets the target.
+    """
+    from snn_opt.solver import KKTCertificate
+
+    A, _b, C, d = _random_qp(n=6, m=4)
+    zeros = np.zeros(A.shape[0])
+    legacy = _certificate(A, zeros, C, d - 1e3, zeros)
+    assert legacy.kkt_target is None
+    assert legacy.scale == pytest.approx(0.0)
+    assert legacy.passed
+    strict = _certificate(
+        A, zeros, C, d - 1e3, zeros,
+        convergence=ConvergenceConfig(kkt_target=1e-6))
+    assert strict.kkt_target == 1e-6
+    assert strict.scale == pytest.approx(0.0)
+    assert not strict.passed
+
+    old_handover = 1e-5
+    at_old_handover = KKTCertificate(
+        residual=old_handover * 1e-12, stationarity=old_handover * 1e-12,
+        complementarity=0.0, scale=old_handover,
+        tolerance=1e-9 + 1e-4 * old_handover, fit_status="ok",
+        kkt_target=1e-6)
+    assert at_old_handover.residual <= at_old_handover.kkt_target * at_old_handover.scale
+    assert at_old_handover.passed
+    zero_scale = KKTCertificate(
+        residual=0.0, stationarity=0.0, complementarity=0.0, scale=0.0,
+        tolerance=1e-9, fit_status="ok", kkt_target=1e-6)
+    assert not zero_scale.passed
+
+
+def test_strict_target_zero_rel_tol_does_not_disable_target():
+    """kkt_rel_tol = 0 does not disable an independently set strict target."""
+    cfg = ConvergenceConfig(kkt_rel_tol=0.0, kkt_target=1e-6)
+    A, b, C, d, x = _interior_pair()
+    cert = _certificate(A, b, C, d, x, convergence=cfg)
+    assert cert.scale > 0.0
+    assert cert.fit_status == "ok"
+    assert cert.residual <= cert.kkt_target * cert.scale
+    assert cert.passed
+
+
+def test_strict_target_zero_abs_tol_rejects_only_nonpositive_scale():
+    """A positive scale uses the strict inequality. Scale 0 fails closed."""
+    from snn_opt.solver import KKTCertificate
+
+    cfg = ConvergenceConfig(kkt_abs_tol=0.0, kkt_rel_tol=1e-4, kkt_target=1e-6)
+    A, b, C, d, x = _interior_pair()
+    cert = _certificate(A, b, C, d, x, convergence=cfg)
+    assert cert.scale > 0.0
+    assert cert.passed
+    zero_scale = KKTCertificate(
+        residual=0.0, stationarity=0.0, complementarity=0.0, scale=0.0,
+        tolerance=0.0, fit_status="ok", kkt_target=1e-6)
+    assert not zero_scale.passed
+
+
+def test_kkt_target_rejects_invalid_values():
+    with pytest.raises(ValueError):
+        ConvergenceConfig(kkt_target=-1.0)
+    with pytest.raises(ValueError):
+        ConvergenceConfig(kkt_target=float("nan"))
+    with pytest.raises(ValueError):
+        ConvergenceConfig(proj_grad_tol=1e-5, kkt_target=1e-6)
+
+
+@pytestmark_kernel
+def test_backend_parity_for_strict_target_fields():
+    A, b, C, d, _x = _interior_pair()
+    cfg = dict(max_iterations=400,
+               convergence=ConvergenceConfig(kkt_target=1e-6))
+    _, python = _solve(A, b, C, d, backend="python", **cfg)
+    _, compiled = _solve(A, b, C, d, backend="c", **cfg)
+    assert python.kkt_target == compiled.kkt_target == 1e-6
+    assert python.converged == compiled.converged
+    assert python.iterations_used == compiled.iterations_used
+    assert python.kkt_normalized == python.kkt_residual / python.kkt_scale
+    assert compiled.kkt_normalized == compiled.kkt_residual / compiled.kkt_scale
+    np.testing.assert_allclose(python.final_x, compiled.final_x, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        python.kkt_normalized, compiled.kkt_normalized, rtol=1e-9, atol=0.0)
+    np.testing.assert_allclose(
+        python.kkt_residual, compiled.kkt_residual, rtol=1e-9, atol=0.0)
+
+
+def test_fix1_strict_gate_accepts_positive_scale_below_legacy_crossover():
+    """A zero residual at scale 1e-6 meets target 1e-9.
+
+    The legacy crossover kkt_abs_tol / kkt_rel_tol is 1e-5 and is not part
+    of the strict gate. Only a non-positive scale fails closed.
+    """
+    cert = _certificate(
+        np.array([[1e-6]]), np.array([-1e-6]),
+        np.zeros((0, 1)), np.zeros(0), np.array([1.0]),
+        convergence=ConvergenceConfig(kkt_target=1e-9))
+    assert cert.fit_status == "ok"
+    assert cert.residual == pytest.approx(0.0, abs=0.0)
+    assert cert.scale == pytest.approx(1e-6)
+    assert cert.scale > 0.0
+    assert cert.passed
+
+
+def test_fix2_strict_target_requires_kkt_optimality_test():
+    """A set target with a non-KKT selector is an error, not a silent no-op."""
+    for mode in ("none", "legacy_projected_gradient"):
+        with pytest.raises(ValueError, match="kkt_target") as raised:
+            ConvergenceConfig(optimality_test=mode, kkt_target=1e-9)
+        message = str(raised.value)
+        assert "optimality_test" in message
+        assert "kkt_target" in message
+        assert "KKT" in message
+
+
+def test_fix3_strict_target_drives_fit_and_dykstra_resolution():
+    """Fit budget and Dykstra admission follow the stricter of legacy and target*scale."""
+    from snn_opt import joint_dykstra_projector, soc_projector
+
+    rng = np.random.default_rng(3)
+    for _ in range(3):
+        n = 4
+        matrix = rng.standard_normal((n, n))
+        hessian = matrix.T @ matrix + 0.5 * np.eye(n)
+        linear = rng.standard_normal(n) * 3.0
+        rows = rng.standard_normal((2, n))
+    problem = OptimizationProblem(
+        hessian, linear, rows, np.zeros(2),
+        nonlinear_candidates=(soc_projector(0, [1, 2, 3]),))
+    solver = SNNSolver(problem, SolverConfig(
+        convergence=ConvergenceConfig(kkt_target=1e-9)))
+    cert = solver._compute_kkt_certificate(np.zeros(n))
+    assert cert.fit_status == "ok", cert.fit_status
+    assert cert.scale > 0.0
+    assert cert.residual <= 1e-9 * cert.scale
+    assert cert.passed
+
+    wedge = np.array([[1.0, 0.0],
+                      [np.cos(0.7), np.sin(0.7)]])
+    dykstra = joint_dykstra_projector(wedge, np.zeros(2), tolerance=1e-8)
+    wedge_problem = OptimizationProblem(
+        np.eye(2), -np.array([1.0, 0.5]), np.zeros((0, 2)), np.zeros(0),
+        nonlinear_candidates=(dykstra,))
+    wedge_solver = SNNSolver(wedge_problem, SolverConfig(
+        convergence=ConvergenceConfig(kkt_target=1e-9)))
+    wedge_cert = wedge_solver._compute_kkt_certificate(np.zeros(2))
+    assert wedge_cert.fit_status == "fit_failed"
+    assert not wedge_cert.passed
+
+
+def test_fix4_summary_omits_normalized_line_unless_target_set():
+    A, b, C, d, _x = _interior_pair()
+    _, plain = _solve(A, b, C, d, max_iterations=1)
+    assert plain.kkt_target is None
+    assert "KKT normalized" not in plain.summary()
+    _, strict = _solve(
+        A, b, C, d, max_iterations=1,
+        convergence=ConvergenceConfig(kkt_target=1e-4))
+    text = strict.summary()
+    assert "KKT normalized" in text
+    assert "target=1.00e-04" in text
+
+
+def test_fix5_docs_state_the_measured_step_claim_and_the_kkt_selector():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text()
+    changelog = (root / "CHANGELOG.md").read_text()
+    api = (root / "docs/api.md").read_text()
+    correctness = (root / "docs/correctness.md").read_text()
+    assert "The step size is not the bound." not in readme
+    assert "0.05" in readme
+    assert "absolute-floor crossover" not in api
+    assert "absolute-floor crossover" not in correctness
+    assert "absolute-floor crossover" not in changelog
+    assert "KKT optimality test" in changelog

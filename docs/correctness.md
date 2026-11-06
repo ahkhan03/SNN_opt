@@ -96,3 +96,28 @@ of the default step size: it certifies the quality the dynamics genuinely
 reach, roughly 1e-3 relative solution error on well-conditioned problems. It
 is a residual tolerance, not an error bound: on a nearly singular Hessian a
 small residual can coexist with a larger solution displacement.
+
+On ill-conditioned active sets the default greedy sweep has a measured floor
+far above 1e-6 (about 8.9e-4 on the package 50-D benchmark, about 5.8e-3 on
+an MPC-shaped near-parallel active set, flat from 500 to 50000 iterations).
+The floor is flat across `k0_scale` 0.5, 0.25, and 0.1, and it falls only
+once `k0_scale` drops to 0.05 and below, far outside the usable range.
+`ConvergenceConfig.kkt_target` is the opt-in strict contract for that fact,
+and it applies only when the KKT optimality test is selected. Any other
+`optimality_test` combined with a set target raises `ValueError`. `None`,
+the default, keeps the threshold above. A set target accepts only when the
+fit status is `"ok"`, `scale` is finite and positive, and
+`residual <= kkt_target * scale`, with no additive `kkt_abs_tol` term, so a
+floor above the caller's target is an explicit `converged=False` rather than
+a loose acceptance. The decision lives in `KKTCertificate.passed`.
+`SolverResult.kkt_normalized` reports `residual / scale` (NaN when the scale
+is not positive) and `kkt_target` reports the request. The strict gate fails
+closed when `scale` is not finite and positive. A positive scale is accepted
+on the normalized inequality alone, including a scale below the legacy
+absolute-plus-relative handover `kkt_abs_tol / kkt_rel_tol`. `kkt_rel_tol = 0`
+does not disable a set target. When a target is set, the extended nonlinear
+fit and the Dykstra 100x positional margin use the stricter of the legacy
+tolerance and `kkt_target * scale`, and return `fit_status="fit_failed"` when
+that resolution cannot be reached. The documented route to a point below the
+greedy floor is the exact `joint_projector` path, not a smaller step and not
+a looser certificate.
