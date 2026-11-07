@@ -28,6 +28,7 @@ Public API
 See ``docs/applications.md`` for published work that uses this solver.
 """
 
+from ._version_source import resolve_version
 from .nonlinear import (
     AffineSubspaceProjector,
     CutterCandidate,
@@ -62,8 +63,9 @@ from .solver import (
 )
 from .transforms import EigenbasisTransform, Transform
 
-# Keep in sync with the version in pyproject.toml and CITATION.cff.
-__version__ = "0.11.0.dev0"
+# Derived. A vX.Y.Z tag is exactly X.Y.Z; every other commit is a .devN
+# version whose local segment names the commit. See _version_source.
+__version__ = resolve_version()
 
 __all__ = [
     "ConvergenceConfig",

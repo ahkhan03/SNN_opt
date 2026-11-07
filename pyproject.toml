@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "pybind11>=2.10"]
+requires = ["setuptools>=68", "wheel", "pybind11>=2.10", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "snn_opt"
-version = "0.11.0.dev0"
+dynamic = ["version"]
 description = "A spiking neural network solver for constrained convex optimization (QP/LP)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -37,7 +37,15 @@ dependencies = [
 [project.optional-dependencies]
 examples = ["matplotlib>=3.5"]
 benchmarks = ["matplotlib>=3.5", "cvxpy>=1.4"]
-dev = ["pytest>=7", "ruff>=0.5", "matplotlib>=3.5", "cvxpy>=1.4"]
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+  "matplotlib>=3.5",
+  "cvxpy>=1.4",
+  "setuptools_scm>=8",
+  "build>=1",
+  "wheel",
+]
 
 [project.urls]
 Homepage = "https://snn.ahkhan.me"
@@ -48,6 +56,15 @@ Changelog = "https://github.com/ahkhan03/SNN_opt/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+# Defaults on purpose: guess-next-dev and node-and-date.
+# A vX.Y.Z tag is exactly X.Y.Z. Any other commit is the next patch as
+# .devN plus +g<sha>, and a dirty tree adds the default date marker.
+# Do not set a custom version_scheme, and do not set
+# SETUPTOOLS_SCM_PRETEND_VERSION: pretending turns a bad checkout into a
+# plausible upload.
+version_file = "src/snn_opt/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

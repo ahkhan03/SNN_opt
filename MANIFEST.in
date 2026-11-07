@@ -1,3 +1,17 @@
 # Ship the native kernel sources in the sdist so `pip install` from source can
 # compile the optional snn_opt._kernel extension.
 recursive-include src/snn_opt/_native *.hpp *.cpp
+
+# setuptools_scm's file finder lists every tracked file. The sdist is the
+# installable package. The research tree does not belong in it, and neither
+# do tests or tools: those imports need benchmarks, docs, and fpga, which are
+# pruned below, so a shipped suite could not collect.
+prune fpga
+prune docs
+prune figures
+prune examples
+prune analysis
+prune benchmarks
+prune .github
+prune tests
+prune tools

@@ -4,6 +4,15 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The sdist ships the installable package and no longer includes `tests/` or
+  `tools/`. The 0.10.1 sdist already contained a suite that could not collect:
+  those tests import `benchmarks`, `docs`, and `fpga`, and those trees are not
+  in the sdist. An install receives the same package files as before.
+
 ## [0.10.1] - 2026-11-07
 
 ### Fixed

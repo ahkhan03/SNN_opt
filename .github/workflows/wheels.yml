@@ -18,6 +18,8 @@ on:
       - "setup.py"
       - "MANIFEST.in"
       - "src/snn_opt/_native/**"
+      - "src/snn_opt/_version_source.py"
+      - "tests/test_version.py"
 
 jobs:
   build_wheels:
@@ -33,6 +35,12 @@ jobs:
           - { os: windows-latest,   arch: AMD64 }
     steps:
       - uses: actions/checkout@v4
+        with:
+          # setuptools_scm needs the tag history. Do not set
+          # SETUPTOOLS_SCM_PRETEND_VERSION: pretending bypasses git and can
+          # publish a version the commit is not.
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Build wheels with cibuildwheel
         uses: pypa/cibuildwheel@v4.3.0
@@ -49,7 +57,9 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           # Smoke-test every built wheel by importing + running the test suite.
-          CIBW_TEST_REQUIRES: "pytest"
+          # setuptools_scm lets tests/test_version.py recompute the version
+          # from the bind-mounted checkout and compare it with the wheel.
+          CIBW_TEST_REQUIRES: "pytest setuptools_scm build wheel"
           CIBW_TEST_COMMAND: "pytest {project}/tests -q"
 
       - uses: actions/upload-artifact@v4
@@ -62,6 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - name: Build source distribution
         run: pipx run build --sdist
       - uses: actions/upload-artifact@v4
@@ -87,4 +100,162 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Check release identity
+        # Last step before an irreversible upload. A shallow checkout, a dirty
+        # tree, or a tag that is not vX.Y.Z must fail here. Do not set
+        # SETUPTOOLS_SCM_PRETEND_VERSION to make this pass.
+        run: |
+          python3 - << 'PY'
+          import ast
+          import os
+          import re
+          import subprocess
+          import sys
+          import tarfile
+          import tempfile
+          import zipfile
+          from pathlib import Path
+
+          dist = Path("dist")
+          ref = os.environ["GITHUB_REF"]
+          match = re.fullmatch(
+              r"refs/tags/v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", ref
+          )
+          if not match:
+              sys.exit(f"ref {ref!r} is not a strict vX.Y.Z tag")
+          version = ".".join(match.groups())
+          artifacts = sorted(p for p in dist.iterdir() if p.is_file())
+          if not artifacts:
+              sys.exit("dist/ has no artifacts")
+
+          def meta_version(text):
+              for line in text.splitlines():
+                  if line.startswith("Version:"):
+                      return line.split(":", 1)[1].strip()
+              sys.exit("metadata has no Version field")
+
+          def assigned_version(source):
+              tree = ast.parse(source)
+              for node in tree.body:
+                  if not isinstance(node, ast.Assign):
+                      continue
+                  names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                  if "version" not in names and "__version__" not in names:
+                      continue
+                  value = node.value
+                  if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                      return value.value
+              sys.exit("packaged _version.py has no version assignment")
+
+          wheels = []
+          sdists = []
+          wheel_re = re.compile(rf"^snn_opt-{re.escape(version)}-.+\.whl$")
+          sdist_re = re.compile(rf"^snn_opt-{re.escape(version)}\.tar\.gz$")
+          for path in artifacts:
+              name = path.name
+              if name.endswith(".whl"):
+                  if wheel_re.fullmatch(name) is None:
+                      sys.exit(f"wheel filename {name} is not {version}")
+                  with zipfile.ZipFile(path) as zf:
+                      meta = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")]
+                      vers = [n for n in zf.namelist() if n.endswith("snn_opt/_version.py")]
+                      if len(meta) != 1 or len(vers) != 1:
+                          sys.exit(f"{name} metadata layout {meta} {vers}")
+                      got_meta = meta_version(zf.read(meta[0]).decode())
+                      got_ver = assigned_version(zf.read(vers[0]).decode())
+                  if got_meta != version or got_ver != version:
+                      sys.exit(f"{name} metadata {got_meta} _version {got_ver} != {version}")
+                  wheels.append(path)
+              elif name.endswith(".tar.gz"):
+                  if sdist_re.fullmatch(name) is None:
+                      sys.exit(f"sdist filename {name} is not {version}")
+                  with tarfile.open(path) as tar:
+                      infos = [
+                          m.name
+                          for m in tar.getmembers()
+                          if m.name.endswith("/PKG-INFO") and m.name.count("/") == 1
+                      ]
+                      vers = [
+                          m.name
+                          for m in tar.getmembers()
+                          if m.name.endswith("src/snn_opt/_version.py")
+                      ]
+                      if len(infos) != 1 or len(vers) != 1:
+                          sys.exit(f"{name} sdist layout pkg-info {infos} version {vers}")
+                      got = meta_version(tar.extractfile(infos[0]).read().decode())
+                      got_ver = assigned_version(tar.extractfile(vers[0]).read().decode())
+                  if got != version or got_ver != version:
+                      sys.exit(f"{name} PKG-INFO {got} _version {got_ver} != {version}")
+                  sdists.append(path)
+              else:
+                  sys.exit(f"unexpected artifact {name}")
+
+          # One host wheel is not a release. Every platform the matrix builds,
+          # and every CPython minor in CIBW_BUILD, must be present.
+          required_platforms = (
+              (
+                  "manylinux x86_64",
+                  lambda plat: "manylinux" in plat and plat.endswith("x86_64"),
+              ),
+              (
+                  "manylinux aarch64",
+                  lambda plat: "manylinux" in plat and plat.endswith("aarch64"),
+              ),
+              (
+                  "macos arm64",
+                  lambda plat: plat.startswith("macosx") and plat.endswith("arm64"),
+              ),
+              ("windows amd64", lambda plat: plat == "win_amd64"),
+          )
+          required_pythons = ("cp39", "cp310", "cp311", "cp312", "cp313", "cp314")
+          seen_platforms = set()
+          seen_pythons = set()
+          prefix = f"snn_opt-{version}-"
+          for path in wheels:
+              rest = path.name[len(prefix) : -len(".whl")]
+              parts = rest.split("-")
+              py = next((part for part in parts if re.fullmatch(r"cp\d+", part)), None)
+              plat = parts[-1] if parts else ""
+              if py is not None:
+                  seen_pythons.add(py)
+              for label, present in required_platforms:
+                  if present(plat):
+                      seen_platforms.add(label)
+          missing = []
+          if not sdists:
+              missing.append("sdist")
+          missing.extend(
+              label for label, _present in required_platforms if label not in seen_platforms
+          )
+          missing.extend(py for py in required_pythons if py not in seen_pythons)
+          if missing:
+              sys.exit("incomplete release set, missing " + ", ".join(missing))
+
+          pytag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          installable = [
+              p
+              for p in wheels
+              if pytag in p.name and "manylinux" in p.name and "x86_64" in p.name
+          ]
+          if not installable:
+              sys.exit(f"no manylinux x86_64 wheel for {pytag}")
+          wheel = sorted(installable)[0]
+          with tempfile.TemporaryDirectory(prefix="snn-opt-release-") as raw:
+              venv = Path(raw) / "venv"
+              subprocess.check_call([sys.executable, "-m", "venv", str(venv)])
+              pip = venv / "bin" / "pip"
+              python = venv / "bin" / "python"
+              subprocess.check_call(
+                  [str(pip), "install", "--disable-pip-version-check", str(wheel)]
+              )
+              code = (
+                  "import importlib.metadata, snn_opt; "
+                  "v = snn_opt.__version__; "
+                  "m = importlib.metadata.version('snn_opt'); "
+                  "assert v == m == %r, (v, m); "
+                  "print(v)"
+              ) % version
+              subprocess.check_call([str(python), "-c", code])
+          print(f"release identity ok: {version} ({len(wheels)} wheels, {len(sdists)} sdists)")
+          PY
       - uses: pypa/gh-action-pypi-publish@release/v1

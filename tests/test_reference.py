@@ -18,6 +18,7 @@ import pytest
 from benchmarks.qpref import objective as shim_objective
 from benchmarks.qpref import solve_exact as shim_solve_exact
 from snn_opt import __version__
+from snn_opt._version_source import VERSION_NOT_DERIVED
 from snn_opt.reference import (
     ReferenceNotVerified,
     ReferenceResult,
@@ -242,6 +243,9 @@ def test_result_fields_and_serialization():
     res = solve_reference(A, b, C, d)
     assert isinstance(res, ReferenceResult) and res.verified
     assert res.route == "ldp-nnls" and res.version == __version__
+    # A stale or missing derivation stamps this marker. Equality with
+    # __version__ would still pass if both were the marker, so reject it.
+    assert res.version != VERSION_NOT_DERIVED
     assert res.objective == pytest.approx(objective(A, b, res.x))
     assert res.mu == pytest.approx(np.linalg.eigvalsh(A)[0])
     out = res.as_dict()

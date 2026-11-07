@@ -547,7 +547,7 @@ you report.
 | `mu`, `stationarity`, `complementarity` | `lambda_min(A)` (as computed), and the upper bounds on `‖r‖` and `g` that entered the bound. |
 | `max_violation` | `max(0, max_i (C x + d)_i / ‖C_i‖)`. |
 | `active_rows`, `multipliers` | Rows tight at `x`; one multiplier per row of `C`. |
-| `route`, `version` | `"ldp-nnls"` and the `snn_opt` version, for provenance in stored results. |
+| `route`, `version` | `"ldp-nnls"` and the git-derived `snn_opt` version stored with the result. A clean commit at a `vX.Y.Z` tag records `X.Y.Z`. Any other commit, and any dirty tree, records a `.devN` version whose local segment names that commit (`+g<sha>`), with the date marker added when the tree is dirty. When git cannot be read, the packaged `_version.py` from the last build is recorded. A tree with neither records `0.0.0+invalid.snn_opt.version.not.derived`, a PEP 440 local version that is not a release number. |
 
 Failures: malformed input (shapes, non-finite data, `A` not symmetric positive
 definite) raises `ValueError`; an uncertified point or an LP-reported infeasible set raises

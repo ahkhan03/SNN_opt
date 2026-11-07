@@ -1,6 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
+# setuptools_scm writes this at build time. A checked-in copy would shadow
+# a later derivation.
+_version.py
 *$py.class
 *.so
 .Python
