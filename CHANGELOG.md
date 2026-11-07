@@ -4,6 +4,16 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.1] - 2026-11-07
+
+### Fixed
+
+- The wheel matrix builds and publishes again. The macOS leg moves from the
+  retired `macos-14` hosted image to `macos-latest`, and the CPU-baseline tests
+  skip where their toolchain is absent: they build with `g++ -fopenmp` and run
+  the resulting binaries, which macOS and Windows cannot do. Package content is
+  unchanged from 0.10.0, whose tag was cut but never reached PyPI.
+
 ## [0.10.0] - 2026-11-07
 
 ### Added
