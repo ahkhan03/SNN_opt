@@ -693,6 +693,13 @@ def test_stiff_dykstra_tolerance_margin_is_step_aware(
 
 
 def test_dykstra_positional_gate_uses_full_state_tolerance():
+    """The admission window is the normalized gate, with no absolute floor.
+
+    A Dykstra tolerance of 5e-5 used to pass because kkt_abs_tol=1e-2
+    widened the state window to about 1e-2. That floor is gone. The alias
+    kkt_rel_tol=1e-4 sets the target to 1e-4, and 5e-5 exceeds one percent
+    of that window, so the fit fails closed.
+    """
     dyk = joint_dykstra_projector(
         np.eye(2), -0.5 * np.ones(2), tolerance=5e-5)
     problem = OptimizationProblem(
@@ -701,7 +708,27 @@ def test_dykstra_positional_gate_uses_full_state_tolerance():
     convergence = ConvergenceConfig(kkt_abs_tol=1e-2, kkt_rel_tol=1e-4)
     solver = SNNSolver(problem, SolverConfig(convergence=convergence))
     cert = solver._compute_kkt_certificate(np.array([0.5, 0.5]))
-    assert cert.fit_status == "ok" and cert.passed
+    assert cert.fit_status == "fit_failed"
+    assert not cert.passed
+
+
+def test_dykstra_positional_gate_passes_inside_the_widened_window():
+    """The same geometry passes when the target widens the window.
+
+    ``kkt_target=1e-2`` makes the state window 0.01. A Dykstra tolerance of
+    5e-5 is inside one percent of that window, so the fit is admitted and
+    the point passes.
+    """
+    dyk = joint_dykstra_projector(
+        np.eye(2), -0.5 * np.ones(2), tolerance=5e-5)
+    problem = OptimizationProblem(
+        np.eye(2), -np.ones(2), np.zeros((0, 2)), np.zeros(0),
+        nonlinear_candidates=(dyk,))
+    convergence = ConvergenceConfig(kkt_target=1e-2)
+    solver = SNNSolver(problem, SolverConfig(convergence=convergence))
+    cert = solver._compute_kkt_certificate(np.array([0.5, 0.5]))
+    assert cert.fit_status == "ok"
+    assert cert.passed
 
 
 def test_tiny_curvature_roundoff_keeps_the_old_certificate_contract():

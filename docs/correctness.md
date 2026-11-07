@@ -66,18 +66,24 @@ cap by construction.
 The v0.6.0 criterion is a **KKT-cone certificate**: one nonnegative
 least-squares fit of `-∇f(x)` onto the cone of all unit-normalized facet
 normals, augmented with a complementarity row so slack facets cannot absorb
-the gradient, accepted when
+the gradient. There is one acceptance gate:
 
 ```
-r_kkt  <=  kkt_abs_tol + kkt_rel_tol * max(‖A x‖, ‖b‖, ‖Nᵀμ‖)
+fit_status == "ok" and residual <= effective_kkt_target() * scale
 ```
 
-Both sides carry gradient units, so while the relative term dominates the
-threshold the decision is invariant under positive objective rescaling,
+with no additive absolute term, at any scale including zero. At scale 0
+that accepts only a residual of exactly 0. `kkt_target` stored as `None`
+selects `1e-4` through `effective_kkt_target()`. That default is the former
+relative tolerance. The default preserves ordinary decisions except inside a
+band of width `1e-9`, the retired absolute tolerance. Residual `1.00005e-4`
+at scale 1 was accepted by `1e-9 + 1e-4 * scale` and is rejected by
+`1e-4 * scale`. A caller-supplied `kkt_abs_tol` is dropped, not translated:
+`kkt_abs_tol=1e-2` with `kkt_rel_tol=1e-4` becomes target `1e-4` and can
+reject a point the old threshold accepted at ordinary scale. Both residual and scale carry gradient units, so while the scale
+is positive the decision is invariant under positive objective rescaling,
 constraint row order, row duplication, and per-row scaling: the same problem
-certifies identically at natural scale and at 1e10x. (The `kkt_abs_tol`
-floor deliberately takes over at near-zero gradient scales, the intentional
-fallback that lets a genuinely-zero problem terminate.) The fit runs host-side on every backend: the compiled kernel advances
+certifies identically at natural scale and at 1e10x. The fit runs host-side on every backend: the compiled kernel advances
 the dynamics in checkpoint-sized chunks and the same Python policy evaluates
 each checkpoint, so `converged` means one thing everywhere (the FPGA
 reference is unchanged and reports fixed-horizon results, which the host can
@@ -91,7 +97,7 @@ Migration: results from v0.5 remain reproducible with
 preserves the old test verbatim. `converged=False` runs from v0.5 can
 legitimately become `converged=True` (or stop ~100x earlier) under the new
 criterion; nothing about the dynamics changed, only the stopping decision.
-The default `kkt_rel_tol = 1e-4` is calibrated to the O(k0) fixed-point floor
+The default target `1e-4` is calibrated to the O(k0) fixed-point floor
 of the default step size: it certifies the quality the dynamics genuinely
 reach, roughly 1e-3 relative solution error on well-conditioned problems. It
 is a residual tolerance, not an error bound: on a nearly singular Hessian a
@@ -102,22 +108,16 @@ far above 1e-6 (about 8.9e-4 on the package 50-D benchmark, about 5.8e-3 on
 an MPC-shaped near-parallel active set, flat from 500 to 50000 iterations).
 The floor is flat across `k0_scale` 0.5, 0.25, and 0.1, and it falls only
 once `k0_scale` drops to 0.05 and below, far outside the usable range.
-`ConvergenceConfig.kkt_target` is the opt-in strict contract for that fact,
-and it applies only when the KKT optimality test is selected. Any other
-`optimality_test` combined with a set target raises `ValueError`. `None`,
-the default, keeps the threshold above. A set target accepts only when the
-fit status is `"ok"`, `scale` is finite and positive, and
-`residual <= kkt_target * scale`, with no additive `kkt_abs_tol` term, so a
-floor above the caller's target is an explicit `converged=False` rather than
-a loose acceptance. The decision lives in `KKTCertificate.passed`.
-`SolverResult.kkt_normalized` reports `residual / scale` (NaN when the scale
-is not positive) and `kkt_target` reports the request. The strict gate fails
-closed when `scale` is not finite and positive. A positive scale is accepted
-on the normalized inequality alone, including a scale below the legacy
-absolute-plus-relative handover `kkt_abs_tol / kkt_rel_tol`. `kkt_rel_tol = 0`
-does not disable a set target. When a target is set, the extended nonlinear
-fit and the Dykstra 100x positional margin use the stricter of the legacy
-tolerance and `kkt_target * scale`, and return `fit_status="fit_failed"` when
-that resolution cannot be reached. The documented route to a point below the
-greedy floor is the exact `joint_projector` path, not a smaller step and not
-a looser certificate.
+The gate above is the only acceptance path, and it applies when the KKT
+optimality test is selected. A caller who sets `kkt_target` to a number
+tighter than that floor gets `converged=False`. Any other
+`optimality_test` combined with an explicit target raises `ValueError`. A
+stored `None` is not consulted when the selector is `"none"`. The decision
+lives in `KKTCertificate.passed`. `SolverResult.kkt_tolerance` reports the
+gate in force, `effective_kkt_target() * kkt_scale`. `kkt_normalized`
+reports `residual / scale` (NaN when the scale is not positive); the
+decision is still the inequality. The extended nonlinear fit and the
+Dykstra 100x positional margin use `effective_kkt_target() * scale`, and
+return `fit_status="fit_failed"` when that resolution cannot be reached.
+The documented route to a point below the greedy floor is the exact
+`joint_projector` path, not a smaller step and not a looser certificate.

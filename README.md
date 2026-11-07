@@ -119,9 +119,9 @@ points whose gaps are 3.0e-4 and 6.7e-4, which is why the two branches in panel
 (a) are drawn separately and why panel (b) flatlines rather than decaying. The
 run is jointly feasible throughout (max row distance 8.2e-7) and reports
 `converged=False` at the 4000-iteration cap: the scale-invariant KKT
-certificate (v0.6.0) measures the limit cycle's relative optimality defect at
-8.9e-4, above the default `kkt_rel_tol = 1e-4`, and the value is a true floor
-(unchanged at 40k iterations). Loosen `kkt_rel_tol`, or shrink the floor
+certificate measures the limit cycle's relative optimality defect at
+8.9e-4, above the default target `1e-4`, and the value is a true floor
+(unchanged at 40k iterations). Set a looser `kkt_target`, or shrink the floor
 itself with `k0_scale`, to certify on this problem. See
 [Accuracy and tuning](#accuracy-and-tuning) for where the floor comes from.
 
@@ -290,28 +290,38 @@ near-parallel (active-set KKT condition about 5e4) sits at 5.824e-3 from 500
 iterations through 50000. That floor is flat across `k0_scale` 0.5, 0.25,
 and 0.1 (5.824e-3 at a 20000-iteration budget). It falls only once
 `k0_scale` drops to 0.05 and below (1.457e-3 at 0.05, 7.171e-4 at 0.02,
-3.573e-4 at 0.01), far outside the usable range. Set
-`ConvergenceConfig(kkt_target=1e-6)` and that floor becomes an explicit
-failure (`converged=False`) rather than a loose acceptance under
-`kkt_rel_tol=1e-4`: the gate is `kkt_residual <= kkt_target * kkt_scale`
-with no additive absolute tolerance, and it fails closed when `kkt_scale` is
-not finite and positive (the normalized ratio is undefined at scale 0). The
-target applies only when the KKT optimality test is selected. Read the
-reported `kkt_normalized` (`kkt_residual / kkt_scale` when the scale is
-positive). The documented route to a tighter point is the exact
-`joint_projector` path in item 3.
+3.573e-4 at 0.01), far outside the usable range. There is one acceptance
+gate, `kkt_residual <= kkt_target * kkt_scale`, with no additive absolute
+term, at any scale including zero. At scale 0 that accepts only a residual
+of exactly 0. A stored `kkt_target` of `None` (the default) uses `1e-4`
+through `effective_kkt_target()`. That default is the former relative
+tolerance. The default preserves ordinary decisions except inside a band
+of width `1e-9`, the retired absolute tolerance. Residual `1.00005e-4` at
+scale 1 was accepted by `1e-9 + 1e-4 * scale` and is rejected by
+`1e-4 * scale`. A caller-supplied `kkt_abs_tol` is dropped, not translated:
+`kkt_abs_tol=1e-2` with `kkt_rel_tol=1e-4` becomes target `1e-4` and can
+reject a point the old threshold accepted at ordinary scale. Set
+`ConvergenceConfig(kkt_target=1e-6)` and the same floor is an explicit
+failure (`converged=False`) against that tighter target. An explicit target
+applies only when the KKT optimality test is selected. A stored `None` is
+not consulted when the selector is `"none"`. Read the reported
+`kkt_normalized` (`kkt_residual / kkt_scale` when the scale is positive,
+NaN when it is not). The decision is still the inequality.
+`kkt_tolerance` reports the gate in force. The documented route to a
+tighter point is the exact `joint_projector` path in item 3.
 
 What to do about it, in order of usefulness:
 
 1. **Read `kkt_residual / kkt_scale` as the optimality verdict.** It is the
    scale-invariant KKT defect of the final point, comparable across problems
-   and objective scalings. With `kkt_target` left unset, `converged=True`
-   certifies it below `kkt_rel_tol` (the absolute floor only matters near
-   zero scale). With `kkt_target` set, and only when the KKT optimality
-   test is selected, `converged=True` certifies
-   `kkt_residual <= kkt_target * kkt_scale` and nothing looser.
-   On this benchmark it reports 8.9e-4, an honest measurement of the limit
-   cycle, which is why the run does not certify at the default 1e-4.
+   and objective scalings. There is one gate. `converged=True` certifies
+   `fit_status == "ok"` and
+   `kkt_residual <= kkt_target * kkt_scale`, with no additive absolute
+   term. The default target is `1e-4` when `kkt_target` is left unset, and
+   that default preserves ordinary decisions except inside a band of width
+   `1e-9`. A non-default absolute tolerance is gone. On this benchmark the defect reports 8.9e-4,
+   an honest measurement of the limit cycle, which is why the run does not
+   certify at the default 1e-4.
 2. **Lower `k0_scale`, and raise the iteration budget with it.** Figure 4 maps
    the trade. On that problem, 0.5 gives 6.7e-4 and 0.02 gives 1.2e-5, but only
    if the budget is large enough to arrive; at 5k iterations the same 0.02
@@ -323,7 +333,7 @@ What to do about it, in order of usefulness:
    `joint_projector(C, d)` candidate (with empty `C`, `d` in the problem).
    On the Figure 1 problem the objective gap drops from the 6.7e-4 floor to
    2.1e-10 under the default certificate, and the iterate reaches 3.8e-10
-   from $x^\star$ with `kkt_rel_tol=1e-9`, at the cost of an inner Dykstra
+   from $x^\star$ with `kkt_target=1e-9`, at the cost of an inner Dykstra
    loop per step (3.5 s instead of milliseconds on the compiled backend;
    `benchmarks/05_exact_projection.py`). Box bounds join the same candidate
    as one more member, `joint_projector(C, d, members=(box_projector(lo, hi),))`,

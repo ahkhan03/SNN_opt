@@ -8,23 +8,6 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ### Added
 
-- **Opt-in strict KKT target.** `ConvergenceConfig.kkt_target` (`None` by
-  default) applies when the KKT optimality test is selected. Combining a
-  set target with any other `optimality_test` raises `ValueError`: a strict
-  target requires the KKT optimality test. A set target accepts a solve only
-  when the fit status is `"ok"`, `kkt_scale` is finite and positive, and
-  `kkt_residual <= kkt_target * kkt_scale`, with no additive absolute
-  tolerance. A non-positive or non-finite scale fails closed, because the
-  normalized ratio is undefined there. The extended nonlinear fit and the
-  Dykstra positional margin (the 100x check) use the stricter of the legacy
-  tolerance and `kkt_target * kkt_scale`, and the fit returns
-  `fit_status="fit_failed"` when that resolution cannot be reached.
-  `SolverResult` reports `kkt_normalized` (`kkt_residual / kkt_scale` when
-  the scale is positive, otherwise NaN) and `kkt_target`. `summary()` prints
-  the normalized line only when a target is set. Defaults, the Euler step,
-  and the projection sweep are unchanged; leaving `kkt_target` unset keeps
-  the previous stopping decision.
-
 - **`box_projector(lower, upper, coordinates=None)`: an exact built-in box
   set**, usable alone or as a Dykstra member. Bounds are scalars or 1-D
   arrays broadcast to the coordinate block; `-inf`/`+inf` leave a side open,
@@ -48,6 +31,33 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   differs from its declared expectation or the page is stale.
 
 ### Changed
+
+- **Breaking: one KKT acceptance gate.** The absolute floor is gone. There
+  is one acceptance decision, `KKTCertificate.passed`: `fit_status == "ok"`
+  and `residual <= effective_kkt_target() * scale`, with no additive
+  absolute term, at any scale including zero. At scale 0 that accepts only
+  a residual of exactly 0. `ConvergenceConfig.kkt_target` stays `None` when
+  the caller did not choose a number (the sentinel still round-trips);
+  `effective_kkt_target()` returns `1e-4` in that case. The default
+  preserves ordinary decisions except inside a band of width `1e-9`, the
+  retired absolute tolerance. Residual `1.00005e-4` at scale 1 was accepted
+  by `1e-9 + 1e-4 * scale` and is rejected by `1e-4 * scale`. A
+  caller-supplied `kkt_abs_tol` is dropped, not translated:
+  `kkt_abs_tol=1e-2` with `kkt_rel_tol=1e-4` becomes target `1e-4` and can
+  reject a point the old threshold accepted at ordinary scale. An explicit target still requires the
+  KKT optimality test. A stored `None` with `optimality_test="none"` does
+  not raise, because that selector does not consult the target.
+  `kkt_abs_tol` and `kkt_rel_tol` are deprecated constructor aliases:
+  `kkt_rel_tol` sets `kkt_target` when the target is unset, `kkt_abs_tol`
+  is ignored and warns that the absolute floor was removed, and supplying
+  either with an explicit `kkt_target` raises `ValueError`.
+  `SolverResult.kkt_tolerance` now reports the gate in force,
+  `effective_kkt_target() * kkt_scale`. `kkt_normalized` is still
+  `kkt_residual / kkt_scale` when the scale is positive, and NaN otherwise;
+  the decision is the inequality either way. The fit budget and the Dykstra
+  positional margin use that same product. The Euler step, the projection
+  sweep, and `optimality_test="legacy_projected_gradient"` are unchanged.
+  `summary()` still prints the normalized line only when a target is set.
 
 - `main` carries a development version (`0.9.0.dev0`): the 0.8.1 patch
   release was merged forward with its release version, so a checkout of

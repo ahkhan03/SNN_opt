@@ -795,8 +795,8 @@ optimum) the greedy sweep's objective gap sits at $6.7\times10^{-4}$ and does
 not move between 4k and 40k iterations. Passing the same rows as one exact
 joint projector (Section 8.3) removes the floor: with the default
 certificate the run stops at iteration 5051 with a gap of $2.1\times10^{-10}$,
-and with `kkt_rel_tol=1e-9` it reaches $3.8\times10^{-10}$ from $x^\star$ at
-iteration 9901. The price is an inner Dykstra loop per Euler step
+and with `kkt_target=1e-9` it reaches $2.4\times10^{-10}$ from $x^\star$ at
+iteration 10101. The price is an inner Dykstra loop per Euler step
 (`benchmarks/05_exact_projection.py` reproduces these numbers).
 
 ### 8.3 Intersections: Dykstra's algorithm

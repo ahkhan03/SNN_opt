@@ -9,7 +9,7 @@ optimum from `qpref.solve_exact`:
   2. the same rows passed as ONE `joint_projector(C, d)` candidate, which
      projects exactly onto the polytope with Dykstra's algorithm, default
      certificate tolerance;
-  3. the same with a tight certificate (`kkt_rel_tol=1e-9`).
+  3. the same with a tight certificate (`kkt_target=1e-9`).
 
 With an exact projection the projected-gradient fixed point is the exact
 optimum, so the error keeps falling as the tolerance tightens instead of
@@ -79,9 +79,9 @@ def main() -> int:
          SolverConfig(max_iterations=40_000, backend=be)),
         ("joint_projector", joint,
          SolverConfig(max_iterations=40_000, backend=be)),
-        ("joint_projector, kkt_rel_tol=1e-9", joint,
+        ("joint_projector, kkt_target=1e-9", joint,
          SolverConfig(max_iterations=60_000, backend=be,
-                      convergence=ConvergenceConfig(kkt_rel_tol=1e-9))),
+                      convergence=ConvergenceConfig(kkt_target=1e-9))),
     ]
     print(f"50-D QP, 30 rows, {len(active)} active at the optimum (backend={be!r})\n")
     print(f"{'run':36s} {'certified':>9s} {'iters':>6s} {'|x - x*|':>9s} {'|f - f*|':>9s} {'time':>7s}")

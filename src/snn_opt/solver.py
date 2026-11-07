@@ -66,6 +66,21 @@ _EVENT_DIGEST_PRIME = 1099511628211
 _UINT64_MASK = (1 << 64) - 1
 
 
+# Former relative tolerance. Stored ``kkt_target is None`` selects this
+# number in ``effective_kkt_target`` without writing the field, so a
+# round-trip still shows that the caller did not choose one. At scales
+# well above 1e-5 the retired threshold ``1e-9 + 1e-4 * scale`` and
+# ``1e-4 * scale`` differ only by that removed 1e-9 floor.
+_DEFAULT_KKT_TARGET = 1e-4
+
+
+def _effective_kkt_target(kkt_target: Optional[float]) -> float:
+    """Normalized target in force. ``None`` selects ``1e-4``."""
+    if kkt_target is None:
+        return _DEFAULT_KKT_TARGET
+    return float(kkt_target)
+
+
 @dataclass
 class ConvergenceConfig:
     """Configuration for convergence detection.
@@ -73,29 +88,28 @@ class ConvergenceConfig:
     Since v0.6.0 the authoritative optimality criterion is a scale-invariant
     KKT certificate (``optimality_test="kkt"``): a nonnegative least-squares
     fit of the gradient onto the cone of all facet normals, augmented with a
-    complementarity row, accepted when
+    complementarity row. There is one acceptance gate:
 
-        r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||).
+        fit_status == "ok" and residual <= effective_kkt_target() * scale
 
-    Both residual components carry gradient units, so while the relative term
-    dominates the threshold the test is invariant under positive rescaling of
-    the objective (the ``kkt_abs_tol`` floor deliberately breaks exact
-    Boolean invariance once the problem is scaled down far enough that the
-    absolute term takes over -- the intentional near-zero fallback). Set
-    ``kkt_target`` to require ``residual <= kkt_target * scale`` instead,
-    with no absolute term. That gate requires a finite ``scale > 0`` and
-    the KKT optimality test. A non-positive or non-finite scale fails
-    closed, and a non-KKT selector raises in ``validate()``. ``None`` (the
-    default) keeps the threshold above. The v0.5
-    projected-gradient test compared an absolute norm against ``1e-6`` and
-    therefore could never fire on problems with a large gradient scale, and
-    stalled structurally at constrained optima with correlated active
-    normals.
+    with no additive absolute term, at any scale including zero. At scale 0
+    the inequality accepts only a residual of exactly 0. ``kkt_target``
+    stored as ``None`` means the caller did not choose a number;
+    ``effective_kkt_target()`` then returns ``1e-4``. That default is the
+    former relative tolerance, so at scales well above ``1e-5`` ordinary
+    problems keep the decision the retired threshold
+    ``1e-9 + 1e-4 * scale`` made. The absolute floor is gone. A target
+    that the caller did set requires ``optimality_test="kkt"``;
+    ``validate()`` raises otherwise. A stored ``None`` is not consulted
+    when the selector is ``"none"``. The v0.5 projected-gradient test
+    compared an absolute norm against ``1e-6`` and therefore could never
+    fire on problems with a large gradient scale, and stalled structurally
+    at constrained optima with correlated active normals.
 
     For a strongly convex QP constrained only by an exact-set projector (or
     disjoint exact projectors), the certificate instead bounds state error.
-    Its scale is max(1, ||x||), and both tolerances have state units. See
-    ``KKTCertificate`` for the bound and the iterative-projector variant.
+    Its scale is max(1, ||x||), and the same gate is applied in state units.
+    See ``KKTCertificate`` for the bound and the iterative-projector variant.
 
     The cheap criteria (objective plateau, solution stability) and the
     feasibility gate are evaluated first; the KKT fit only runs when they
@@ -114,28 +128,16 @@ class ConvergenceConfig:
     # choice from the default, so a resolved config re-enters cleanly.
     optimality_test: Optional[str] = None
 
-    # KKT certificate tolerances: accept when
-    # r_kkt <= kkt_abs_tol + kkt_rel_tol * scale. The relative term dominates
-    # at every practical scale; the absolute floor only matters for problems
-    # whose gradient scale is ~0. kkt_rel_tol=1e-4 is calibrated to the O(k0)
-    # fixed-point floor of the default dynamics (k0_scale=0.5): it certifies
-    # the residual the solver genuinely reaches, roughly 1e-3 relative
-    # solution error; for row/cone fits it is a KKT-residual tolerance.
-    # Strongly convex exact-projector certificates instead use state units
-    # and bound state error (see KKTCertificate).
-    # None = "not explicitly chosen" (resolved to 1e-9 / 1e-4 in
-    # __post_init__): the sentinel lets alias-conflict detection see EVERY
-    # explicitly supplied new-style setting, including one that happens to
-    # equal the default.
-    kkt_abs_tol: Optional[float] = None
-    kkt_rel_tol: Optional[float] = None
-
-    # Optional strict normalized target (residual / scale). None keeps the
-    # legacy threshold above, bit for bit. A set value does not resolve to a
-    # number here: acceptance is decided only in KKTCertificate.passed, as
-    # residual <= kkt_target * scale with no additive absolute term. The
-    # strict gate requires a finite scale > 0. It is valid only with
-    # optimality_test="kkt".
+    # Normalized acceptance target (residual / scale). None means "not
+    # explicitly chosen" and is NOT resolved here: replace()/asdict() must
+    # round-trip the sentinel. effective_kkt_target() returns 1e-4 in that
+    # case. The number is the former kkt_rel_tol default, calibrated to the
+    # O(k0) fixed-point floor of the default dynamics (k0_scale=0.5): it
+    # certifies the residual the solver genuinely reaches, roughly 1e-3
+    # relative solution error. It is a KKT-residual tolerance, not a
+    # solution-error bound. Strongly convex exact-projector certificates
+    # use the same target in state units (see KKTCertificate). A value the
+    # caller sets is valid only with optimality_test="kkt".
     kkt_target: Optional[float] = None
 
     # Tolerances (cheap criteria)
@@ -173,13 +175,23 @@ class ConvergenceConfig:
     use_projected_gradient: InitVar[Optional[bool]] = None
     proj_grad_tol: InitVar[Optional[float]] = None
 
-    def __post_init__(self, use_projected_gradient, proj_grad_tol):
+    # Deprecated CONSTRUCTOR-ONLY aliases for the retired absolute-plus-
+    # relative threshold. InitVar: consumed by __post_init__, never stored,
+    # so replace()/asdict() of a resolved config cannot re-apply them.
+    # kkt_rel_tol writes kkt_target when the target is unset. kkt_abs_tol
+    # is accepted, ignored, and warned: the absolute floor was removed.
+    # Supplying either together with an explicit kkt_target raises.
+    kkt_abs_tol: InitVar[Optional[float]] = None
+    kkt_rel_tol: InitVar[Optional[float]] = None
+
+    def __post_init__(self, use_projected_gradient, proj_grad_tol,
+                      kkt_abs_tol, kkt_rel_tol):
         legacy_supplied = (use_projected_gradient is not None
                           or proj_grad_tol is not None)
         if legacy_supplied:
             if (self.optimality_test is not None
-                    or self.kkt_abs_tol is not None
-                    or self.kkt_rel_tol is not None
+                    or kkt_abs_tol is not None
+                    or kkt_rel_tol is not None
                     or self.kkt_target is not None
                     or self.legacy_proj_grad_tol is not None):
                 raise ValueError(
@@ -204,32 +216,70 @@ class ConvergenceConfig:
                     "Selecting optimality_test='legacy_projected_gradient' "
                     "for backward compatibility",
                     DeprecationWarning, stacklevel=3)
+        if kkt_abs_tol is not None or kkt_rel_tol is not None:
+            if self.kkt_target is not None:
+                raise ValueError(
+                    "deprecated KKT tolerance aliases "
+                    "(kkt_abs_tol / kkt_rel_tol) cannot be combined with "
+                    "an explicit kkt_target; supply exactly one style")
+            import warnings
+            if kkt_rel_tol is not None:
+                self.kkt_target = float(kkt_rel_tol)
+                warnings.warn(
+                    "kkt_rel_tol is deprecated; set kkt_target instead. "
+                    "kkt_rel_tol now sets the normalized target, and the "
+                    "absolute floor was removed. kkt_rel_tol=0 accepts only "
+                    "an exactly zero residual; it used to mean an absolute "
+                    "1e-9 floor. Combining kkt_rel_tol with an "
+                    "optimality_test other than 'kkt' raises ValueError; "
+                    "old code accepted that unused tolerance.",
+                    DeprecationWarning, stacklevel=3)
+            if kkt_abs_tol is not None:
+                warnings.warn(
+                    "kkt_abs_tol is deprecated and ignored; the absolute "
+                    "floor was removed. Acceptance is "
+                    "residual <= kkt_target * scale with no additive "
+                    "absolute term. A supplied kkt_abs_tol is dropped, not "
+                    "translated. kkt_abs_tol alone does not set a target, so "
+                    "an optimality_test other than 'kkt' does not raise; "
+                    "combining it with kkt_rel_tol does, because kkt_rel_tol "
+                    "sets the target.",
+                    DeprecationWarning, stacklevel=3)
         if self.optimality_test is None:
             self.optimality_test = "kkt"
-        if self.kkt_abs_tol is None:
-            self.kkt_abs_tol = 1e-9
-        if self.kkt_rel_tol is None:
-            self.kkt_rel_tol = 1e-4
         if self.legacy_proj_grad_tol is None:
             self.legacy_proj_grad_tol = 1e-6
+        # kkt_target is deliberately left as None when the caller did not
+        # set it. effective_kkt_target() is the only resolution.
         self.validate()
+
+    def effective_kkt_target(self) -> float:
+        """Normalized target the gate uses.
+
+        The stored field stays ``None`` when the caller did not choose one,
+        so ``dataclasses.replace`` and ``asdict`` round-trip the sentinel.
+        ``None`` selects ``1e-4``.
+        """
+        return _effective_kkt_target(self.kkt_target)
 
     def validate(self):
         """Validate the resolved criterion settings.
 
         Called from __post_init__ and again at solve time, so a config whose
         fields were mutated after construction (dataclasses are not frozen)
-        is still checked before it can steer a backend dispatch.
+        is still checked before it can steer a backend dispatch. A stored
+        ``kkt_target is None`` is not a request: ``optimality_test="none"``
+        does not raise, because that selector does not consult the target.
         """
         valid = ("kkt", "legacy_projected_gradient", "none")
         if self.optimality_test not in valid:
             raise ValueError(
                 f"optimality_test must be one of {valid}, "
                 f"got {self.optimality_test!r}")
-        for name in ("kkt_abs_tol", "kkt_rel_tol", "legacy_proj_grad_tol"):
-            v = getattr(self, name)
-            if v is None or not (np.isfinite(v) and v >= 0.0):
-                raise ValueError(f"{name} must be finite and >= 0, got {v!r}")
+        v = self.legacy_proj_grad_tol
+        if v is None or not (np.isfinite(v) and v >= 0.0):
+            raise ValueError(
+                f"legacy_proj_grad_tol must be finite and >= 0, got {v!r}")
         if self.kkt_target is not None and not (
                 np.isfinite(self.kkt_target) and self.kkt_target >= 0.0):
             raise ValueError(
@@ -243,22 +293,16 @@ class ConvergenceConfig:
                 "the KKT optimality test.")
 
 
-def _requested_certificate_resolution(legacy_tolerance, scale, kkt_target):
-    """Resolution the certificate machinery must actually reach.
+def _requested_certificate_resolution(kkt_target, scale):
+    """Fit and Dykstra admission budget: effective target times ``scale``.
 
-    ``kkt_target is None`` returns ``legacy_tolerance`` unchanged, so the
-    default path does not pass through ``min``. A set target uses the
-    stricter (smaller) of that legacy tolerance and ``kkt_target * scale``
-    when the scale is finite and positive. Otherwise the legacy tolerance
-    is kept and the strict gate fails closed on the scale itself.
+    ``kkt_target`` may be the stored sentinel ``None`` (resolved to
+    ``1e-4``). Callers that only know a lower bound on the certificate
+    scale pass that bound (``scale_gb``). The product is then a
+    conservative, smaller residual demand. There is no legacy tolerance
+    left to take a minimum against.
     """
-    if kkt_target is None:
-        return legacy_tolerance
-    if not (np.isfinite(scale) and scale > 0.0
-            and np.isfinite(kkt_target)
-            and np.isfinite(legacy_tolerance)):
-        return legacy_tolerance
-    return min(float(legacy_tolerance), float(kkt_target) * float(scale))
+    return _effective_kkt_target(kkt_target) * float(scale)
 
 
 @dataclass
@@ -447,15 +491,16 @@ class KKTCertificate:
 
     with ``mu >= 0`` fitted by one augmented nonnegative least-squares over
     ALL nondegenerate facets (explicit rows and box bounds, unit-normalized),
-    no active-set window. ``scale = max(||A x||, ||b||, ||N^T mu||)`` and the
-    legacy acceptance threshold is
-    ``tolerance = kkt_abs_tol + kkt_rel_tol * scale``.
-    ``passed`` is the acceptance decision when the KKT optimality test is
-    selected. With ``kkt_target is None`` that decision is the legacy
-    threshold. With ``kkt_target`` set it is ``fit_status == "ok"``, a
-    finite ``scale > 0``, and ``residual <= kkt_target * scale``, with no
-    additive absolute term. A non-positive or non-finite scale fails closed,
-    because the normalized ratio is undefined at scale 0.
+    no active-set window. ``scale = max(||A x||, ||b||, ||N^T mu||)`` and
+    ``tolerance`` is the gate in force,
+    ``effective_kkt_target() * scale``.
+    ``passed`` is the only acceptance decision when the KKT optimality test
+    is selected: ``fit_status == "ok"`` and
+    ``residual <= effective_kkt_target() * scale``, with no additive
+    absolute term, at any finite scale including zero. At scale 0 that
+    accepts only a residual of exactly 0. A non-finite residual or a
+    non-finite scale fails. ``kkt_normalized`` is NaN when the scale
+    is not positive; the decision is still the inequality.
     For a strongly convex objective on one exact set or disjoint exact sets,
     the state-unit path reports ``residual = stationarity`` for a direct
     projector and ``residual = stationarity + complementarity`` for the
@@ -470,9 +515,8 @@ class KKTCertificate:
     trusted to its configured positional tolerance. That oracle error is not
     amplified or otherwise bounded through the capped Euler step; the
     certificate admits it only with a strict 100x positional margin against
-    the requested window. The window is the legacy tolerance, or, when
-    ``kkt_target`` is set, the stricter of that tolerance and
-    ``kkt_target * scale``. A projector that cannot meet the window returns
+    the requested window. The window is ``effective_kkt_target() * scale``.
+    A projector that cannot meet the window returns
     ``fit_status="fit_failed"``.
     ``fit_status`` is ``"ok"``, ``"non_finite"``, ``"fit_failed"``, or ``"too_large"``; any
     non-``"ok"`` status fails the convergence gate closed.
@@ -484,31 +528,29 @@ class KKTCertificate:
     tolerance: float
     fit_status: str
     multipliers: Optional[np.ndarray] = None
-    # Requested normalized target, or None for the legacy threshold.
-    # A non-positive scale fails closed. There is no crossover band.
+    # Requested normalized target, or None when the caller did not set one.
+    # None selects 1e-4 inside passed. The decision does not read tolerance.
+    # Scale 0 is decided by the inequality. A non-finite scale fails.
     kkt_target: Optional[float] = None
 
     @property
     def passed(self) -> bool:
         """Acceptance decision. This property is the only place it is made.
 
-        ``kkt_target is None``: ``fit_status == "ok"`` and
-        ``residual <= tolerance`` (the legacy absolute-plus-relative
-        threshold). A set target: ``fit_status == "ok"``, a finite
-        ``scale > 0``, and ``residual <= kkt_target * scale``, with no
-        additive absolute term. A non-positive or non-finite scale fails
-        closed, because ``residual / scale`` is undefined there.
-        ``kkt_rel_tol == 0`` does not disable a set target.
+        ``fit_status == "ok"`` and
+        ``residual <= effective_kkt_target() * scale``, with no additive
+        absolute term, at any finite scale including zero. A stored
+        ``kkt_target`` of ``None`` uses ``1e-4``, the same rule as
+        ``ConvergenceConfig.effective_kkt_target()``. At scale 0 the
+        inequality accepts only a residual of exactly 0. A non-finite
+        residual or a non-finite scale fails. The normalized ratio is not
+        consulted.
         """
-        if self.fit_status != "ok" or not np.isfinite(self.residual):
+        if (self.fit_status != "ok"
+                or not np.isfinite(self.residual)
+                or not np.isfinite(self.scale)):
             return False
-        if self.kkt_target is None:
-            return bool(self.residual <= self.tolerance)
-        scale = self.scale
-        target = self.kkt_target
-        if not (np.isfinite(scale) and scale > 0.0 and np.isfinite(target)):
-            return False
-        return bool(self.residual <= target * scale)
+        return bool(self.residual <= _effective_kkt_target(self.kkt_target) * self.scale)
 
 
 @dataclass
@@ -595,22 +637,23 @@ class SolverResult:
         Scale reference max(||A x||, ||b||, ||N^T mu||) used by the
         acceptance threshold, or max(1, ||x||) for state-unit certificates.
     kkt_tolerance : float
-        Legacy acceptance threshold kkt_abs_tol + kkt_rel_tol * kkt_scale
-        at the final point. When kkt_target is set, the gate that
-        `converged` uses is kkt_target * kkt_scale, not this field.
-        The extended fit and the Dykstra positional window use the
-        stricter of this legacy threshold and kkt_target * kkt_scale.
+        The gate in force at the final point:
+        effective_kkt_target() * kkt_scale. A stored target of None uses
+        1e-4. The extended fit and the Dykstra positional window use this
+        same product (with scale_gb where that lower bound is what the
+        caller has).
     kkt_fit_status : str
         "ok", "non_finite", "fit_failed", or "too_large". Anything but "ok" means the
         certificate could not be evaluated and convergence failed closed.
     kkt_normalized : float
         kkt_residual / kkt_scale when kkt_scale is finite and positive,
         otherwise NaN (the ratio is undefined at scale 0). Reported ratio
-        at a positive scale. `passed` is the acceptance decision, and only
+        at a positive scale. The acceptance decision is the inequality in
+        KKTCertificate.passed, including when this ratio is NaN, and only
         when the KKT optimality test is selected.
     kkt_target : float or None
         Normalized target requested via ConvergenceConfig.kkt_target.
-        None when the legacy threshold was in force.
+        None when the caller did not set one; the gate then uses 1e-4.
     kkt_multipliers : ndarray or None
         Nonnegative fit coefficients in the certificate row order.  The
         extended path includes candidate normals; the legacy path may leave
@@ -1633,10 +1676,10 @@ class SNNSolver:
     def _new_kkt_certificate(self, residual, stationarity, complementarity,
                              scale, tolerance, fit_status, multipliers=None
                              ) -> KKTCertificate:
-        """Stamp every certificate with the caller's target.
+        """Stamp every certificate with the caller's stored target.
 
-        ``passed`` reads ``kkt_target``. The legacy ``tolerance`` is stored
-        unchanged, so an unset target keeps the historical threshold.
+        ``passed`` reads ``effective_kkt_target()``. ``tolerance`` is the
+        gate in force, that target times the certificate scale.
         """
         if multipliers is not None:
             multipliers = np.asarray(multipliers, dtype=float).copy()
@@ -1841,7 +1884,7 @@ class SNNSolver:
         scale_gb = max(float(np.linalg.norm(Ax)), float(np.linalg.norm(b)))
 
         def _cert(res, stat, comp, scale, status, multipliers=None):
-            tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+            tol = _requested_certificate_resolution(conv.kkt_target, scale)
             # Fail closed on ANY non-finite reported scalar: a certificate
             # whose numbers cannot be trusted must not read as "ok".
             if status == "ok" and not all(
@@ -1899,7 +1942,9 @@ class SNNSolver:
                          scale_gb, "non_finite")
 
         lx = max(1.0, float(np.linalg.norm(x)))
-        tol_hint = conv.kkt_abs_tol + conv.kkt_rel_tol * scale_gb
+        # scale_gb lower-bounds the certificate scale. The row/cone NNLS
+        # fit does not consume this hint; the budget is the gate anyway.
+        tol_hint = _requested_certificate_resolution(conv.kkt_target, scale_gb)
         mu, fit_status = self._fit_cone_multipliers(N, s, g, lx, tol_hint)
         if mu is None:
             return _cert(float("nan"), float("nan"), float("nan"),
@@ -2321,7 +2366,7 @@ class SNNSolver:
         scale_gb = max(float(np.linalg.norm(g - b)), float(np.linalg.norm(b)))
 
         def cert(res, stat, comp, scale, status, multipliers=None):
-            tol = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
+            tol = _requested_certificate_resolution(conv.kkt_target, scale)
             if status == "ok" and not all(
                     np.isfinite(v) for v in (res, stat, comp, scale, tol)):
                 return self._new_kkt_certificate(
@@ -2383,15 +2428,13 @@ class SNNSolver:
             return cert(float("nan"), float("nan"), float("nan"),
                         scale_gb, "too_large")
         lx = max(1.0, float(np.linalg.norm(x)))
-        tol_hint = conv.kkt_abs_tol + conv.kkt_rel_tol * scale_gb
+        # scale_gb lower-bounds the certificate scale, so
+        # effective_kkt_target() * scale_gb is a conservative residual demand.
+        # The row/cone NNLS fit does not consume this hint.
+        tol_hint = _requested_certificate_resolution(conv.kkt_target, scale_gb)
         if models:
-            # scale_gb lower-bounds the certificate scale, so
-            # kkt_target * scale_gb is a conservative residual demand.
-            # The row/cone NNLS fit does not consume this hint.
-            fit_resolution = _requested_certificate_resolution(
-                tol_hint, scale_gb, conv.kkt_target)
             mu, model_term, model_comp, fit_status = self._fit_certificate_models(
-                x, N, s, g, lx, models, fit_resolution)
+                x, N, s, g, lx, models, tol_hint)
         else:
             mu, fit_status = self._fit_cone_multipliers(
                 N, s, g, lx, tol_hint)
@@ -2524,10 +2567,8 @@ class SNNSolver:
         to implement its exact set. The positional error is not amplified or
         otherwise bounded through the capped Euler step; the certificate only
         admits a configured tolerance below one percent of the requested
-        state window. That window is the legacy tolerance, or, when
-        ``kkt_target`` is set, the stricter of the legacy tolerance and
-        ``kkt_target * scale``. A projector that cannot meet it fails the
-        fit closed.
+        state window. That window is ``effective_kkt_target() * scale``.
+        A projector that cannot meet it fails the fit closed.
         """
         occupied = set()
         iterative = False
@@ -2544,7 +2585,8 @@ class SNNSolver:
         mu = self._strong_convexity()
         if getattr(self, "_strong_convexity_status", "ok") == "solve_failed":
             scale = max(1.0, float(np.linalg.norm(x)))
-            tolerance = self.config.convergence.kkt_abs_tol + self.config.convergence.kkt_rel_tol * scale
+            tolerance = _requested_certificate_resolution(
+                self.config.convergence.kkt_target, scale)
             return self._new_kkt_certificate(
                 float("nan"), float("nan"), float("nan"),
                 scale, tolerance, "fit_failed", None)
@@ -2553,12 +2595,9 @@ class SNNSolver:
         L = float(getattr(self, "_state_lipschitz_cache", 0.0))
         conv = self.config.convergence
         scale = max(1.0, float(np.linalg.norm(x)))
-        tolerance = conv.kkt_abs_tol + conv.kkt_rel_tol * scale
-        # Stored ``tolerance`` stays the legacy threshold. The positional
-        # window tightens only when a target is set; None returns the same
-        # float, so the default comparisons stay bit-identical.
-        window = _requested_certificate_resolution(
-            tolerance, scale, conv.kkt_target)
+        # The stored tolerance and the positional window are the same gate.
+        tolerance = _requested_certificate_resolution(conv.kkt_target, scale)
+        window = tolerance
 
         iterative_tolerance = None
         for model in models:
@@ -2585,12 +2624,10 @@ class SNNSolver:
                     max(1.0, float(np.linalg.norm(x))) / gate_norm_g)
         gate_input = x - gate_alpha * gate_gradient
         z_scale = max(1.0, float(np.linalg.norm(gate_input)))
-        # Use the full requested window, including kkt_abs_tol. The 0.999
-        # factor is an intentional strict-inequality guard at the 100x
-        # positional margin, so a configured tolerance exactly on the
-        # boundary fails closed after inner-cycle rounding. With a strict
-        # target the window is the stricter of the legacy tolerance and
-        # kkt_target * scale.
+        # The 0.999 factor is an intentional strict-inequality guard at the
+        # 100x positional margin, so a configured tolerance exactly on the
+        # boundary fails closed after inner-cycle rounding. The window is
+        # effective_kkt_target() * scale, with no absolute floor.
         state_budget = 0.999 * 0.01 * window
         if (iterative_tolerance is not None
                 and iterative_tolerance * z_scale
@@ -2613,10 +2650,11 @@ class SNNSolver:
         roundoff = (64.0 * np.finfo(float).eps * np.sqrt(x.size)
                     * max(1.0, float(np.linalg.norm(x))))
         if roundoff / (alpha_floor * mu) > 0.25 * window:
-            # Unset target: same threshold as before, and the same
-            # fallthrough to the gradient-unit certificate. A set target
-            # that the state bound cannot resolve fails closed instead of
-            # reporting a residual the projector did not reach.
+            # An explicit target that the state bound cannot resolve fails
+            # closed. An unset target keeps the ordinary gradient-unit
+            # certificate: the caller did not ask for a tighter state bound
+            # than the curvature can support. The acceptance gate on
+            # whichever certificate is produced is still the one inequality.
             if conv.kkt_target is not None:
                 return self._new_kkt_certificate(
                     float("nan"), float("nan"), float("nan"),
@@ -2701,7 +2739,7 @@ class SNNSolver:
         and ``h`` together, so the trial point ``base - alpha h`` does not
         move. The trial step is capped at the set's own length scale
         ``max(1, ||base||)``: that still clears any slack inside the
-        acceptance window (about ``kkt_rel_tol * ||x||``) and reaches the
+        acceptance window (about ``effective_kkt_target() * ||x||``) and reaches the
         support of ``-h`` on an order-one set, while an iterative projector
         (Dykstra) is never asked to walk back from a point ``||g||/L`` away,
         where its cycle cap would return an infeasible point and reject the
@@ -2919,12 +2957,8 @@ class SNNSolver:
         cert = self._compute_kkt_certificate(x_curr)
         self._last_kkt_certificate = cert
         if cert.passed:
-            if cert.kkt_target is None:
-                return True, (f"kkt(residual={cert.residual:.2e}"
-                              f"<=tol={cert.tolerance:.2e})")
-            gate = cert.kkt_target * cert.scale
             return True, (f"kkt(residual={cert.residual:.2e}"
-                          f"<=target*scale={gate:.2e})")
+                          f"<=tol={cert.tolerance:.2e})")
         return False, None
     
     def solve(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:

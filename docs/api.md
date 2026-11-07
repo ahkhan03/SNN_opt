@@ -88,35 +88,40 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 Since v0.6.0 the authoritative optimality criterion is a **scale-invariant KKT
 certificate**: one augmented nonnegative least-squares fit of the gradient onto
 the cone of all unit-normalized facet normals (rows and box bounds), with a
-complementarity row appended, accepted when
+complementarity row appended. There is one acceptance gate, and
+`KKTCertificate.passed` is the only place the decision is made:
 
 ```
-r_kkt <= kkt_abs_tol + kkt_rel_tol * max(||A x||, ||b||, ||N^T mu||)
+fit_status == "ok" and residual <= effective_kkt_target() * scale
 ```
 
-Both residual components carry gradient units, so while the relative term
-dominates the threshold the decision is invariant under positive objective
-rescaling, constraint row order, row duplication, and per-row scaling (the
-`kkt_abs_tol` floor deliberately takes over at near-zero gradient scales:
-the intentional fallback that lets a genuinely-zero problem terminate).
+with no additive absolute term, at any scale including zero. At scale 0 that
+accepts only a residual of exactly 0. `kkt_target` stored as `None` (the
+default) means the caller did not choose a number, and the sentinel
+round-trips through `dataclasses.replace` and `asdict`.
+`effective_kkt_target()` then returns `1e-4`. That default is the former
+relative tolerance. The default preserves ordinary decisions except inside a
+band of width `1e-9`, the retired absolute tolerance. Residual `1.00005e-4`
+at scale 1 was accepted by `1e-9 + 1e-4 * scale` and is rejected by
+`1e-4 * scale`. A caller-supplied `kkt_abs_tol` is dropped, not translated:
+`kkt_abs_tol=1e-2` with `kkt_rel_tol=1e-4` becomes target `1e-4` and can
+reject a point the old threshold accepted at ordinary scale. Both residual and scale carry gradient units, so while the
+scale is positive the decision is invariant under positive objective
+rescaling, constraint row order, row duplication, and per-row scaling.
+`kkt_tolerance` reports this same gate, `effective_kkt_target() * kkt_scale`.
+`kkt_normalized` is `residual / scale` when the scale is finite and positive,
+and NaN otherwise. The decision is still the inequality.
 
-**Strict target.** `kkt_target` (default `None`) is an optional normalized
-defect, `residual / scale`. It is valid only with `optimality_test="kkt"`;
-any other selector raises `ValueError` from `validate()`, because a strict
-target requires the KKT optimality test. `None` keeps the legacy threshold
-above, including the absolute floor. When it is set, `KKTCertificate.passed`
-requires `fit_status == "ok"`, a finite `scale > 0`, and
-`residual <= kkt_target * scale`, with no additive `kkt_abs_tol` term.
-`kkt_tolerance` stays the legacy threshold either way. The strict gate fails
-closed when `scale` is not finite and positive, which includes scale 0, where
-`residual / scale` is undefined. A positive scale is accepted on that
-inequality alone, including a scale below `kkt_abs_tol / kkt_rel_tol`.
-`kkt_rel_tol == 0` does not disable a set target. On the exact-projector
-certificate the same rule applies in state units (`scale = max(1, ||x||)`).
-When a target is set, the extended block-coordinate fit and the Dykstra
-positional admission use the stricter of the legacy tolerance and
-`kkt_target * scale`. If that resolution cannot be reached, the certificate
-returns `fit_status="fit_failed"` and the gate fails closed.
+A target the caller sets is valid only with `optimality_test="kkt"`. Any
+other selector raises `ValueError` from `validate()`, because a strict
+target requires the KKT optimality test. A stored `None` is not consulted
+when the selector is `"none"`, so that combination does not raise. On the
+exact-projector certificate the same rule applies in state units
+(`scale = max(1, ||x||)`). The extended block-coordinate fit and the Dykstra
+positional admission use `effective_kkt_target() * scale` (the conservative
+`scale_gb` lower bound where that is what the caller has). If that
+resolution cannot be reached, the certificate returns
+`fit_status="fit_failed"`.
 
 A second practical limit: certification at tolerances below the facet family's
 conditioning floor (~machine epsilon times the condition number of the
@@ -133,9 +138,7 @@ backend shares one stopping-policy implementation.
 |---|---|---|
 | `enable_early_stopping` | `True` | Master switch. |
 | `optimality_test` | `"kkt"` | `"kkt"` (scale-invariant certificate), `"legacy_projected_gradient"` (pre-v0.6 absolute test), or `"none"` (cheap criteria only). |
-| `kkt_abs_tol` | `1e-9` | Absolute floor of the legacy certificate threshold (matters only near zero gradient scale). Not added when `kkt_target` is set. |
-| `kkt_rel_tol` | `1e-4` | Relative certificate tolerance. Calibrated to the O(k0) fixed-point floor of the default dynamics; it is a KKT-residual tolerance, **not** a solution-error bound. When `kkt_target` is set the acceptance gate does not add this term, but the fit budget and the Dykstra positional margin still take the stricter of this legacy tolerance and `kkt_target * scale`. |
-| `kkt_target` | `None` | Optional normalized target (`residual / scale`). `None` keeps the legacy threshold. A set value requires the KKT optimality test and accepts only `fit_status == "ok"`, finite `scale > 0`, and `residual <= kkt_target * scale`. |
+| `kkt_target` | `None` | Stored normalized target (`residual / scale`). `None` means not explicitly chosen and is not resolved in `__post_init__`; `effective_kkt_target()` returns `1e-4`. The gate is `fit_status == "ok"` and `residual <= effective_kkt_target() * scale`, with no additive absolute term, at any scale including zero. An explicit value requires the KKT optimality test. A stored `None` with `optimality_test="none"` does not raise. |
 | `obj_rel_tol` | `1e-8` | Relative-objective plateau over `window_size`. |
 | `x_rel_tol` | `1e-8` | Relative iterate change. |
 | `feasibility_tol` | `1e-2` | Maximum violation to count as converged. |
@@ -161,6 +164,14 @@ semantics. The legacy criterion compares an absolute projected-gradient norm
 against `proj_grad_tol`, which cannot fire on large-gradient-scale problems
 and is structurally nonzero at constrained optima with correlated active
 normals; it is retained verbatim for reproducing pre-v0.6 runs.
+
+`kkt_abs_tol` and `kkt_rel_tol` are constructor-only aliases for the retired
+absolute-plus-relative threshold. They are never stored, so a resolved
+config round-trips through `replace()` and `asdict()` without re-applying
+them. `kkt_rel_tol` sets `kkt_target` when the target is unset and warns.
+`kkt_abs_tol` is accepted, ignored, and warns that the absolute floor was
+removed. Supplying either together with an explicit `kkt_target` raises
+`ValueError`.
 
 ## `SNNSolver(problem, config=None)`
 
@@ -217,9 +228,9 @@ checkpoints.
 | `kkt_stationarity_residual` | `‖∇f(x) + Nᵀμ‖₂` component. |
 | `kkt_complementarity_residual` | `|s|ᵀμ / max(1, ‖x‖)` component (gradient units). |
 | `kkt_scale` | `max(‖A x‖, ‖b‖, ‖Nᵀμ‖)`, the relative-tolerance reference. |
-| `kkt_tolerance` | Legacy threshold `kkt_abs_tol + kkt_rel_tol * kkt_scale` at the final point. When `kkt_target` is set, the gate is `kkt_target * kkt_scale`, not this field. |
-| `kkt_normalized` | `kkt_residual / kkt_scale` when `kkt_scale` is finite and positive; NaN otherwise. Reported ratio at a positive scale. `passed` is the acceptance decision, and only when the KKT optimality test is selected. |
-| `kkt_target` | Requested normalized target, or `None` when unset. |
+| `kkt_tolerance` | The gate in force at the final point: `effective_kkt_target() * kkt_scale`. A stored target of `None` uses `1e-4`. |
+| `kkt_normalized` | `kkt_residual / kkt_scale` when `kkt_scale` is finite and positive; NaN otherwise. The acceptance decision is still the inequality in `KKTCertificate.passed`, including when this ratio is NaN, and only when the KKT optimality test is selected. |
+| `kkt_target` | Requested normalized target, or `None` when the caller did not set one. `None` selects `1e-4` inside the gate. The stored field stays `None`. |
 | `kkt_fit_status` | `"ok"`, `"non_finite"`, `"fit_failed"`, `"too_large"` (dense facet family beyond the certificate's memory guard), or `"not_available"` (a nonlinear candidate supplies no certificate data). Anything but `"ok"` fails the gate closed. |
 
 Interpretation caveat: a small KKT residual does not bound the solution error
