@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import struct
 import subprocess
@@ -26,9 +27,10 @@ FLEET_DIR = Path(os.environ.get("CPU_BASELINE_FLEET_DIR", "/nonexistent"))
 SLOW = os.environ.get("SNN_OPT_SLOW_TESTS") == "1"
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("g++") is None or os.name != "posix",
-    reason="the baseline build is a POSIX shell script and the binaries it "
-           "produces cannot be executed on Windows")
+    shutil.which("g++") is None or platform.system() != "Linux",
+    reason="the baseline build is a shell script that passes -fopenmp to g++; "
+           "Apple clang does not provide OpenMP and Windows cannot execute "
+           "the resulting binaries")
 
 FLAGS = ["-O3", "-march=native", "-funroll-loops", "-std=c++17"]
 # Bitwise comparison against the library-derived baseline needs one fixed
