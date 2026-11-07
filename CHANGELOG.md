@@ -4,7 +4,7 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] - 2026-11-07
+## [0.10.0] - 2026-11-07
 
 ### Added
 
@@ -84,6 +84,13 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   `fpga/kv260_v07`, each with its boundary README, CPU baseline (none yet
   for conic) and datapath-width source. `tests/test_fpga_current.py` fails
   if any named path stops existing.
+- The baseline test modules build and execute POSIX binaries, so they skip
+  where the toolchain is not POSIX instead of failing the Windows wheel job,
+  and the `fpga/CURRENT` history test skips when a shallow checkout cannot
+  resolve the old commit it reads. The KKT scale-homogeneity test no longer
+  asserts a 1e-9 relative bound at scale 1e-20, where the least-squares fit's
+  rounding moves the ratio on some BLAS builds; the decision is still
+  asserted at every scale.
 
 ## [0.8.1] - 2026-10-11
 
