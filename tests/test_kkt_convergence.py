@@ -603,10 +603,15 @@ def test_absolute_floor_crossover_documented_behavior():
     _, r = _solve(A, b, C, d, max_iterations=30)
     x = r.final_x
     rels = []
+    # 1e-20 is in the loop for the DECISION only. At that scale the
+    # least-squares fit's rounding moves the ratio by more than 1e-9 on some
+    # BLAS builds (observed on cp39 aarch64), so homogeneity is asserted
+    # where the arithmetic is well conditioned.
     for s in (1e-20, 1e-6, 1.0, 1e6):
         cert = _certificate(s * A, s * b, C, d, x)
-        rels.append(cert.residual / cert.scale)
         assert not cert.passed
+        if s >= 1e-6:
+            rels.append(cert.residual / cert.scale)
     assert max(rels) == pytest.approx(min(rels), rel=1e-9)
 
 

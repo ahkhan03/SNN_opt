@@ -12,6 +12,21 @@ CLASSES = ("polyhedral", "conic")
 PATH_FIELDS = ("package", "boundary", "cpu_baseline", "datapath_width_source")
 
 
+def _history_has(rev: str) -> bool:
+    """True when this checkout can resolve ``rev``.
+
+    The published test run happens inside a wheel-build container whose
+    checkout is shallow, and an sdist has no git history at all, so a test
+    that reads an old commit must skip rather than fail there.
+    """
+    try:
+        subprocess.run(["git", "cat-file", "-e", rev], cwd=ROOT,
+                       capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
 class CurrentParseError(ValueError):
     """fpga/CURRENT repeated a block name or a field. Raised, not asserted,
     so the guard still runs under python -O."""
@@ -106,6 +121,8 @@ def test_repeated_field_fails():
 
 def test_shipped_duplicate_bram_package_fails():
     """64dae00:fpga/CURRENT repeats bram_package inside polyhedral."""
+    if not _history_has("64dae00"):
+        pytest.skip("commit 64dae00 is not present in this checkout")
     text = subprocess.check_output(
         ["git", "show", "64dae00:fpga/CURRENT"],
         cwd=ROOT,
