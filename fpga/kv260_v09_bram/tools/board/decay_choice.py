@@ -255,13 +255,16 @@ def decide_for_bundle(
     Exit 0 writes a decay the host can run. Exit 3 is ``no_decay`` or
     ``refuse``; the JSON ``decision`` field distinguishes them. Callers turn
     every other failure into exit 2.
+
+    ``contract`` is a loaded contract object (``load_contract()``) or
+    ``None`` for the shipped ``env.yaml``. It is never a path: the CLI
+    resolves ``--contract-path`` before calling, so the argument has one
+    type.
     """
     path = Path(bundle_path)
     bundle = read_bundle(path)
     if contract is None:
         contract = load_contract()
-    elif not hasattr(contract, "quantize"):
-        contract = load_contract(contract)
     problem = OptimizationProblem(
         A=bundle["A"], b=bundle["b"], C=bundle["C"], d=bundle["d"])
     config = SolverConfig(
@@ -396,10 +399,19 @@ def main(argv=None) -> int:
     parser.add_argument("--args-out", default=None)
     parser.add_argument("--allow-above-target", action="store_true")
     parser.add_argument("--start", choices=("bundle", "zero"), default="bundle")
-    parser.add_argument("--contract", default=None)
+    parser.add_argument(
+        "--contract-path",
+        default=None,
+        help="contract YAML to use instead of the shipped env.yaml",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
     try:
+        contract = (
+            load_contract(args.contract_path)
+            if args.contract_path is not None
+            else None
+        )
         document, code = decide_for_bundle(
             args.bundle,
             target=args.target,
@@ -409,7 +421,7 @@ def main(argv=None) -> int:
             backend=args.backend,
             allow_above_target=args.allow_above_target,
             start=args.start,
-            contract=args.contract,
+            contract=contract,
         )
         _write_outputs(document, args.json_out, args.args_out)
     except Exception as exc:  # noqa: BLE001 - the CLI contract is exit 2

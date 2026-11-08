@@ -22,6 +22,19 @@ All notable changes to `snn_opt` are documented in this file. The format follows
   compares the host with a native record generated for the emitted
   arguments.
 
+### Changed
+
+- `decay_choice.py` takes the contract file as `--contract-path`. The
+  previous `--contract` flag accepted either a path or a loaded contract
+  object depending on its type; the function now takes a contract object
+  only, and the CLI resolves the path. One argument, one type.
+
+### Fixed
+
+- `cmp_out.py` full-record comparison reports an unreadable `--json` or
+  `--decision` file as exit 2 with the reason on stderr, matching the
+  schedule-only mode, instead of raising a traceback.
+
 ## [0.11.1] - 2026-11-08
 
 ### Fixed

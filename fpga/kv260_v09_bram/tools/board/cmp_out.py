@@ -20,7 +20,9 @@ dumps compare raw state and telemetry only.
 Route integers: 0 AUTO, 1 FULL, 2 CG, 3 STREAM. The host prints those
 names in route_selected.
 
-Exit status 0 prints MATCH. Exit status 1 prints DIFF.
+Exit status 0 prints MATCH. Exit status 1 prints DIFF. Exit status 2 means
+an input could not be read (a missing or malformed record, --json, or
+--decision file) and prints the reason to stderr.
 """
 import json
 import struct
@@ -170,28 +172,18 @@ def decision_problems(host, decision):
     return problems
 
 
-def main(argv):
-    parsed = parse_args(argv)
-    if parsed is None:
-        return 2
-    reference, candidate, json_path, decision_path = parsed
-    if reference is None:
-        try:
-            with open(json_path) as handle:
-                host = json.load(handle)
-            with open(decision_path) as handle:
-                decision = json.load(handle)
-        except (OSError, ValueError) as exc:
-            print(f"cmp_out.py: {exc}", file=sys.stderr)
-            return 2
-        problems = decision_problems(host, decision)
-        if not problems:
-            print(f"MATCH {json_path}")
-            return 0
-        print(f"DIFF  {json_path}  " + ", ".join(problems))
-        return 1
-    ref = load(reference)
-    cand = load(candidate)
+def read_json(path):
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def compare_full(ref, cand, json_path, decision_path):
+    """Compare two loaded records and the optional JSON dumps.
+
+    Returns the problem list. Raises ``OSError``/``ValueError`` when a
+    ``--json`` or ``--decision`` file cannot be read; ``main`` turns that
+    into exit 2, as the schedule-only mode already did.
+    """
     problems = []
     if ref["n"] != cand["n"]:
         problems.append(f"n {ref['n']} vs {cand['n']}")
@@ -220,7 +212,7 @@ def main(argv):
         if json_path is None:
             problems.append("route unchecked (MSRPFX1 candidate requires --json)")
         else:
-            doc = json.load(open(json_path))
+            doc = read_json(json_path)
             selected = doc.get("route_selected")
             if selected != route_name(ref["route"]):
                 problems.append(
@@ -232,7 +224,7 @@ def main(argv):
         if json_path is None:
             problems.append("route unchecked (MSRPFX1 side requires --json)")
         else:
-            doc = json.load(open(json_path))
+            doc = read_json(json_path)
             selected = doc.get("route_selected")
             if selected != route_name(cand["route"]):
                 problems.append(
@@ -243,9 +235,38 @@ def main(argv):
         if json_path is None:
             problems.append("decision compare needs --json")
         else:
-            host = json.load(open(json_path))
-            decision = json.load(open(decision_path))
+            host = read_json(json_path)
+            decision = read_json(decision_path)
             problems.extend(decision_problems(host, decision))
+
+    return problems
+
+
+def main(argv):
+    parsed = parse_args(argv)
+    if parsed is None:
+        return 2
+    reference, candidate, json_path, decision_path = parsed
+    if reference is None:
+        try:
+            host = read_json(json_path)
+            decision = read_json(decision_path)
+        except (OSError, ValueError) as exc:
+            print(f"cmp_out.py: {exc}", file=sys.stderr)
+            return 2
+        problems = decision_problems(host, decision)
+        if not problems:
+            print(f"MATCH {json_path}")
+            return 0
+        print(f"DIFF  {json_path}  " + ", ".join(problems))
+        return 1
+    try:
+        ref = load(reference)
+        cand = load(candidate)
+        problems = compare_full(ref, cand, json_path, decision_path)
+    except (OSError, ValueError) as exc:
+        print(f"cmp_out.py: {exc}", file=sys.stderr)
+        return 2
 
     label = candidate
     if not problems:

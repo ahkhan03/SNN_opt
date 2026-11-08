@@ -1,7 +1,11 @@
 """Quantized k0-floor contract for the v09b host.
 
 The integer chain is the schedule the host runs. These tests stay on a
-workstation: no board, no network, and no synthesis.
+workstation: no board, no network, and no synthesis. Three of them compare
+against the shipped C++ kernel and therefore need the Vitis HLS headers:
+set ``HLS_INCLUDE`` to a directory containing ``ap_fixed.h`` or they skip.
+The gate is ``_hls_include_ready()`` below, documented in
+``fpga/kv260_v09_bram/README.md`` and in ``build/build_native.sh``.
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -821,3 +826,55 @@ def test_cli_input_errors_exit_two(tmp_path):
         "--json-out", str(tmp_path / "missing" / "decision.json"),
         "--quiet",
     ]) == 2
+
+
+def test_cli_contract_path_takes_a_path_not_an_object(tmp_path, monkeypatch):
+    from fpga.kv260_v09_bram.tools.board.decay_choice import main
+
+    bundle = tmp_path / "contract-path.bin"
+    _write_with_k0(bundle, 0.05, iterations=32)
+    _patch_recommend(
+        monkeypatch, _recommendation(None, "target_already_met", meets=False))
+    assert main([
+        "--bundle", str(bundle),
+        "--contract-path", str(PKG / "env.yaml"),
+        "--quiet",
+    ]) == 3
+    assert main([
+        "--bundle", str(bundle),
+        "--contract-path", str(tmp_path / "missing.yaml"),
+        "--quiet",
+    ]) == 2
+
+
+def test_full_compare_unreadable_json_exits_two(tmp_path):
+    cmp = PKG / "tools" / "board" / "cmp_out.py"
+    # A board dump with n=0 needs the magic, two uint32s and 16 telemetry words.
+    record = b"MSRPFX1\0" + struct.pack("<2I", 1, 0) + b"\0" * (8 * 16)
+    ref = tmp_path / "ref.out"
+    cand = tmp_path / "cand.out"
+    ref.write_bytes(record)
+    cand.write_bytes(record)
+    malformed = tmp_path / "host.json"
+    malformed.write_text("{not json")
+    good_json = tmp_path / "good.json"
+    good_json.write_text("{}")
+    malformed_decision = tmp_path / "decision.json"
+    malformed_decision.write_text("[not json")
+
+    def run(*extra):
+        return subprocess.run(
+            [sys.executable, str(cmp), str(ref), str(cand), *extra],
+            check=False, capture_output=True, text=True)
+
+    for json_arg in (str(malformed), str(tmp_path / "missing.json")):
+        completed = run("--json", json_arg)
+        assert completed.returncode == 2, completed.stderr
+        assert "cmp_out.py:" in completed.stderr
+        assert "Traceback" not in completed.stderr
+
+    completed = run(
+        "--json", str(good_json), "--decision", str(malformed_decision))
+    assert completed.returncode == 2, completed.stderr
+    assert "cmp_out.py:" in completed.stderr
+    assert "Traceback" not in completed.stderr
