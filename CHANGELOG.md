@@ -6,6 +6,25 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-08
+
+### Added
+
+- **Opt-in k0-decay schedule.** `SolverConfig.k0_decay_floor` (absolute k0)
+  and `k0_decay_segment` run a piecewise-constant geometric schedule: the
+  step starts at the configured value, halves while it is above 1.5 times the
+  floor, and lands exactly on the floor. `None` (the default) keeps the
+  constant-step path byte for byte. `SolverResult.decay_levels` and
+  `decay_iterations` report the levels that ran.
+- **`recommend_k0_decay`.** Measures whether a problem sits at the O(k0)
+  fixed-point offset of a constant step, proposes an absolute floor, and
+  verifies the actual staircase, so the schedule is chosen deliberately
+  rather than tuned by hand. It returns a `DecayRecommendation` carrying the
+  floor, the level split and the measurement evidence; the solver contract
+  stays explicit and no default changes.
+- The KV260 v09b reference kernel gains the same opt-in schedule (two
+  appended configure arguments, `floor=0` bit-exact) and is requalified.
+
 ### Changed
 
 - The sdist ships the installable package and no longer includes `tests/` or
