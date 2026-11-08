@@ -35,7 +35,7 @@ keywords:
   - "projected gradient"
   - "second-order cone programming"
 license: Apache-2.0
-version: "0.11.0"
+version: "0.11.1"
 date-released: "2026-11-08"
 preferred-citation:
   type: software

@@ -6,6 +6,16 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-08
+
+### Fixed
+
+- The off-path regression fixture is compared with a tight tolerance instead
+  of bit equality. The reference was captured on x86-64, and arm64 builds
+  order the same arithmetic differently in the last bits, so the 0.11.0 wheel
+  matrix failed on its two arm64 legs and 0.11.0's tag never reached PyPI.
+  The guard still catches any real change to the constant-step path.
+
 ## [0.11.0] - 2026-11-08
 
 ### Added
