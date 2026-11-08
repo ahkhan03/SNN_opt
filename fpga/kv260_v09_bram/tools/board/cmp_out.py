@@ -21,8 +21,9 @@ Route integers: 0 AUTO, 1 FULL, 2 CG, 3 STREAM. The host prints those
 names in route_selected.
 
 Exit status 0 prints MATCH. Exit status 1 prints DIFF. Exit status 2 means
-an input could not be read (a missing or malformed record, --json, or
---decision file) and prints the reason to stderr.
+a record file was missing, or a --json or --decision document could not be
+read or parsed; the reason goes to stderr. A short or truncated record
+keeps its own message.
 """
 import json
 import struct
