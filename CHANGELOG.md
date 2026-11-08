@@ -6,6 +6,8 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-09
+
 ### Added
 
 - The KV260 v09b host JSON records the quantized decay schedule: start and
