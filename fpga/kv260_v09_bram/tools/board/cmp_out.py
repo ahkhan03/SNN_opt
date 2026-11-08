@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare raw state, 16 telemetry words, error, and selected route.
 
-Usage: cmp_out.py <reference> <candidate> [--json board.json]
+Usage: cmp_out.py <reference> <candidate> [--json board.json] [--decision decision.json]
 
 A native record starts with an 8-byte magic other than MSRPFX1\\0, then
 three little-endian uint32 values (version, n, mailbox word count), then
@@ -76,30 +76,122 @@ def route_name(value):
     return ROUTE_NAMES.get(value, f"ROUTE_{value}")
 
 
-def main(argv):
+def _flag_path(args, index, flag):
+    if index + 1 >= len(args):
+        print(f"cmp_out.py: {flag} needs a path", file=sys.stderr)
+        return None, 2
+    return args[index + 1], 0
+
+
+def parse_args(argv):
     if len(argv) < 3:
         print(
-            "usage: cmp_out.py <reference> <candidate> [--json board.json]",
+            "usage: cmp_out.py <reference> <candidate> "
+            "[--json board.json] [--decision decision.json]",
             file=sys.stderr,
         )
-        return 2
+        return None
     json_path = None
+    decision_path = None
+    positional = []
     args = argv[1:]
-    if "--json" in args:
-        index = args.index("--json")
-        if index + 1 >= len(args):
-            print("cmp_out.py: --json needs a path", file=sys.stderr)
-            return 2
-        json_path = args[index + 1]
-        del args[index : index + 2]
-    if len(args) != 2:
+    index = 0
+    while index < len(args):
+        if args[index] in ("--json", "--decision"):
+            path, status = _flag_path(args, index, args[index])
+            if status != 0:
+                return None
+            if args[index] == "--json":
+                json_path = path
+            else:
+                decision_path = path
+            index += 2
+            continue
+        positional.append(args[index])
+        index += 1
+    # --json and --decision with no dumps checks the schedule only.
+    if not positional and json_path and decision_path:
+        return None, None, json_path, decision_path
+    if len(positional) != 2:
         print(
-            "usage: cmp_out.py <reference> <candidate> [--json board.json]",
+            "usage: cmp_out.py <reference> <candidate> "
+            "[--json board.json] [--decision decision.json]",
             file=sys.stderr,
         )
+        return None
+    return positional[0], positional[1], json_path, decision_path
+
+
+_MISSING = object()
+
+
+def decision_problems(host, decision):
+    """Exact equality of the quantized schedule against the decision record.
+
+    Every field must be present and non-null on both sides: a missing field is
+    a failure, never an accidental None == None match.
+    """
+    if not isinstance(host, dict):
+        return ["host JSON is not an object"]
+    if not isinstance(decision, dict):
+        return ["decision JSON is not an object"]
+    board = decision.get("board")
+    bundle = decision.get("bundle")
+    if not isinstance(board, dict):
+        return ["decision has no board object"]
+    if not isinstance(bundle, dict):
+        return ["decision has no bundle object"]
+    chain = board.get("chain_quanta")
+    if not isinstance(chain, list) or not chain:
+        return ["decision has no chain_quanta list"]
+    expected = {
+        "k0_start_quanta": bundle.get("k0_quanta", _MISSING),
+        "k0_floor_quanta": board.get("floor_quanta", _MISSING),
+        "decay_segment": board.get("segment", _MISSING),
+        "decay_levels": len(chain),
+        "k0_final_effective": board.get("final_effective", _MISSING),
+        "decay_chain_quanta": chain,
+    }
+    problems = []
+    for field, want in expected.items():
+        if want is _MISSING or want is None:
+            problems.append(f"{field} missing in decision")
+            continue
+        got = host.get(field, _MISSING)
+        if got is _MISSING or got is None:
+            problems.append(f"{field} missing in host")
+            continue
+        if isinstance(want, list):
+            if (not isinstance(got, list) or len(got) != len(want)
+                    or any(int(a) != int(b) for a, b in zip(got, want))):
+                problems.append(f"{field} {got} != {want}")
+        elif got != want:
+            problems.append(f"{field} {got} != {want}")
+    return problems
+
+
+def main(argv):
+    parsed = parse_args(argv)
+    if parsed is None:
         return 2
-    ref = load(args[0])
-    cand = load(args[1])
+    reference, candidate, json_path, decision_path = parsed
+    if reference is None:
+        try:
+            with open(json_path) as handle:
+                host = json.load(handle)
+            with open(decision_path) as handle:
+                decision = json.load(handle)
+        except (OSError, ValueError) as exc:
+            print(f"cmp_out.py: {exc}", file=sys.stderr)
+            return 2
+        problems = decision_problems(host, decision)
+        if not problems:
+            print(f"MATCH {json_path}")
+            return 0
+        print(f"DIFF  {json_path}  " + ", ".join(problems))
+        return 1
+    ref = load(reference)
+    cand = load(candidate)
     problems = []
     if ref["n"] != cand["n"]:
         problems.append(f"n {ref['n']} vs {cand['n']}")
@@ -147,7 +239,15 @@ def main(argv):
                     f"route json {selected} vs {route_name(cand['route'])}"
                 )
 
-    label = args[1]
+    if decision_path is not None:
+        if json_path is None:
+            problems.append("decision compare needs --json")
+        else:
+            host = json.load(open(json_path))
+            decision = json.load(open(decision_path))
+            problems.extend(decision_problems(host, decision))
+
+    label = candidate
     if not problems:
         if ref["error"] is not None and cand["kind"] != "board":
             extra = f" error={ref['error']} route={route_name(ref['route'])}"

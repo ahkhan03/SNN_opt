@@ -103,6 +103,11 @@ struct Options {
     int decay_segment = 0;
     int decay_levels = 1;
     double final_k0 = 0.0;
+    std::uint32_t start_quanta = 0;
+    std::uint32_t floor_quanta = 0;
+    double start_effective = 0.0;
+    double floor_effective = 0.0;
+    std::vector<std::uint32_t> decay_chain_quanta;
     bool decay_segment_explicit = false;
     bool persistent = true;
     bool litmus = false;
@@ -128,7 +133,11 @@ struct Options {
         "[--shift S] [--tail hold|repeat] [--k0-floor F] [--decay-segment N] "
         "[--litmus] [--mock] [--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
         "[--sequence-seed UINT32] "
-        "[--json-out PATH]\n",
+        "[--json-out PATH]\n"
+        "k0 floor is an absolute step. A positive floor must quantize to at "
+        "least 128 quanta, lie below the start, and sit outside the "
+        "near-floor band (2*start quanta <= 3*floor quanta). An omitted "
+        "segment defaults to iterations / levels.\n",
         program);
     std::exit(status);
 }
@@ -307,20 +316,59 @@ void configure_decay(Options& options, const msrp_v05::Problem& q) {
                      floor, q.k0);
         std::exit(2);
     }
+    const double scale = static_cast<double>(FIXED_SCALE);
     const std::uint32_t start = snn_v09b_decay::quantize_positive(q.k0);
     const std::uint32_t floor_raw = snn_v09b_decay::quantize_positive(floor);
-    options.final_k0 = static_cast<double>(start) / 16777216.0;
+    options.start_quanta = start;
+    options.start_effective = static_cast<double>(start) / scale;
+    options.decay_chain_quanta.clear();
+    options.final_k0 = options.start_effective;
     if (floor == 0.0) {
+        options.floor_quanta = 0;
+        options.floor_effective = 0.0;
         options.decay_segment = 0;
         options.decay_levels = 1;
         return;
     }
+    options.floor_quanta = floor_raw;
+    options.floor_effective = static_cast<double>(floor_raw) / scale;
     if (floor_raw < snn_v09b_decay::MIN_FLOOR_QUANTA || floor_raw >= start) {
         std::fprintf(stderr,
                      "k0 floor must quantize to at least 128 quanta below the start\n");
         std::exit(2);
     }
-    options.decay_levels = snn_v09b_decay::level_count(start, floor_raw);
+    // level_count drops the start level when 2*start <= 3*floor, but the
+    // kernel still executes that start and then the floor. Refuse the band.
+    if ((static_cast<std::uint64_t>(start) << 1) <=
+        3ULL * static_cast<std::uint64_t>(floor_raw)) {
+        std::fprintf(stderr,
+                     "k0 floor is in the near-floor band (2*start <= 3*floor); "
+                     "level_count under-counts the executed chain\n");
+        std::exit(2);
+    }
+    // next_level is the step the kernel takes. Outside the band the chain
+    // length equals level_count. A halving that lands in (floor, 1.5*floor]
+    // becomes the floor and is not its own level.
+    std::vector<std::uint32_t> chain;
+    chain.push_back(start);
+    std::uint32_t level = start;
+    while (level > floor_raw) {
+        const std::uint32_t nxt = snn_v09b_decay::next_level(level, floor_raw);
+        if (nxt == level) break;
+        chain.push_back(nxt);
+        level = nxt;
+    }
+    const int counted = snn_v09b_decay::level_count(start, floor_raw);
+    // Outside the refused near-floor band the chain length and the counted
+    // levels are the same number. A disagreement is an internal error.
+    if (static_cast<int>(chain.size()) != counted) {
+        std::fprintf(stderr,
+                     "decay chain length %zu disagrees with level_count %d\n",
+                     chain.size(), counted);
+        std::exit(3);
+    }
+    options.decay_chain_quanta = std::move(chain);
+    options.decay_levels = counted;
     if (!options.decay_segment_explicit)
         options.decay_segment = q.iterations / options.decay_levels;
     if (options.decay_segment < 1 ||
@@ -334,7 +382,7 @@ void configure_decay(Options& options, const msrp_v05::Problem& q) {
     options.final_k0 = static_cast<double>(snn_v09b_decay::final_level(
                            start, floor_raw, options.decay_segment,
                            q.iterations)) /
-                       16777216.0;
+                       scale;
 }
 
 std::uint64_t monotonic_raw_ns() {
@@ -411,6 +459,31 @@ void append_double_array(std::ostringstream& json,
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (i) json << ',';
         json << values[i];
+    }
+    json << ']';
+}
+
+void append_u32_array(std::ostringstream& json,
+                      const std::vector<std::uint32_t>& values) {
+    json << '[';
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i) json << ',';
+        json << values[i];
+    }
+    json << ']';
+}
+
+void append_quanta_as_doubles(std::ostringstream& json,
+                              const std::vector<std::uint32_t>& quanta) {
+    if (quanta.empty()) {
+        json << "[]";
+        return;
+    }
+    const double scale = static_cast<double>(FIXED_SCALE);
+    json << '[';
+    for (std::size_t i = 0; i < quanta.size(); ++i) {
+        if (i) json << ',';
+        json << static_cast<double>(quanta[i]) / scale;
     }
     json << ']';
 }
@@ -1208,7 +1281,19 @@ std::string make_json(const Options& options, const msrp_v05::Problem& q,
          << ",\"decay_segment\":" << options.decay_segment
          << ",\"decay_levels\":" << options.decay_levels
          << ",\"k0_final_effective\":" << options.final_k0
-         << ",\"route_requested\":\"" << route_name(options.route) << '\"'
+         << ",\"k0_start_effective\":" << options.start_effective
+         << ",\"k0_start_quanta\":" << options.start_quanta
+         << ",\"k0_floor_effective\":" << options.floor_effective
+         << ",\"k0_floor_quanta\":" << options.floor_quanta
+         << ",\"decay_segment_defaulted\":"
+         << ((options.k0_floor > 0.0 && !options.decay_segment_explicit)
+                 ? "true"
+                 : "false")
+         << ",\"decay_chain_quanta\":";
+    append_u32_array(json, options.decay_chain_quanta);
+    json << ",\"decay_chain\":";
+    append_quanta_as_doubles(json, options.decay_chain_quanta);
+    json << ",\"route_requested\":\"" << route_name(options.route) << '\"'
          << ",\"route_selected\":\"" << route_name(selected_route) << '\"'
          << ",\"start_mode\":\"" << start_name(options.start) << '\"'
          << ",\"shift_stride\":" << options.shift

@@ -82,11 +82,17 @@ The argument list appends `double k0_floor_f` and `int decay_segment` to the
 v0.8 list at indices 32 and 33. A zero floor disables decay and preserves the
 constant-k0 bytes. A positive floor is absolute, must be below `k0_f`, must
 quantize to at least 128 state quanta, and requires a positive segment whose
-level budget fits `n_iters`. Invalid schedules return ERR_BAD_K0_FLOOR (7)
-before changing the configured state. The host options are `--k0-floor F` and
+level budget fits `n_iters`. A floor in the near-floor band
+(`2*start quanta <= 3*floor quanta`) is rejected by the host: `level_count`
+would report one level while the kernel still executes the start and then
+the floor. Invalid schedules return ERR_BAD_K0_FLOOR (7) before changing the
+configured state. The host options are `--k0-floor F` and
 `--decay-segment N`; an omitted positive-floor segment is
 `n_iters / n_levels`. Its JSON reports `k0_floor`, `decay_segment`,
-`decay_levels`, and `k0_final_effective`, while `k0_start` remains the bundle
+`decay_levels`, and `k0_final_effective`, and the quantized schedule:
+`k0_start_effective`, `k0_start_quanta`, `k0_floor_effective`,
+`k0_floor_quanta`, `decay_segment_defaulted`, `decay_chain_quanta`, and
+`decay_chain`. A zero floor emits empty chains. `k0_start` remains the bundle
 step. The kernel halves with `k0 = dt(k0 / 2)` at each segment boundary. If
 the halved value is in `(floor, 1.5*floor]`, it is skipped directly to the
 floor and never runs as a level. The raw-quanta comparison uses a precomputed
@@ -220,3 +226,41 @@ for a fleet row above n=128. CG and STREAM are not identity cells. The
 kernel returns `ERR_CAPACITY` for those routes at a legal size. After the
 constant-k0 matrix, the runner executes the healthy and stiff decay cells
 in both launch modes and checks the decay fields in the host JSON.
+
+`tools/board/decay_choice.py` reads one bundle and asks `recommend_k0_decay`
+for an absolute floor. The floor is then quantized with the contract in
+`env.yaml` (`word_bits`, `int_bits`, `min_floor_quanta`). The integer chain,
+not the float staircase, is what the host runs. A floor in the near-floor
+band is `refuse`, with no host arguments. The confirmation solve at the
+quantized floor and segment gates a `decay`: a miss is `refuse` unless
+`--allow-above-target` is set. `no_decay` is only the signature-negative
+probe (`target_already_met`, `residual_improves_with_iterations`,
+`residual_not_linear_in_k0`). Both `no_decay` and `refuse` exit 3; the JSON
+`decision` field distinguishes them. The record stores the bundle basename and sha256. `path` is that basename,
+or a repository-relative path when the bundle is inside the repository, and
+is never an absolute filesystem path. The confirmation solve disables early
+stopping so it runs the same full iteration budget as the kernel. The command writes that record and one host argument per
+line (`--k0-floor`, the exact quantized value, `--decay-segment`, the
+segment). From the repository root:
+
+```
+python -m fpga.kv260_v09_bram.tools.board.decay_choice \
+    --bundle problem.bin --json-out decision.json --args-out host.args
+```
+
+`cmp_out.py --decision decision.json` checks `k0_start_quanta`,
+`k0_floor_quanta`, `decay_segment`, `decay_levels`, `k0_final_effective`, and
+`decay_chain_quanta` against that record. The two pinned decay cells are
+unchanged. `DECAY_AUTO=1` adds one automatic cell for each of them. A
+`no_decay` runs constant-k0 and records the label. A `refuse` fails the cell
+and does not run. A `decay` runs the host on the emitted arguments. When
+`NATIVE` is set, that cell first writes
+`${RESULTS}/${name}.native_oneshot.out` with those arguments and compares
+the host dump to it. When `NATIVE` is unset, the cell prints
+`identity=unvalidated_by_native`, skips the byte compare, and still runs
+`cmp_out.py --decision`. The printed label is the JSON `decision`.
+`DECAY_TARGET` defaults to `1e-4`. `PYTHON` defaults to the repository
+virtualenv when that interpreter exists, otherwise `python3`. With
+`DECAY_AUTO=1` the runner requires `numpy` and an importable `snn_opt` on that
+interpreter and stops before the first cell otherwise; the constant-k0 matrix
+and the pinned decay cells need neither.

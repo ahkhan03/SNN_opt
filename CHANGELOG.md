@@ -6,6 +6,22 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The KV260 v09b host JSON records the quantized decay schedule: start and
+  floor quanta, the executed chain, and whether the segment was left at its
+  default. A zero floor still reports empty chains. A positive floor in the
+  near-floor band (`2*start quanta <= 3*floor quanta`) is rejected, because
+  `level_count` under-counts the chain the kernel executes.
+  `decay_choice.py` turns a problem bundle into that schedule using the
+  fixed-point contract in `fpga/kv260_v09_bram/env.yaml`. The confirmation
+  solve at the quantized floor disables early stopping, runs the full
+  iteration budget, and gates the decision. `cmp_out.py --decision`
+  checks the host record against it. `run.sh` runs the choice for each
+  pinned decay fixture when `DECAY_AUTO=1` and, when `NATIVE` is set,
+  compares the host with a native record generated for the emitted
+  arguments.
+
 ## [0.11.1] - 2026-11-08
 
 ### Fixed
