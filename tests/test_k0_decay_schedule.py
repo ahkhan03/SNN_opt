@@ -3,8 +3,15 @@
 ``k0_decay_floor is None`` (the default) is the constant-k0 path. The
 reference arrays in ``tests/fixtures/k0_decay_offpath_reference.npz`` were
 captured from that path before the schedule existed.
+
+The reference was captured on x86-64 Linux. Arm64 builds order the same
+floating-point arithmetic differently in the last bits, so bit equality is
+not a portable property of the solver; the off-path assertions therefore use
+a tolerance that is still many orders of magnitude tighter than any real
+change to the constant-step path.
 """
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +21,19 @@ from snn_opt import OptimizationProblem, SNNSolver, SolverConfig
 from snn_opt.solver import ConvergenceConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "k0_decay_offpath_reference.npz"
+
+REFERENCE_RTOL = 1e-8
+REFERENCE_ATOL = 1e-12
+
+
+def _assert_reference(expected, actual, what):
+    """Compare against the captured reference across platforms."""
+    expected = np.asarray(expected, float)
+    actual = np.asarray(actual, float)
+    delta = float(np.max(np.abs(actual - expected))) if expected.size else 0.0
+    assert np.allclose(actual, expected, rtol=REFERENCE_RTOL,
+                       atol=REFERENCE_ATOL), (
+        f"{what} moved: max |delta| = {delta:.3e}")
 
 # Worked pair. Halve while the step is strictly above 1.5 * floor, then
 # append the floor. That sequence has 13 levels. The next half sits in
@@ -261,8 +281,9 @@ class TestOffPath:
             projection_method="adaptive",
             k0_decay_floor=None,
         )
-        assert np.array_equal(lean.final_x, data["final_x"])
-        assert lean.final_objective == float(data["final_objective"])
+        _assert_reference(data["final_x"], lean.final_x, "final_x")
+        assert math.isclose(lean.final_objective, float(data["final_objective"]),
+                            rel_tol=REFERENCE_RTOL, abs_tol=REFERENCE_ATOL)
         assert lean.iterations_used == int(data["iterations_used"])
         assert lean.decay_levels is None
         assert lean.decay_iterations is None
@@ -277,7 +298,8 @@ class TestOffPath:
             backend="python",
             projection_method="adaptive",
         )
-        assert np.array_equal(recorded.final_x, data["recorded_final_x"])
+        _assert_reference(data["recorded_final_x"], recorded.final_x,
+                          "recorded final_x")
         assert recorded.iterations_used == int(data["recorded_iterations_used"])
         assert recorded.decay_levels is None
 
