@@ -438,6 +438,10 @@ def _hls_include_ready():
 
 @pytest.fixture(scope="module")
 def mock_host(tmp_path_factory):
+    if sys.platform != "linux":
+        pytest.skip(
+            "the mock host is built by a shell script for the Linux target; "
+            "it is exercised on Linux only")
     _require_gxx()
     bindir = tmp_path_factory.mktemp("mock-host")
     built = subprocess.run(

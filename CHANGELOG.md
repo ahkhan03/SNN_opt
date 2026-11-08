@@ -36,6 +36,9 @@ All notable changes to `snn_opt` are documented in this file. The format follows
 - `cmp_out.py` full-record comparison reports an unreadable `--json` or
   `--decision` file as exit 2 with the reason on stderr, matching the
   schedule-only mode, instead of raising a traceback.
+- The v09b board-tool tests build their mock host with a shell script for the
+  Linux target; they now skip where that build is unavailable, so the wheel
+  matrix passes on Windows and macOS.
 
 ## [0.11.1] - 2026-11-08
 
