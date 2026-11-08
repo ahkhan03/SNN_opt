@@ -19,6 +19,7 @@ infeasible point whose objective can undercut the true optimum. Box-only
 problems (m == 0) still dispatch to the exact vectorized box projection.
 """
 
+import math
 from dataclasses import InitVar, dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -339,7 +340,7 @@ class SolverConfig:
     # Scaling factor for auto-computed k0 (k0 = scale / L where L is Lipschitz constant)
     # Values < 1.0 are more conservative (slower but safer), > 1.0 are aggressive
     k0_scale: float = 0.5  # Default to 0.5 for stability
-    
+
     # Scalar box bounds (for problems like SVM with 0 <= x <= C). Since v0.5.0
     # these are NOT enforced by a terminal clip: each bound facet participates
     # in the unified projection sweep as an implicit unit-normal constraint
@@ -389,6 +390,108 @@ class SolverConfig:
     # When enabled, SolverResult reports per-row and per-coordinate counts plus
     # a canonical event-stream digest and its first/last candidate IDs.
     observe_projection_events: bool = False
+
+    # Opt-in piecewise-constant geometric step schedule. None (the default)
+    # keeps today's constant k0 for the whole solve, byte for byte.
+    # Absolute step size, in the same units as ``k0`` (not ``k0_scale``).
+    # The normalized equivalent of a floor_scale is ``floor_scale / L``,
+    # where L is the Lipschitz constant of the gradient. Levels start at
+    # ``k0_eff`` and halve while the value is strictly above ``1.5 * floor``,
+    # then the last level is exactly this floor. A halving that lands in
+    # ``(floor, 1.5 * floor]`` is not a level. The historical
+    # projection-watchdog floor of 1000 aborts the 13-level chain on the
+    # stiff target QP, so when this field is set and ``max_projection_iters``
+    # is None the watchdog resolves to ``max(5000, automatic cap)``. That
+    # automatic cap is computed again at the start of ``solve`` when this
+    # field is set, so assigning the floor after construction still raises
+    # it. An explicit ``max_projection_iters`` is kept as the caller set it.
+    # A ``projection_budget_exhausted`` abort ends the whole schedule; the
+    # next level does not open a fresh cap. The schedule presumes a warm
+    # start: a cold start far from feasibility can exhaust the projection
+    # sweep on the first level even at the raised cap, and decay does not
+    # repair a cold-start projection budget.
+    k0_decay_floor: Optional[float] = None
+    # Outer iterations per level. None splits ``max_iterations`` evenly and
+    # puts the remainder on the final (floor) level. Requires
+    # ``k0_decay_floor``. A value that cannot reach the floor is rejected.
+    k0_decay_segment: Optional[int] = None
+
+
+def _k0_decay_levels(k0_eff: float, floor: float) -> List[float]:
+    """Absolute k0 on each level. The final entry is exactly ``floor``.
+
+    ``k = k0_eff``; while ``k > 1.5 * floor``, append ``k`` and halve;
+    then append ``floor``. A value in ``(floor, 1.5 * floor]`` is skipped.
+    """
+    step = float(k0_eff)
+    floor_value = float(floor)
+    if (not math.isfinite(step) or not math.isfinite(floor_value)
+            or not floor_value > 0.0 or not step > floor_value):
+        raise ValueError(
+            "k0_decay_floor must be finite and strictly below k0_eff "
+            f"({k0_eff!r}); got {floor!r}")
+    levels: List[float] = []
+    limit = 1.5 * floor_value
+    while step > limit:
+        levels.append(step)
+        step *= 0.5
+    levels.append(floor_value)
+    return levels
+
+
+def _k0_decay_n_levels(k0_eff: float, floor: float) -> int:
+    """Number of piecewise-constant levels from ``k0_eff`` down to ``floor``."""
+    return len(_k0_decay_levels(k0_eff, floor))
+
+
+def _k0_decay_counts(n_levels: int, max_iterations: int,
+                     segment: Optional[int]) -> List[int]:
+    """Per-level outer iterations. Remainder goes to the final level."""
+    if segment is None:
+        width = int(max_iterations) // int(n_levels)
+    else:
+        width = int(segment)
+    counts = [width] * (n_levels - 1)
+    counts.append(int(max_iterations) - width * (n_levels - 1))
+    return counts
+
+
+def _sum_optional_int(phases: Sequence, name: str) -> Optional[int]:
+    """Sum an optional integer field. All-None stays None."""
+    values = [getattr(phase, name) for phase in phases]
+    if all(value is None for value in values):
+        return None
+    return int(sum(int(value) for value in values if value is not None))
+
+
+def _sum_optional_float(phases: Sequence, name: str) -> Optional[float]:
+    """Sum an optional float field. All-None stays None."""
+    values = [getattr(phase, name) for phase in phases]
+    if all(value is None for value in values):
+        return None
+    return float(sum(float(value) for value in values if value is not None))
+
+
+def _sum_optional_counts(phases: Sequence, name: str) -> Optional[np.ndarray]:
+    """Add optional per-id count arrays. All-None stays None."""
+    arrays = [getattr(phase, name) for phase in phases]
+    if all(array is None for array in arrays):
+        return None
+    total = None
+    for array in arrays:
+        if array is None:
+            continue
+        values = np.asarray(array)
+        total = values.astype(np.int64, copy=True) if total is None else total + values
+    return total
+
+
+def _concat_1d(phases: Sequence, name: str, dtype) -> np.ndarray:
+    """Concatenate one 1-d history field across phases."""
+    parts = [np.asarray(getattr(phase, name), dtype=dtype).reshape(-1) for phase in phases]
+    if not parts:
+        return np.empty((0,), dtype=dtype)
+    return np.concatenate(parts)
 
 
 @dataclass
@@ -703,6 +806,22 @@ class SolverResult:
         available, by candidate name/index.
     max_violation_nonlinear : float
         Final maximum normalized violation over the opt-in candidate family.
+    decay_levels : list of float or None
+        Absolute k0 used on each level that actually ran, when
+        ``k0_decay_floor`` is set. None on the constant-k0 path.
+    decay_iterations : list of int or None
+        Outer iterations spent on each corresponding level. None on the
+        constant-k0 path. ``iterations_used`` is the sum of this list.
+        ``n_projections`` and ``total_projection_distance`` are the sums
+        across those levels, as are ``projection_truncated_sweeps``,
+        ``dykstra_inner_cap_hits``, and the numeric observer counters
+        (event totals, per-id counts, observed distance, cap rechecks,
+        nonlinear event counts). ``projection_event_digest`` cannot be
+        summed; it is the last level's digest. The candidate-id endpoints
+        are the first id of the earliest level that observed an event and
+        the last id of the latest such level. A recorded trajectory
+        concatenates every level. Compiled backends stay lean, with
+        one-element ``t`` equal to the summed iteration count.
     """
     t: np.ndarray
     X: np.ndarray
@@ -769,6 +888,10 @@ class SolverResult:
     dykstra_inner_converged: np.ndarray = field(
         default_factory=lambda: np.empty((0,), dtype=bool))
     dykstra_inner_cap_hits: int = 0
+    # Absolute k0 and outer-iteration count per level that actually ran.
+    # None unless k0_decay_floor is set, so existing callers are unchanged.
+    decay_levels: Optional[List[float]] = None
+    decay_iterations: Optional[List[int]] = None
 
     @property
     def inner_iterations(self) -> np.ndarray:
@@ -822,12 +945,37 @@ class SolverResult:
         if self.dykstra_inner_cap_hits:
             lines.append(
                 f"  Dykstra inner cap hits: {self.dykstra_inner_cap_hits}")
+        if self.decay_levels is not None:
+            lines.append(
+                f"  k0 decay levels: {len(self.decay_levels)} "
+                f"(final k0={self.decay_levels[-1]:.6e})")
 
         if len(self.spike_norms) > 0:
             lines.append(f"  Avg spike norm: {self.spike_norms.mean():.6e}")
         lines.append(f"  Total projection distance: {self.total_projection_distance:.6e}")
         lines.append(f"  Final solution: {self.final_x}")
         return "\n".join(lines) + "\n"
+
+
+def _automatic_projection_cap(problem: "OptimizationProblem",
+                              config: "SolverConfig",
+                              n_candidates: int = 0,
+                              decay: bool = False) -> int:
+    """Inner-sweep watchdog for this problem/config.
+
+    ``max(1000, 10 * (rows + box facets + candidates))``. ``decay=True``
+    raises that to ``max(5000, ...)`` because the staircase exhausts the
+    1000 default on a stiff target QP. There is one implementation:
+    ``SNNSolver._resolve_projection_cap`` and the decay recommender both
+    call this, so a probe raises the cap exactly when a real decay run
+    would.
+    """
+    n_facets = ((problem.n_vars if config.lower_bound is not None else 0)
+                + (problem.n_vars if config.upper_bound is not None else 0))
+    cap = max(1000, 10 * (problem.n_constraints + n_facets + int(n_candidates)))
+    if decay:
+        cap = max(5000, cap)
+    return int(cap)
 
 
 class SNNSolver:
@@ -938,16 +1086,13 @@ class SNNSolver:
                 "use projection_method='adaptive'")
 
         # Inner-sweep safety watchdog (see SolverConfig.max_projection_iters).
-        n_facets = ((self.problem.n_vars if self.config.lower_bound is not None else 0)
-                    + (self.problem.n_vars if self.config.upper_bound is not None else 0))
-        if self.config.max_projection_iters is None:
-            n_candidates = len(self._nonlinear_candidates)
-            self._proj_cap = max(
-                1000, 10 * (self.problem.n_constraints + n_facets + n_candidates))
-        else:
-            self._proj_cap = int(self.config.max_projection_iters)
+        # solve() recomputes this when a decay floor is set and the cap was
+        # left automatic, so a floor assigned after construction is honored.
+        self._resolve_projection_cap()
         self._projection_budget_exhausted = False
         self._projection_truncated_sweeps = 0
+        self._decay_levels = None
+        self._decay_iterations = None
 
         # Pre-compute the constraint Gram matrix G = C C^T (the constraint-
         # coupling / recurrent matrix). Both the compiled C kernel and the
@@ -2960,7 +3105,26 @@ class SNNSolver:
             return True, (f"kkt(residual={cert.residual:.2e}"
                           f"<=tol={cert.tolerance:.2e})")
         return False, None
-    
+
+    def _resolve_projection_cap(self) -> None:
+        """Store the inner-sweep watchdog from the current config.
+
+        ``max_projection_iters is None`` selects
+        ``max(1000, 10 * (m + box facets + nonlinear candidates))``. A set
+        ``k0_decay_floor`` raises that to ``max(5000, automatic)``. An
+        explicit cap is stored unchanged. ``__init__`` always calls this.
+        ``solve`` calls it again only when the cap is automatic and a
+        decay floor is set, so a floor assigned after construction is
+        honored and a phase that already installed an explicit cap is not.
+        """
+        if self.config.max_projection_iters is None:
+            self._proj_cap = _automatic_projection_cap(
+                self.problem, self.config,
+                n_candidates=len(self._nonlinear_candidates),
+                decay=self.config.k0_decay_floor is not None)
+        else:
+            self._proj_cap = int(self.config.max_projection_iters)
+
     def solve(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """
         Solve the optimization problem starting from x0.
@@ -3006,6 +3170,15 @@ class SNNSolver:
         self._iterations_used = 0
         self._projection_budget_exhausted = False
         self._projection_truncated_sweeps = 0
+        self._decay_levels = None
+        self._decay_iterations = None
+        self._validate_k0_decay()
+        # The constant-k0 path keeps the cap from __init__. Decay reads the
+        # floor live, so a post-construction assignment still raises it.
+        # Phases pass an explicit cap and a cleared floor, and skip this.
+        if (self.config.max_projection_iters is None
+                and self.config.k0_decay_floor is not None):
+            self._resolve_projection_cap()
 
         if self._nonlinear_candidates:
             # Validate callback output dimensions and finiteness against the
@@ -3016,6 +3189,11 @@ class SNNSolver:
         # the problem, solves the equivalent system, and maps the solution back.
         if self.config.transform is not None:
             return self._solve_with_transform(x0, verbose)
+
+        # Opt-in staircase. One phase loop above every backend. None keeps
+        # the dispatch below on the constant-k0 path.
+        if self.config.k0_decay_floor is not None:
+            return self._solve_k0_decay_schedule(x0, verbose)
 
         # Dispatch to appropriate solver
         if self.config.backend not in _VALID_BACKENDS:
@@ -3029,6 +3207,331 @@ class SNNSolver:
                 return self._solve_euler(x0, verbose)
             return self._solve_euler_lean(x0, verbose)
         return self._solve_ivp(x0, verbose)
+
+    def _validate_k0_decay(self) -> None:
+        """Reject a schedule that cannot be run as specified.
+
+        ``k0_decay_floor is None`` is the constant-k0 path and is not
+        checked, except that a segment without a floor is still an error.
+        Messages name the field and the rule.
+        """
+        floor = self.config.k0_decay_floor
+        segment = self.config.k0_decay_segment
+        if segment is not None and floor is None:
+            raise ValueError(
+                "k0_decay_segment requires k0_decay_floor to be set; "
+                f"got k0_decay_segment={segment!r} with k0_decay_floor=None")
+        if floor is None:
+            return
+        if self.config.integration_method != "euler":
+            raise ValueError(
+                "k0_decay_floor requires integration_method='euler'; got "
+                f"integration_method={self.config.integration_method!r}. The "
+                "IVP path integrates to t_end and ignores the per-level "
+                "max_iterations, so the staircase budget and time axis would "
+                "be meaningless.")
+        if isinstance(floor, bool) or isinstance(floor, (str, bytes)):
+            raise ValueError(
+                f"k0_decay_floor must be finite and > 0, got {floor!r}")
+        try:
+            floor_value = float(floor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"k0_decay_floor must be finite and > 0, got {floor!r}") from exc
+        if not math.isfinite(floor_value) or not floor_value > 0.0:
+            raise ValueError(
+                f"k0_decay_floor must be finite and > 0, got {floor!r}")
+        k0_eff = float(self._k0)
+        if not math.isfinite(k0_eff) or not floor_value < k0_eff:
+            raise ValueError(
+                "k0_decay_floor must be finite and strictly below k0_eff "
+                f"({k0_eff!r}); got {floor!r}")
+        segment_value: Optional[int] = None
+        if segment is not None:
+            if isinstance(segment, bool) or not isinstance(segment, (int, np.integer)):
+                raise ValueError(
+                    "k0_decay_segment must be a positive int when set, "
+                    f"got {segment!r}")
+            segment_value = int(segment)
+            if segment_value <= 0:
+                raise ValueError(
+                    "k0_decay_segment must be a positive int when set, "
+                    f"got {segment!r}")
+        n_levels = _k0_decay_n_levels(k0_eff, floor_value)
+        max_iterations = int(self.config.max_iterations)
+        if n_levels > max_iterations:
+            raise ValueError(
+                "k0_decay_floor budget cannot reach the floor: "
+                f"n_levels={n_levels} > max_iterations={max_iterations}")
+        if segment_value is not None and segment_value * n_levels > max_iterations:
+            raise ValueError(
+                "k0_decay_segment * n_levels exceeds max_iterations: "
+                f"k0_decay_segment={segment_value} * n_levels={n_levels} "
+                f"= {segment_value * n_levels} > max_iterations={max_iterations}")
+
+    def _solve_k0_decay_schedule(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
+        """Run the staircase above the backend dispatch.
+
+        Each level assigns ``self._k0``, solves with that level's iteration
+        budget, and feeds ``final_x`` to the next level. Non-final levels
+        disable early stopping. The floor level keeps the caller's
+        convergence config. A projection-budget abort returns immediately
+        and does not open a new cap.
+
+        Summed across the phases that ran: ``iterations_used``,
+        ``n_projections``, ``total_projection_distance``,
+        ``projection_truncated_sweeps``, ``dykstra_inner_cap_hits``, and,
+        when the observer is on, ``observed_total_projection_distance``,
+        ``projection_cap_rechecks``, ``explicit_row_events``,
+        ``implicit_lower_events``, ``implicit_upper_events``, the three
+        per-id count arrays, and ``nonlinear_event_counts``.
+
+        Not summed: ``projection_event_digest`` (fnv1a64 of one phase's
+        stream; the result keeps the last phase's digest) and
+        ``projection_event_digest_algorithm``.
+        ``projection_first_candidate_id`` and
+        ``projection_last_candidate_id`` are endpoints, not sums: the
+        first id of the earliest phase that observed an event, and the
+        last id of the latest such phase.
+
+        Dykstra's per-sweep arrays are concatenated in phase order.
+        A recorded Python trajectory is concatenated: ``t`` and
+        ``spike_times`` shift by the iterations already spent, and each
+        phase after the first drops its initial state, which repeats the
+        previous phase's final point. ``X``, ``objective_values``,
+        ``constraint_violations``, and the spike arrays follow that join.
+        Lean results, including every compiled backend (those ignore
+        ``record_trajectory``), keep a one-element ``t`` equal to the
+        summed iteration count.
+        """
+        original = self.config
+        saved_k0 = self._k0
+        saved_cap = self._proj_cap
+        k0_eff = float(saved_k0)
+        floor = float(original.k0_decay_floor)
+        levels = _k0_decay_levels(k0_eff, floor)
+        counts = _k0_decay_counts(
+            len(levels), int(original.max_iterations), original.k0_decay_segment)
+        if sum(counts) != int(original.max_iterations) or any(c < 1 for c in counts):
+            raise ValueError(
+                "k0_decay_floor budget cannot reach the floor: "
+                f"per-level iterations {counts} do not cover "
+                f"max_iterations={original.max_iterations}")
+        cap = int(saved_cap)
+        x = np.asarray(x0, dtype=float).copy()
+        executed: List[float] = []
+        phases: List[SolverResult] = []
+        try:
+            for index, (level, n_iter) in enumerate(zip(levels, counts)):
+                is_final = index == len(levels) - 1
+                phase_kwargs = dict(
+                    k0=float(level),
+                    k0_decay_floor=None,
+                    k0_decay_segment=None,
+                    max_iterations=int(n_iter),
+                    max_projection_iters=cap,
+                )
+                if not is_final:
+                    phase_kwargs["convergence"] = replace(
+                        original.convergence, enable_early_stopping=False)
+                self.config = replace(original, **phase_kwargs)
+                self._k0 = float(level)
+                self._proj_cap = cap
+                phase = self.solve(x, verbose=verbose)
+                phases.append(phase)
+                executed.append(float(level))
+                x = np.asarray(phase.final_x, dtype=float).copy()
+                if (phase.projection_budget_exhausted
+                        or phase.convergence_reason == "projection_budget_exhausted"):
+                    break
+            if not phases:
+                raise RuntimeError("k0 decay schedule produced no phase")
+            return self._aggregate_decay_phases(phases, executed)
+        finally:
+            self.config = original
+            self._k0 = saved_k0
+            self._proj_cap = saved_cap
+
+    def _aggregate_decay_phases(self, phases: List[SolverResult],
+                                executed: List[float]) -> SolverResult:
+        """Stamp one schedule result from the phases that ran."""
+        phase_iters = [int(phase.iterations_used) for phase in phases]
+        total = int(sum(phase_iters))
+        last = phases[-1]
+        self._join_decay_trajectory(phases, phase_iters, last)
+
+        last.n_projections = int(sum(int(phase.n_projections) for phase in phases))
+        last.total_projection_distance = float(sum(
+            float(phase.total_projection_distance) for phase in phases))
+        last.projection_truncated_sweeps = int(sum(
+            int(phase.projection_truncated_sweeps) for phase in phases))
+        last.dykstra_inner_cap_hits = int(sum(
+            int(phase.dykstra_inner_cap_hits) for phase in phases))
+        last.observed_total_projection_distance = _sum_optional_float(
+            phases, "observed_total_projection_distance")
+        last.projection_cap_rechecks = _sum_optional_int(
+            phases, "projection_cap_rechecks")
+        last.explicit_row_events = _sum_optional_int(phases, "explicit_row_events")
+        last.implicit_lower_events = _sum_optional_int(
+            phases, "implicit_lower_events")
+        last.implicit_upper_events = _sum_optional_int(
+            phases, "implicit_upper_events")
+        last.explicit_row_event_counts = _sum_optional_counts(
+            phases, "explicit_row_event_counts")
+        last.implicit_lower_event_counts = _sum_optional_counts(
+            phases, "implicit_lower_event_counts")
+        last.implicit_upper_event_counts = _sum_optional_counts(
+            phases, "implicit_upper_event_counts")
+        merged: Dict[str, int] = {}
+        for phase in phases:
+            for key, value in (phase.nonlinear_event_counts or {}).items():
+                merged[key] = merged.get(key, 0) + int(value)
+        last.nonlinear_event_counts = merged
+
+        first_id: Optional[int] = None
+        last_id: Optional[int] = None
+        for phase in phases:
+            if phase.projection_first_candidate_id is not None and first_id is None:
+                first_id = int(phase.projection_first_candidate_id)
+            if phase.projection_last_candidate_id is not None:
+                last_id = int(phase.projection_last_candidate_id)
+        # Digest stays the last phase's. It is a hash of that phase's
+        # stream, not an accumulator.
+        last.projection_first_candidate_id = first_id
+        last.projection_last_candidate_id = last_id
+        last.dykstra_inner_iterations = _concat_1d(
+            phases, "dykstra_inner_iterations", int)
+        last.dykstra_inner_projection_events = _concat_1d(
+            phases, "dykstra_inner_projection_events", int)
+        last.dykstra_inner_converged = _concat_1d(
+            phases, "dykstra_inner_converged", bool)
+
+        last.iterations_used = total
+        last.decay_levels = list(executed)
+        last.decay_iterations = list(phase_iters)
+        self._iterations_used = total
+        self._decay_levels = list(executed)
+        self._decay_iterations = list(phase_iters)
+        self._n_projections = last.n_projections
+        self._projection_truncated_sweeps = last.projection_truncated_sweeps
+        self._dykstra_inner_cap_hits = last.dykstra_inner_cap_hits
+        self._observed_total_projection_distance = (
+            last.observed_total_projection_distance)
+        self._projection_cap_rechecks = last.projection_cap_rechecks
+        self._explicit_row_event_counts = (
+            None if last.explicit_row_event_counts is None
+            else np.array(last.explicit_row_event_counts, copy=True))
+        self._implicit_lower_event_counts = (
+            None if last.implicit_lower_event_counts is None
+            else np.array(last.implicit_lower_event_counts, copy=True))
+        self._implicit_upper_event_counts = (
+            None if last.implicit_upper_event_counts is None
+            else np.array(last.implicit_upper_event_counts, copy=True))
+        self._projection_first_candidate_id = first_id
+        self._projection_last_candidate_id = last_id
+        self._nonlinear_event_counts = dict(merged)
+        self._dykstra_inner_iterations = [
+            int(v) for v in last.dykstra_inner_iterations]
+        self._dykstra_inner_projection_events = [
+            int(v) for v in last.dykstra_inner_projection_events]
+        self._dykstra_inner_converged = [
+            bool(v) for v in last.dykstra_inner_converged]
+        self._spike_event_kinds = list(last.spike_event_kinds)
+        self._spike_event_indices = [
+            int(v) for v in np.asarray(last.spike_event_indices, dtype=int).reshape(-1)]
+        return last
+
+    def _join_decay_trajectory(self, phases: List[SolverResult],
+                               phase_iters: List[int], last: SolverResult) -> None:
+        """Concatenate recorded phases. Lean phases keep a one-element stamp."""
+        lean = [np.shape(phase.t) == (1,) for phase in phases]
+        if all(lean):
+            last.t = np.array([float(sum(phase_iters))], dtype=float)
+            return
+        if any(lean):
+            raise ValueError(
+                "k0_decay_floor with record_trajectory=True produced a mix of "
+                "recorded and lean phase trajectories; set record_trajectory=False")
+        n_vars = int(self.problem.n_vars)
+        t_parts: List[np.ndarray] = []
+        x_parts: List[np.ndarray] = []
+        obj_parts: List[np.ndarray] = []
+        viol_parts: List[np.ndarray] = []
+        spike_times: List[np.ndarray] = []
+        spike_deltas: List[np.ndarray] = []
+        spike_norms: List[np.ndarray] = []
+        spike_constraints: List[np.ndarray] = []
+        spike_violations: List[np.ndarray] = []
+        spike_kinds: List[str] = []
+        spike_indices: List[np.ndarray] = []
+        offset = 0
+        for index, phase in enumerate(phases):
+            t = np.asarray(phase.t, dtype=float).reshape(-1)
+            X = np.asarray(phase.X, dtype=float)
+            if X.ndim == 1:
+                X = X.reshape(1, -1)
+            obj = np.asarray(phase.objective_values, dtype=float).reshape(-1)
+            viol = np.asarray(phase.constraint_violations, dtype=float).reshape(-1)
+            if not (t.shape[0] == X.shape[0] == obj.shape[0] == viol.shape[0]):
+                raise ValueError(
+                    "k0_decay_floor trajectory phase has mismatched t, X, "
+                    "objective_values, and constraint_violations lengths; "
+                    "set record_trajectory=False")
+            if index == 0:
+                t_parts.append(t)
+                x_parts.append(X)
+                obj_parts.append(obj)
+                viol_parts.append(viol)
+            else:
+                # Row 0 repeats the previous phase's final state.
+                t_parts.append(t[1:] + float(offset))
+                x_parts.append(X[1:])
+                obj_parts.append(obj[1:])
+                viol_parts.append(viol[1:])
+            times = np.asarray(phase.spike_times, dtype=float).reshape(-1)
+            deltas = np.asarray(phase.spike_deltas, dtype=float)
+            if deltas.size == 0:
+                deltas = np.empty((0, n_vars))
+            norms = np.asarray(phase.spike_norms, dtype=float).reshape(-1)
+            constraints = list(phase.spike_constraints)
+            violations = list(phase.spike_violation_values)
+            if (deltas.shape[0] != times.shape[0] or norms.shape[0] != times.shape[0]
+                    or len(constraints) != times.shape[0]
+                    or len(violations) != times.shape[0]):
+                raise ValueError(
+                    "k0_decay_floor spike arrays have mismatched lengths; "
+                    "set record_trajectory=False")
+            if times.size:
+                spike_times.append(times + float(offset))
+                spike_deltas.append(deltas)
+                spike_norms.append(norms)
+            spike_constraints.extend(constraints)
+            spike_violations.extend(violations)
+            kinds = list(phase.spike_event_kinds)
+            indices = np.asarray(phase.spike_event_indices, dtype=int).reshape(-1)
+            if len(kinds) != indices.shape[0]:
+                raise ValueError(
+                    "k0_decay_floor spike arrays have mismatched lengths; "
+                    "set record_trajectory=False")
+            spike_kinds.extend(kinds)
+            if indices.size:
+                spike_indices.append(indices)
+            offset += int(phase_iters[index])
+        last.t = np.concatenate(t_parts)
+        last.X = np.vstack(x_parts)
+        last.objective_values = np.concatenate(obj_parts)
+        last.constraint_violations = np.concatenate(viol_parts)
+        last.spike_times = (np.concatenate(spike_times) if spike_times
+                            else np.array([], dtype=float))
+        last.spike_deltas = (np.vstack(spike_deltas) if spike_deltas
+                             else np.empty((0, n_vars)))
+        last.spike_norms = (np.concatenate(spike_norms) if spike_norms
+                            else np.empty((0,), dtype=float))
+        last.spike_constraints = spike_constraints
+        last.spike_violation_values = spike_violations
+        last.spike_event_kinds = spike_kinds
+        last.spike_event_indices = (np.concatenate(spike_indices) if spike_indices
+                                    else np.empty((0,), dtype=int))
 
     def _solve_with_transform(self, x0: np.ndarray, verbose: bool = False) -> SolverResult:
         """Solve via an explicit problem transform (the transform axis).
@@ -3068,6 +3571,10 @@ class SNNSolver:
         self._converged = inner._converged
         self._convergence_reason = inner._convergence_reason
         self._iterations_used = inner._iterations_used
+        self._decay_levels = (None if inner._decay_levels is None
+                              else list(inner._decay_levels))
+        self._decay_iterations = (None if inner._decay_iterations is None
+                                  else list(inner._decay_iterations))
         self._n_projections = inner._n_projections
         self._projection_budget_exhausted = inner._projection_budget_exhausted
         self._explicit_row_event_counts = inner._explicit_row_event_counts
@@ -3352,6 +3859,10 @@ class SNNSolver:
             dykstra_inner_converged=np.asarray(
                 self._dykstra_inner_converged, dtype=bool),
             dykstra_inner_cap_hits=int(self._dykstra_inner_cap_hits),
+            decay_levels=(None if self._decay_levels is None
+                          else list(self._decay_levels)),
+            decay_iterations=(None if self._decay_iterations is None
+                              else list(self._decay_iterations)),
         )
 
     def _drive_chunked_kernel(self, kernel_call, x0c: np.ndarray):
@@ -4508,6 +5019,10 @@ class SNNSolver:
             dykstra_inner_converged=np.asarray(
                 self._dykstra_inner_converged, dtype=bool),
             dykstra_inner_cap_hits=int(self._dykstra_inner_cap_hits),
+            decay_levels=(None if self._decay_levels is None
+                          else list(self._decay_levels)),
+            decay_iterations=(None if self._decay_iterations is None
+                              else list(self._decay_iterations)),
         )
 
 

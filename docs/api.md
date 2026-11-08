@@ -66,6 +66,8 @@ Solver hyper-parameters with sensible defaults. Most users only ever set
 |---|---|---|
 | `k0` | `None` | Step size; `None` auto-computes from `λ_max(A)`. |
 | `k0_scale` | `0.5` | Multiplier on the auto step (lower = safer). |
+| `k0_decay_floor` | `None` | Opt-in absolute k0 floor (same units as `k0`, i.e. `floor_scale / L`). `None` keeps a constant step. Levels start at `k0_eff` and halve while the value is above `1.5 * floor`, then the last level is exactly the floor. When this is set and `max_projection_iters` is `None`, `solve` resolves the projection cap again, so assigning the floor after construction still raises it to `max(5000, automatic)`. |
+| `k0_decay_segment` | `None` | Outer iterations per level. `None` uses `max_iterations // n_levels` and puts the remainder on the floor level. Requires `k0_decay_floor`. |
 | `t_end` | `100.0` | IVP mode horizon. |
 | `max_step` | `0.1` | IVP mode max ODE step. |
 | `constraint_tol` | `1e-6` | Tolerance for "constraint violated". |
@@ -173,6 +175,76 @@ them. `kkt_rel_tol` sets `kkt_target` when the target is unset and warns.
 removed. Supplying either together with an explicit `kkt_target` raises
 `ValueError`.
 
+## Choosing a decay floor: `recommend_k0_decay(...)`
+
+`k0_decay_floor` is explicit and optional; nothing selects it for you. When a
+problem stalls at a spurious fixed point whose offset is `O(k0)`, the residual
+falls with the step but not with iterations, and this helper proposes the step
+to stop at:
+
+```python
+from dataclasses import replace
+from snn_opt import SNNSolver, recommend_k0_decay
+
+rec = recommend_k0_decay(problem, config, target=1e-4, x0=warm_start)
+if rec.floor is not None:
+    config = replace(config, k0_decay_floor=rec.floor,
+                     k0_decay_segment=rec.segment)
+result = SNNSolver(problem, config).solve(warm_start)
+```
+
+The decision is measured, not assumed. A bounded constant-`k0` probe checks
+for the `O(k0)` signature: the normalized KKT residual sits above `target`,
+doubling the iteration budget does not improve it by more than 10 percent, and
+halving `k0` cuts it by at least 30 percent. If those hold, the residual is a
+bias, not slow convergence, and a floor is extrapolated from the measured
+slope. That extrapolation is then verified by running the actual staircase at
+the candidate floor with the caller's iteration budget; each miss halves the
+floor and retries, within `max_verifications` solves. Every measurement solve
+runs with early stopping disabled, so each consumes its budget and two steps
+are compared at their fixed points rather than at two unrelated early exits;
+the caller's convergence object is copied, never edited. A verification that
+aborts on the projection watchdog, or that stops before reaching the
+candidate floor, is never accepted however small its residual is at that
+point.
+
+| Argument | Default | Notes |
+|---|---|---|
+| `problem` | required | The problem the staircase would run on. |
+| `config` | `SolverConfig()` | Supplies the start (`k0` or `k0_scale`), the budget (`max_iterations`), and the default target (`convergence.kkt_target`). Not mutated. |
+| `target` | config's effective KKT target (`1e-4` when unset) | Normalized residual the floor should reach. |
+| `x0` | zero vector | Warm start to probe from. Pass the real starting point. |
+| `probe_iterations` | `min(max_iterations, 1000)` | Budget for each signature probe; the plateau probe runs at twice this. |
+| `floor_margin` | `0.5` | Multiplier on the model floor; each halving costs one extra level. |
+| `min_floor` | `None` | Absolute lower bound for the returned floor, for a fixed-point backend with a hard step-resolution floor. A clamped floor is flagged. |
+| `max_levels` | `32` | Level-count cap; a model floor that needs more is raised and the clamp reported. |
+| `max_verifications` | `3` | Total staircase solves allowed to confirm the target (at least 1). |
+| `check_plateau` | `True` | The doubled-budget probe; turn it off to save one solve. The linearity probe then carries the decision alone. |
+
+It returns a `DecayRecommendation` with `floor` (or `None` when decay is not
+indicated), `segment`, `levels`, a `reason` label, and an `evidence` dict
+carrying every probe and verification solve, the plateau and linearity
+ratios, the achieved residual, and the cost in solves, iterations, and wall
+seconds, with the probe and verification costs reported separately. Reasons include `target_already_met`,
+`residual_improves_with_iterations` (more iterations are the fix, not a
+smaller step), `residual_not_linear_in_k0`, and `recommended`. A final
+`recommended_above_target` means the bias was real and a floor was returned,
+but the target was not reached; the achieved residual is in the evidence. The
+caller's iteration budget, a level cap, `min_floor`, the verification limit,
+or model error can each cause that. `verification_projection_budget_exhausted`
+returns no floor when every candidate aborted on the watchdog.
+
+Because the verification measures with early stopping disabled, a `target`
+stricter than the config's effective `kkt_target` also needs
+`convergence.kkt_target` tightened in the applied run; otherwise that run can
+stop early at its looser gate. The helper raises on a non-Euler integration
+method and on a transformed problem (a transform applies `k0` in transformed
+coordinates, so the floor would not transfer). It presumes a warm start: a cold start can exhaust the
+projection sweep before the first level, which is why the probe returns no
+recommendation when that happens. With `k0_decay_floor=None` the solve is
+byte-identical to the pre-decay solver whether or not a recommendation was
+computed.
+
 ## `SNNSolver(problem, config=None)`
 
 The full solver. Use this (rather than `solve_qp`) when you want to amortize
@@ -186,7 +258,7 @@ problem construction across many warm-started solves.
 Returned by `solve_qp` and `SNNSolver.solve`. Notable fields:
 
 - `final_x`, `final_objective`, `final_proj_grad_norm`: solution and summary.
-- `converged`, `convergence_reason`, `iterations_used`: termination info.
+- `converged`, `convergence_reason`, `iterations_used`: termination info. With `k0_decay_floor` set, `iterations_used`, `n_projections`, and `total_projection_distance` sum every level that ran. `decay_levels` / `decay_iterations` record that prefix. A recorded trajectory concatenates the levels (`t` and `spike_times` shift by the iterations already spent; each later level drops its duplicated initial state). Compiled backends stay lean: one-element `t` equals the summed iteration count. `projection_event_digest` cannot be summed and stays the last level's digest. `projection_first_candidate_id` / `projection_last_candidate_id` are the endpoints of the levels that ran, not sums. The numeric observer counters (event totals, per-id counts, observed distance, cap rechecks, nonlinear event counts), `projection_truncated_sweeps`, and `dykstra_inner_cap_hits` sum; the per-sweep Dykstra arrays are concatenated.
 - `t`, `X`: full trajectory `(T,)` and `(T, n)`.
 - `objective_values`, `constraint_violations`: `(T,)` per iteration.
 - `n_projections`: total projection sub-iterations.

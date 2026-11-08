@@ -53,6 +53,7 @@ from .nonlinear import (
     spectral_ball_projector,
     spectral_norm_cutter,
 )
+from .recommend import DecayRecommendation, recommend_k0_decay
 from .solver import (
     ConvergenceConfig,
     OptimizationProblem,
@@ -74,6 +75,8 @@ __all__ = [
     "SolverConfig",
     "SolverResult",
     "solve_qp",
+    "DecayRecommendation",
+    "recommend_k0_decay",
     "CutterCandidate",
     "ProjectorCandidate",
     "AffineSubspaceProjector",
