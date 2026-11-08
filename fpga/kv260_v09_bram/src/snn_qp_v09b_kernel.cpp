@@ -25,9 +25,11 @@
 
 #include "dt.h"
 #include "v09_abi.hpp"
+#include "v09b_decay.hpp"
 
 #include <ap_int.h>
 #include <ap_utils.h>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -116,7 +118,15 @@ static int configured_projmax = 0;
 static int configured_has_lower = 0;
 static int configured_has_upper = 0;
 static dt configured_k0 = 0;
+static dt configured_k0_floor = 0;
+static ap_uint<34> configured_k0_floor_triple = 0;
+static int configured_decay_segment = 0;
 static dt configured_ctol = 0;
+#ifndef __SYNTHESIS__
+constexpr int DEBUG_K0_LEVEL_CAP = 64;
+static std::uint32_t debug_k0_levels[DEBUG_K0_LEVEL_CAP];
+static int debug_k0_level_count = 0;
+#endif
 static dt configured_lower = 0;
 static dt configured_upper = 0;
 static ap_uint<1> is_configured = 0;
@@ -151,6 +161,23 @@ inline std::uint32_t dt_to_raw(dt value) {
     const ap_uint<DATA_W> bits = value.range(DATA_W - 1, 0);
     return static_cast<std::uint32_t>(bits);
 }
+
+#ifndef __SYNTHESIS__
+inline void debug_reset_k0(dt value) {
+    debug_k0_level_count = 1;
+    debug_k0_levels[0] = dt_to_raw(value);
+}
+
+inline void debug_record_k0(dt value) {
+    const std::uint32_t raw = dt_to_raw(value);
+    if (debug_k0_level_count > 0 &&
+        debug_k0_levels[debug_k0_level_count - 1] != raw &&
+        debug_k0_level_count < DEBUG_K0_LEVEL_CAP) {
+        debug_k0_levels[debug_k0_level_count] = raw;
+        ++debug_k0_level_count;
+    }
+}
+#endif
 
 inline void write_image(std::uint32_t* image, std::uint32_t index, dt value) {
 #pragma HLS INLINE
@@ -303,12 +330,30 @@ inline int configure_geometry(
     const double* cns_cfg, const double* row_scale_cfg,
     const double* x0_in, int n, int m, double k0_f, double ctol_f,
     int n_iters, int projmax, int has_lower, double lower_f, int has_upper,
-    double upper_f, int requested_route) {
+    double upper_f, double k0_floor_f, int decay_segment,
+    int requested_route) {
 #pragma HLS INLINE off
     if (!dimensions_valid(n, m) || n_iters <= 0 || projmax <= 0 ||
         (has_lower != 0 && has_lower != 1) ||
         (has_upper != 0 && has_upper != 1))
         return snn_v08::ERR_BAD_DIMENSIONS;
+
+    if (!std::isfinite(k0_floor_f) || k0_floor_f < 0.0)
+        return snn_v08::ERR_BAD_K0_FLOOR;
+    const dt next_k0 = static_cast<dt>(k0_f);
+    const dt next_k0_floor = static_cast<dt>(k0_floor_f);
+    const std::uint32_t start_quanta = dt_to_raw(next_k0);
+    const std::uint32_t floor_quanta = dt_to_raw(next_k0_floor);
+    if (k0_floor_f > 0.0) {
+        if (!(k0_floor_f < k0_f) || decay_segment < 1 || floor_quanta == 0 ||
+            floor_quanta < snn_v09b_decay::MIN_FLOOR_QUANTA ||
+            floor_quanta >= start_quanta)
+            return snn_v08::ERR_BAD_K0_FLOOR;
+        const int levels =
+            snn_v09b_decay::level_count(start_quanta, floor_quanta);
+        if (static_cast<long long>(decay_segment) * levels > n_iters)
+            return snn_v08::ERR_BAD_K0_FLOOR;
+    }
 
     const int route = choose_route(n, m, requested_route);
     if (route < 0) return snn_v08::ERR_CAPACITY;
@@ -322,7 +367,10 @@ inline int configure_geometry(
     configured_projmax = projmax;
     configured_has_lower = has_lower;
     configured_has_upper = has_upper;
-    configured_k0 = static_cast<dt>(k0_f);
+    configured_k0 = next_k0;
+    configured_k0_floor = next_k0_floor;
+    configured_k0_floor_triple = static_cast<ap_uint<34>>(floor_quanta) * 3;
+    configured_decay_segment = k0_floor_f > 0.0 ? decay_segment : 0;
     configured_ctol = static_cast<dt>(ctol_f);
     configured_lower = static_cast<dt>(lower_f);
     configured_upper = static_cast<dt>(upper_f);
@@ -712,7 +760,13 @@ select_start:
     }
     apply_shift(x, shifted, configured_n, shift_stride, tail_policy);
 
-    const dt k0 = configured_k0;
+    dt k0 = configured_k0;
+    dt k0_floor = configured_k0_floor;
+    int seg = configured_decay_segment;
+    const bool decay = (k0_floor > dt(0));
+#ifndef __SYNTHESIS__
+    debug_reset_k0(k0);
+#endif
     const dt ctol = configured_ctol;
     const dt lower = configured_lower;
     const dt upper = configured_upper;
@@ -912,6 +966,21 @@ outer_loop:
             }
         }
         executed = outer + 1;
+        if (decay) {
+            if (--seg == 0) {
+                if (k0 > k0_floor) {
+                    k0 = dt(k0 / 2);
+                    const ap_uint<34> twice_k0 =
+                        static_cast<ap_uint<34>>(dt_to_raw(k0)) << 1;
+                    if (twice_k0 <= configured_k0_floor_triple)
+                        k0 = k0_floor;
+                }
+                seg = configured_decay_segment;
+            }
+        }
+#ifndef __SYNTHESIS__
+        debug_record_k0(k0);
+#endif
     }
 
     for (int i = 0; i < configured_n; ++i) resident_state[i] = x[i];
@@ -944,7 +1013,7 @@ inline DispatchResult dispatch_command(
     std::uint32_t* G_ddr, long long* x_raw_out,
     unsigned long long* telemetry_out, int n, int m, double k0_f,
     double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
-    int has_upper, double upper_f) {
+    int has_upper, double upper_f, double k0_floor_f, int decay_segment) {
 #pragma HLS INLINE off
 #pragma HLS ALLOCATION function instances = load_geometry_matrix limit = 1
 #pragma HLS ALLOCATION function instances = binary64_to_dt limit = 1
@@ -954,7 +1023,7 @@ inline DispatchResult dispatch_command(
         result.error = configure_geometry(
             cns_cfg, row_scale_cfg, x0_in, n, m, k0_f, ctol_f, n_iters,
             projmax, has_lower, lower_f, has_upper, upper_f,
-            requested_route);
+            k0_floor_f, decay_segment, requested_route);
         if (result.error == snn_v08::ERR_OK) {
             load_geometry_matrix(A_cfg, A_ddr, nullptr, GEOMETRY_A, 0, n, n,
                                  a_range_violation);
@@ -1026,7 +1095,7 @@ extern "C" void snn_qp_v09b(
     int command, int launch_mode, int route_mode, int start_mode,
     int shift_stride, int tail_policy, int n, int m, double k0_f,
     double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
-    int has_upper, double upper_f) {
+    int has_upper, double upper_f, double k0_floor_f, int decay_segment) {
 #pragma HLS INTERFACE m_axi port = A_cfg bundle = g0 offset = slave depth = 16384
 #pragma HLS INTERFACE m_axi port = C_cfg bundle = g0 offset = slave depth = 16384
 #pragma HLS INTERFACE m_axi port = G_cfg bundle = g0 offset = slave depth = 16384
@@ -1075,6 +1144,8 @@ extern "C" void snn_qp_v09b(
 #pragma HLS INTERFACE s_axilite port = lower_f bundle = c
 #pragma HLS INTERFACE s_axilite port = has_upper bundle = c
 #pragma HLS INTERFACE s_axilite port = upper_f bundle = c
+#pragma HLS INTERFACE s_axilite port = k0_floor_f bundle = c
+#pragma HLS INTERFACE s_axilite port = decay_segment bundle = c
 #pragma HLS INTERFACE s_axilite port = return bundle = c
 
     // Storage directives for the file-scope resident arrays. The HLS
@@ -1137,7 +1208,7 @@ extern "C" void snn_qp_v09b(
                 effective_shift, effective_tail, A_cfg, C_cfg, G_cfg,
                 cns_cfg, row_scale_cfg, b_in, d_in, x0_in, A_ddr, C_ddr,
                 Ct_ddr, G_ddr, x_raw_out, telemetry_out, n, m, k0_f, ctol_f,
-                n_iters, projmax, has_lower, lower_f, has_upper, upper_f);
+                n_iters, projmax, has_lower, lower_f, has_upper, upper_f, k0_floor_f, decay_segment);
         }
         acknowledge_dispatch(mb_out, sequence, result);
         return;
@@ -1158,7 +1229,7 @@ extern "C" void snn_qp_v09b(
                 A_cfg, C_cfg, G_cfg, cns_cfg, row_scale_cfg, b_in, d_in,
                 x0_in, A_ddr, C_ddr, Ct_ddr, G_ddr, x_raw_out,
                 telemetry_out, n, m, k0_f, ctol_f, n_iters, projmax,
-                has_lower, lower_f, has_upper, upper_f);
+                has_lower, lower_f, has_upper, upper_f, k0_floor_f, decay_segment);
         }
         acknowledge_dispatch(mb_out, seen_sequence, result);
         if (command == snn_v08::STOP) return;
@@ -1205,7 +1276,7 @@ persistent_wait:
                     cns_cfg, row_scale_cfg, b_in, d_in, x0_in, A_ddr, C_ddr,
                     Ct_ddr, G_ddr, x_raw_out, telemetry_out, n, m, k0_f,
                     ctol_f, n_iters, projmax, has_lower, lower_f, has_upper,
-                    upper_f);
+                    upper_f, k0_floor_f, decay_segment);
             }
             acknowledge_dispatch(mb_out, sequence, result);
             seen_sequence = sequence;
@@ -1219,3 +1290,13 @@ persistent_wait:
         }
     }
 }
+
+#ifndef __SYNTHESIS__
+int snn_qp_v09b_debug_decay_chain(std::uint32_t* output, int capacity) {
+    const int count = debug_k0_level_count < capacity
+                          ? debug_k0_level_count
+                          : capacity;
+    for (int i = 0; i < count; ++i) output[i] = debug_k0_levels[i];
+    return debug_k0_level_count;
+}
+#endif

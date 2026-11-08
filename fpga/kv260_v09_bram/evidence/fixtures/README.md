@@ -30,3 +30,16 @@ iteration field of the header; k0 is identical because it is
 
 `provenance.json` beside this file is the machine-readable copy, including
 per-array absolute maxima. Every shipped value is inside ap_fixed<32,8>.
+
+## Decay cells
+
+The healthy cell uses the v06 `prob_6x18.bin` bundle with floor 0.375 and
+segment 10 over 50 iterations. The stiff cell uses `square_T16_K2000.bin`
+with floor 0.002 and segment 400 over 2000 iterations. Their native records
+are named `decay_healthy_prob_6x18.native_oneshot.out` and
+`decay_stiff_square_T16_K2000.native_oneshot.out`. `tools/board/run.sh`
+executes both cells in ONESHOT and PERSISTENT modes after the constant-k0
+identity matrix. The decay driver also checks the kernel's executed quanta
+against the quantized software level list. Both cells exercise the skip
+corner: a halved value in `(floor, 1.5*floor]` is skipped directly to the
+floor and never runs as a level.

@@ -15,9 +15,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 extern "C" void snn_qp_v06(
@@ -42,12 +44,13 @@ extern "C" void snn_qp_v09b(
     int command, int launch_mode, int route_mode, int start_mode,
     int shift_stride, int tail_policy, int n, int m, double k0_f,
     double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
-    int has_upper, double upper_f);
+    int has_upper, double upper_f, double k0_floor_f, int decay_segment);
 
 namespace {
 
 using Problem = msrp_v05::Problem;
-using KernelFn = decltype(&snn_qp_v09b);
+using V06KernelFn = decltype(&snn_qp_v06);
+using V09bKernelFn = decltype(&snn_qp_v09b);
 
 struct Snapshot {
     std::vector<long long> raw;
@@ -61,6 +64,7 @@ struct RunResult {
     double seconds = 0.0;
 };
 
+template <class KernelFn>
 class Session {
   public:
     KernelFn kernel;
@@ -92,13 +96,24 @@ class Session {
     }
 
     void invoke(int command, int start, int shift, int tail) {
-        kernel(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
-               q.row_scale.data(), payload_b.data(), payload_d.data(),
-               payload_x0.data(), a_ddr.data(), c_ddr.data(), ct_ddr.data(),
-               g_ddr.data(), raw.data(), telemetry.data(), mb_in.data(),
-               mb_out.data(), command, launch, route, start, shift, tail, q.n,
-               q.m, q.k0, q.constraint_tol, q.iterations, q.projection_cap,
-               q.has_lower ? 1 : 0, q.lower, q.has_upper ? 1 : 0, q.upper);
+        if constexpr (std::is_same<KernelFn, V09bKernelFn>::value) {
+            kernel(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
+                   q.row_scale.data(), payload_b.data(), payload_d.data(),
+                   payload_x0.data(), a_ddr.data(), c_ddr.data(), ct_ddr.data(),
+                   g_ddr.data(), raw.data(), telemetry.data(), mb_in.data(),
+                   mb_out.data(), command, launch, route, start, shift, tail, q.n,
+                   q.m, q.k0, q.constraint_tol, q.iterations, q.projection_cap,
+                   q.has_lower ? 1 : 0, q.lower, q.has_upper ? 1 : 0, q.upper,
+                   0.0, 0);
+        } else {
+            kernel(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
+                   q.row_scale.data(), payload_b.data(), payload_d.data(),
+                   payload_x0.data(), a_ddr.data(), c_ddr.data(), ct_ddr.data(),
+                   g_ddr.data(), raw.data(), telemetry.data(), mb_in.data(),
+                   mb_out.data(), command, launch, route, start, shift, tail, q.n,
+                   q.m, q.k0, q.constraint_tol, q.iterations, q.projection_cap,
+                   q.has_lower ? 1 : 0, q.lower, q.has_upper ? 1 : 0, q.upper);
+        }
     }
 
     void wait_done(std::uint32_t wanted) {
@@ -272,9 +287,10 @@ bool compare_snap(const std::string& name, const Snapshot& a, const Snapshot& b,
     return ok;
 }
 
+template <class KernelFn>
 Snapshot run_pair_kernel(KernelFn fn, const Problem& q, int route, int launch,
                          int start, int shift, int tail) {
-    Session session(fn, q, route, launch);
+    Session<KernelFn> session(fn, q, route, launch);
     const int err = session.configure();
     if (err != snn_v08::ERR_OK) {
         Snapshot out;
@@ -308,8 +324,8 @@ bool run_solve(const std::string& name, const Problem& q, int launch, int start,
 
 bool run_refresh(const std::string& name, const Problem& q, int launch) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto once = [&](KernelFn fn) {
-        Session session(fn, q, snn_v08::FORCE_FULL, launch);
+    auto once = [&](auto fn) {
+        Session<decltype(fn)> session(fn, q, snn_v08::FORCE_FULL, launch);
         struct Pair { Snapshot first; Snapshot second; int refresh_error; } pair;
         if (session.configure() != snn_v08::ERR_OK) {
             pair.refresh_error = -1;
@@ -451,11 +467,13 @@ constexpr unsigned long long kLitmusRaw = UINT64_C(0x13579bdf00000000);
 constexpr unsigned long long kLitmusTel = UINT64_C(0xa5a5000000000000);
 constexpr std::uint32_t kLitmusInput = 0xA5A5A5A5u;
 
+template <class KernelFn>
 Snapshot oneshot_command(KernelFn fn, const Problem& q, int command, int route,
                          int start, int shift, int tail, int n, int m,
                          int n_iters, int projmax, int has_lower, int has_upper,
                          std::size_t raw_words, std::size_t copy_words,
-                         std::uint32_t litmus_input) {
+                         std::uint32_t litmus_input,
+                         double k0_floor = 0.0, int decay_segment = 0) {
     std::vector<long long> raw(raw_words, 0);
     std::array<unsigned long long, snn_v08::TELEMETRY_WORDS> telemetry{};
     std::array<std::uint32_t, snn_v08::MAILBOX_WORDS> mb_in{};
@@ -469,12 +487,21 @@ Snapshot oneshot_command(KernelFn fn, const Problem& q, int command, int route,
     std::vector<std::uint32_t> a_ddr(nn), c_ddr(mn), ct_ddr(mn), g_ddr(mm);
     mb_in[snn_v08::MAILBOX_SEQUENCE] = 1;
     mb_in[snn_v08::MAILBOX_LITMUS_INPUT] = litmus_input;
-    fn(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
-       q.row_scale.data(), q.b.data(), q.d.data(), q.x0.data(), a_ddr.data(),
-       c_ddr.data(), ct_ddr.data(), g_ddr.data(), raw.data(), telemetry.data(),
-       mb_in.data(), mb_out.data(), command, snn_v08::ONESHOT, route, start,
-       shift, tail, n, m, q.k0, q.constraint_tol, n_iters, projmax, has_lower,
-       q.lower, has_upper, q.upper);
+    if constexpr (std::is_same<KernelFn, V09bKernelFn>::value) {
+        fn(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
+           q.row_scale.data(), q.b.data(), q.d.data(), q.x0.data(), a_ddr.data(),
+           c_ddr.data(), ct_ddr.data(), g_ddr.data(), raw.data(), telemetry.data(),
+           mb_in.data(), mb_out.data(), command, snn_v08::ONESHOT, route, start,
+           shift, tail, n, m, q.k0, q.constraint_tol, n_iters, projmax, has_lower,
+           q.lower, has_upper, q.upper, k0_floor, decay_segment);
+    } else {
+        fn(q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
+           q.row_scale.data(), q.b.data(), q.d.data(), q.x0.data(), a_ddr.data(),
+           c_ddr.data(), ct_ddr.data(), g_ddr.data(), raw.data(), telemetry.data(),
+           mb_in.data(), mb_out.data(), command, snn_v08::ONESHOT, route, start,
+           shift, tail, n, m, q.k0, q.constraint_tol, n_iters, projmax, has_lower,
+           q.lower, has_upper, q.upper);
+    }
     Snapshot out;
     const std::size_t kept = copy_words < raw.size() ? copy_words : raw.size();
     out.raw.assign(raw.begin(),
@@ -541,7 +568,7 @@ int run_preconfigure_solve() {
     const Problem q = random_problem(6, 18, 2, 0);
     const int n = q.n;
     const std::size_t words = static_cast<std::size_t>(n);
-    auto once = [&](KernelFn fn) {
+    auto once = [&](auto fn) {
         return oneshot_command(fn, q, snn_v08::SOLVE, snn_v08::FORCE_FULL,
                                snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL, n, q.m,
                                q.iterations, q.projection_cap, 0, 0, words, words,
@@ -580,7 +607,7 @@ int run_litmus() {
     const Problem q = random_problem(6, 18, 11, 0);
     const int n = q.n;
     const std::size_t words = static_cast<std::size_t>(n);
-    auto once = [&](KernelFn fn) {
+    auto once = [&](auto fn) {
         return oneshot_command(fn, q, snn_v08::LITMUS, snn_v08::FORCE_FULL,
                                snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL, n, q.m,
                                q.iterations, q.projection_cap, 0, 0, words, words,
@@ -670,6 +697,34 @@ int run_rejection_battery() {
                       item.upper, item.route);
         const std::string ack_name = std::string("reject:") + item.name;
         if (!expect_ack(ack_name, rejected, item.expected, snn_v08::FORCE_FULL))
+            ++failures;
+        if (!preserved_solve(ack_name, control, solve_good())) ++failures;
+    }
+
+    struct DecayCase {
+        const char* name;
+        double floor;
+        int segment;
+    };
+    const DecayCase decay_cases[] = {
+        {"decay_negative", -0.001, 1},
+        {"decay_equal_start", q.k0, 1},
+        {"decay_nan", std::numeric_limits<double>::quiet_NaN(), 1},
+        {"decay_infinite", std::numeric_limits<double>::infinity(), 1},
+        {"decay_zero_quanta", 1e-9, 1},
+        {"decay_below_128_quanta", 64.0 / 16777216.0, 1},
+        {"decay_segment_zero", q.k0 / 4.0, 0},
+        {"decay_segment_negative", q.k0 / 4.0, -1},
+        {"decay_budget", q.k0 / 4.0, 2},
+    };
+    for (const DecayCase& item : decay_cases) {
+        const Snapshot rejected = oneshot_command(
+            snn_qp_v09b, q, snn_v08::CONFIGURE, snn_v08::FORCE_FULL,
+            snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL, n, m, iters, proj, 0, 0,
+            kOutputScratch, 0, 0, item.floor, item.segment);
+        const std::string ack_name = std::string("reject:") + item.name;
+        if (!expect_ack(ack_name, rejected, snn_v08::ERR_BAD_K0_FLOOR,
+                        snn_v08::FORCE_FULL))
             ++failures;
         if (!preserved_solve(ack_name, control, solve_good())) ++failures;
     }

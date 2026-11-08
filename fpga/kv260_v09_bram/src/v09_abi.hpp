@@ -57,6 +57,7 @@ enum ErrorCode : std::uint32_t {
     ERR_NOT_CONFIGURED = 4,
     ERR_BUSY = 5,
     ERR_STOPPED = 6,
+    ERR_BAD_K0_FLOOR = 7,
 };
 
 constexpr std::uint32_t MAILBOX_WORDS = 64;

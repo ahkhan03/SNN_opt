@@ -21,8 +21,15 @@ if {[info exists ::env(V09_CSIM_PROBLEM)] &&
     [info exists ::env(V09_CSIM_OUTPUT)]} {
     add_files -tb [file join $source_dir native_fixed_v09b.cpp] \
         -cflags "-std=c++11 -I$source_dir"
-    csim_design -argv "$::env(V09_CSIM_PROBLEM) $::env(V09_CSIM_OUTPUT)"
+    set csim_argv "$::env(V09_CSIM_PROBLEM) $::env(V09_CSIM_OUTPUT)"
+    if {[info exists ::env(V09_CSIM_K0_FLOOR)] &&
+        [info exists ::env(V09_CSIM_DECAY_SEGMENT)]} {
+        append csim_argv " --k0-floor $::env(V09_CSIM_K0_FLOOR) --decay-segment $::env(V09_CSIM_DECAY_SEGMENT)"
+    }
+    csim_design -argv "$csim_argv"
 }
 
-csynth_design
+if {![info exists ::env(V09_CSIM_ONLY)]} {
+    csynth_design
+}
 exit

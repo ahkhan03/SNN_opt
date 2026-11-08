@@ -17,7 +17,7 @@ the v06 synthetic fixtures, which are in the repository.
 
 ## Generating binary
 
-sha256 `e6dd5bcfa67509a2bbdff2ec913eb386c4b773c6965c1c897d9bf46fd97b1628`
+sha256 `183c2322ee0c1a26f8d4a31e9be4d930b1b99ffd787225f46b7121f1e28422fc`
 
 Built with g++ 15.2.0 by:
 
@@ -34,7 +34,9 @@ route word starts at AUTO and a successful in-cap configure selects FULL.
 Configure-first oneshot bytes are the files below. Re-running the build and
 the invocations on g++ 15.2.0 reproduces this binary sha256 and these record
 sha256 values. A different compiler may change the binary sha256 and still
-write the same records.
+write the same records. The decay-aware binary defaults to floor 0 and
+segment 0, so all 13 commands below reproduce the earlier bytes exactly,
+including the 16 telemetry words.
 
 ## Commands
 
@@ -85,3 +87,23 @@ below exit 2 and write no record. stderr is `problem dimensions or horizons are 
 - `square_T32_K30000.native_oneshot.out`  `c73bb4eb76c7f21f9097ab04a117e7c3d142a3b4fe5c211ed4e124bb3a3eaba3`
 - `square_T64_K30000.native_oneshot.out`  `751745fd6503c333092c72d45d1c152cc975f76d174cc4a10ade427d15c572af`
 - `square_T80_K30000.native_oneshot.out`  `6ae8ecd9af5820ea0fbc924e50ede12a31e07c353df9d94ccff54358a2cb84fc`
+
+## Decay records
+
+The paper-payload decay records remain beside the build archive. Generate
+them with:
+
+```
+"${BIN}" "${ROOT}/fpga/kv260_v06/evidence/board_2026-09-06_37f33fcfe2ca/fixtures/prob_6x18.bin" "${OUT}/decay_healthy_prob_6x18.native_oneshot.out" --k0-floor 0.375 --decay-segment 10
+"${BIN}" "${ROOT}/fpga/kv260_v09_bram/evidence/fixtures/square_T16_K2000.bin" "${OUT}/decay_stiff_square_T16_K2000.native_oneshot.out" --k0-floor 0.002 --decay-segment 400
+```
+
+Their sha256 values are
+`09eaecbffe33622aa6a52d9adeaf52f22f33c5373435956a770ef92d94918265`
+and
+`b6b08dd686d1ddeaca75a46a756688547cf1d0fdef74a4fb196c35208d454cfe`.
+The driver prints `DECAY_CHAIN expected=[...] actual=[...] match=true` for
+both cells. The healthy chain is
+`[50641056,25320528,12660264,6291456]`; the stiff chain is
+`[317556,158778,79389,33554]`. Each has four executed levels and skips the
+halved value in `(floor, 1.5*floor]` directly to the floor.

@@ -7,6 +7,7 @@
 // offsets, JSON, and the litmus procedure can be checked on a workstation.
 
 #include "v09_abi.hpp"
+#include "v09b_decay.hpp"
 #include "v09b_host_protocol.hpp"
 #include "v09b_xrt_compat.hpp"
 
@@ -44,7 +45,7 @@ extern void v09b_mock_native_invoke(
     const double* x0_in, std::uint32_t* a_ddr, std::uint32_t* c_ddr,
     std::uint32_t* ct_ddr, std::uint32_t* g_ddr, long long* raw_out,
     unsigned long long* telemetry_out, std::uint32_t* mb_in,
-    std::uint32_t* mb_out, int command);
+    std::uint32_t* mb_out, int command, double k0_floor, int decay_segment);
 #endif
 
 namespace {
@@ -98,6 +99,11 @@ struct Options {
     int start = snn_v08::HOST_X0;
     int shift = 0;
     int tail = snn_v08::HOLD_TAIL;
+    double k0_floor = 0.0;
+    int decay_segment = 0;
+    int decay_levels = 1;
+    double final_k0 = 0.0;
+    bool decay_segment_explicit = false;
     bool persistent = true;
     bool litmus = false;
     bool force_mock = false;
@@ -119,8 +125,8 @@ struct Options {
         "usage: %s <kernel.xclbin> <problem.bin> <fixed-output.bin> "
         "[--one-shot|--persistent] [--warmups N] [--reps N] "
         "[--route auto|full|cg|stream] [--start host_x0|resident_warm|cold_zero] "
-        "[--shift S] [--tail hold|repeat] [--litmus] [--mock] "
-        "[--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
+        "[--shift S] [--tail hold|repeat] [--k0-floor F] [--decay-segment N] "
+        "[--litmus] [--mock] [--poll-sync always|never] [--poll spin|yield|sleep-us=N] "
         "[--sequence-seed UINT32] "
         "[--json-out PATH]\n",
         program);
@@ -137,6 +143,29 @@ int parse_integer(const char* text, const char* label, bool allow_zero) {
         std::exit(2);
     }
     return static_cast<int>(value);
+}
+
+int parse_signed_integer(const char* text, const char* label) {
+    char* end = nullptr;
+    errno = 0;
+    const long value = std::strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value < -100000000L ||
+        value > 100000000L) {
+        std::fprintf(stderr, "invalid %s: %s\n", label, text);
+        std::exit(2);
+    }
+    return static_cast<int>(value);
+}
+
+double parse_double(const char* text, const char* label) {
+    char* end = nullptr;
+    errno = 0;
+    const double value = std::strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0') {
+        std::fprintf(stderr, "invalid %s: %s\n", label, text);
+        std::exit(2);
+    }
+    return value;
 }
 
 int parse_route(const char* text) {
@@ -242,6 +271,11 @@ Options parse_options(int argc, char** argv) {
             options.shift = parse_integer(argv[++i], "shift stride", true);
         } else if (arg == "--tail" && i + 1 < argc) {
             options.tail = parse_tail(argv[++i]);
+        } else if (arg == "--k0-floor" && i + 1 < argc) {
+            options.k0_floor = parse_double(argv[++i], "k0 floor");
+        } else if (arg == "--decay-segment" && i + 1 < argc) {
+            options.decay_segment = parse_signed_integer(argv[++i], "decay segment");
+            options.decay_segment_explicit = true;
         } else if (arg == "--poll-sync" && i + 1 < argc) {
             options.poll_sync = parse_poll_sync(argv[++i]);
         } else if (arg == "--poll" && i + 1 < argc) {
@@ -265,6 +299,43 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 #endif  // V09B_HOST_NO_MAIN
+
+void configure_decay(Options& options, const msrp_v05::Problem& q) {
+    const double floor = options.k0_floor;
+    if (!std::isfinite(floor) || floor < 0.0 || !(floor < q.k0)) {
+        std::fprintf(stderr, "invalid k0 floor %.17g for start %.17g\n",
+                     floor, q.k0);
+        std::exit(2);
+    }
+    const std::uint32_t start = snn_v09b_decay::quantize_positive(q.k0);
+    const std::uint32_t floor_raw = snn_v09b_decay::quantize_positive(floor);
+    options.final_k0 = static_cast<double>(start) / 16777216.0;
+    if (floor == 0.0) {
+        options.decay_segment = 0;
+        options.decay_levels = 1;
+        return;
+    }
+    if (floor_raw < snn_v09b_decay::MIN_FLOOR_QUANTA || floor_raw >= start) {
+        std::fprintf(stderr,
+                     "k0 floor must quantize to at least 128 quanta below the start\n");
+        std::exit(2);
+    }
+    options.decay_levels = snn_v09b_decay::level_count(start, floor_raw);
+    if (!options.decay_segment_explicit)
+        options.decay_segment = q.iterations / options.decay_levels;
+    if (options.decay_segment < 1 ||
+        static_cast<long long>(options.decay_segment) * options.decay_levels >
+            q.iterations) {
+        std::fprintf(stderr,
+                     "decay segment %d cannot cover %d levels within %d iterations\n",
+                     options.decay_segment, options.decay_levels, q.iterations);
+        std::exit(2);
+    }
+    options.final_k0 = static_cast<double>(snn_v09b_decay::final_level(
+                           start, floor_raw, options.decay_segment,
+                           q.iterations)) /
+                       16777216.0;
+}
 
 std::uint64_t monotonic_raw_ns() {
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -896,6 +967,8 @@ class V09bSession {
         run.set_arg(29, q_.lower);
         run.set_arg(30, q_.has_upper ? 1 : 0);
         run.set_arg(31, q_.upper);
+        run.set_arg(32, options_.k0_floor);
+        run.set_arg(33, options_.decay_segment);
     }
 
     bool wait_done(std::uint32_t wanted, TimingRecord* timing,
@@ -1041,7 +1114,8 @@ class V09bSession {
                     ? nullptr
                     : reinterpret_cast<unsigned long long*>(
                           output_map_ + output_layout_.telemetry),
-                mailbox_in(), mailbox_out(), command);
+                mailbox_in(), mailbox_out(), command, options_.k0_floor,
+                options_.decay_segment);
             return;
         }
 #endif
@@ -1129,6 +1203,11 @@ std::string make_json(const Options& options, const msrp_v05::Problem& q,
          << "\",\"backend\":\"" << (session.is_mock() ? "mock" : "xrt")
          << "\",\"xclbin\":\"" << options.xclbin << "\""
          << ",\"n\":" << q.n << ",\"m\":" << q.m
+         << ",\"k0_start\":" << q.k0
+         << ",\"k0_floor\":" << options.k0_floor
+         << ",\"decay_segment\":" << options.decay_segment
+         << ",\"decay_levels\":" << options.decay_levels
+         << ",\"k0_final_effective\":" << options.final_k0
          << ",\"route_requested\":\"" << route_name(options.route) << '\"'
          << ",\"route_selected\":\"" << route_name(selected_route) << '\"'
          << ",\"start_mode\":\"" << start_name(options.start) << '\"'
@@ -1216,13 +1295,14 @@ std::string make_json(const Options& options, const msrp_v05::Problem& q,
 #ifndef V09B_HOST_NO_MAIN
 int main(int argc, char** argv) {
     SignalGuard signal_guard;
-    const Options options = parse_options(argc, argv);
+    Options options = parse_options(argc, argv);
     const msrp_v05::Problem problem =
         msrp_v05::load_problem(options.problem, false, 1024, 1024);
     if (problem.n <= 0 || problem.m <= 0) {
         std::fprintf(stderr, "v09b requires positive n and m\n");
         return 2;
     }
+    configure_decay(options, problem);
 
     V09bSession session(options, problem);
     const int configure_error = session.configure();

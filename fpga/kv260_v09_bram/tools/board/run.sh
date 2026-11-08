@@ -104,6 +104,32 @@ run_named square_T32_K30000 "${SQUARE_DIR}/square_T32_K30000.bin" 32
 run_named square_T64_K30000 "${SQUARE_DIR}/square_T64_K30000.bin" 64
 run_named square_T80_K30000 "${SQUARE_DIR}/square_T80_K30000.bin" 80
 
+decay_cell() {
+    local name="$1"
+    local bundle="$2"
+    local floor="$3"
+    local segment="$4"
+    local levels="$5"
+    local final="$6"
+    identity_cell "${name}" "${bundle}" oneshot --one-shot \
+        --k0-floor "${floor}" --decay-segment "${segment}"
+    identity_cell "${name}" "${bundle}" persistent --persistent \
+        --k0-floor "${floor}" --decay-segment "${segment}"
+    local mode
+    for mode in oneshot persistent; do
+        local js="${RESULTS}/${name}.${mode}.json"
+        if [[ -f "${js}" ]]; then
+            grep -q "\"k0_floor\":${floor}" "${js}" || note_fail "${name} ${mode} K0_FLOOR_JSON"
+            grep -q "\"decay_segment\":${segment}" "${js}" || note_fail "${name} ${mode} DECAY_SEGMENT_JSON"
+            grep -q "\"decay_levels\":${levels}" "${js}" || note_fail "${name} ${mode} DECAY_LEVELS_JSON"
+            grep -q "\"k0_final_effective\":${final}" "${js}" || note_fail "${name} ${mode} FINAL_K0_JSON"
+        fi
+    done
+}
+
+decay_cell decay_healthy_prob_6x18 "${FIX_DIR}/prob_6x18.bin" 0.375 10 4 0.375
+decay_cell decay_stiff_square_T16_K2000 "${SQUARE_DIR}/square_T16_K2000.bin" 0.002 400 4 0.001999974250793457
+
 warm_out="${RESULTS}/prob_6x18.warm3.out"
 warm_js="${RESULTS}/prob_6x18.warm3.json"
 warm_log="${RESULTS}/prob_6x18.warm3.log"

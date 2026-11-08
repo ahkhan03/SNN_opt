@@ -78,7 +78,22 @@ which matches v0.6 and v0.8.
 
 ## ABI
 
-The argument list is the v0.8 list. Commands are SERVE=0, CONFIGURE=1,
+The argument list appends `double k0_floor_f` and `int decay_segment` to the
+v0.8 list at indices 32 and 33. A zero floor disables decay and preserves the
+constant-k0 bytes. A positive floor is absolute, must be below `k0_f`, must
+quantize to at least 128 state quanta, and requires a positive segment whose
+level budget fits `n_iters`. Invalid schedules return ERR_BAD_K0_FLOOR (7)
+before changing the configured state. The host options are `--k0-floor F` and
+`--decay-segment N`; an omitted positive-floor segment is
+`n_iters / n_levels`. Its JSON reports `k0_floor`, `decay_segment`,
+`decay_levels`, and `k0_final_effective`, while `k0_start` remains the bundle
+step. The kernel halves with `k0 = dt(k0 / 2)` at each segment boundary. If
+the halved value is in `(floor, 1.5*floor]`, it is skipped directly to the
+floor and never runs as a level. The raw-quanta comparison uses a precomputed
+`3*floor`. `decay_levels` and `k0_final_effective` describe the levels that
+actually execute. Telemetry remains 16 words.
+
+Commands are SERVE=0, CONFIGURE=1,
 SOLVE=2, REFRESH_A=3, STOP=4, LITMUS=5. Launch modes are ONESHOT=0 and
 PERSISTENT=1. Routes are AUTO=0, FULL=1, CG=2, STREAM=3. Starts are
 RESIDENT_WARM=0, HOST_X0=1, COLD_ZERO=2. Tails are HOLD_TAIL=0 and
@@ -94,16 +109,22 @@ AXI bundles match v0.8: g0 binary64 configure (HP0), g1 fixed-point images
 are the cap (16384 matrix words, 128 vector words), not the old 1024 cap.
 Depth is an HLS hint. The C types are unchanged.
 
-`build/run_hls.tcl` is the v0.8 script with the top set to `snn_qp_v09b`.
-Part xck26-sfvc784-2LV-c, 5.0 ns clock, 2.5 ns uncertainty. It has not been
-run.
+`build/run_hls.tcl` uses part xck26-sfvc784-2LV-c, a 5.0 ns clock, and
+2.5 ns uncertainty. `V09_CSIM_PROBLEM` and `V09_CSIM_OUTPUT` enable C
+simulation. `V09_CSIM_K0_FLOOR` and `V09_CSIM_DECAY_SEGMENT` select a decay
+cell, and `V09_CSIM_ONLY` leaves synthesis for a later invocation.
 
 ## x86 gate
 
 `build/build_native.sh` builds `native_fixed_v09b`. The CLI is
-`native_fixed_v09b problem.bin output.bin`. Optional flags match the v0.8
-driver (`--persistent`, `--route auto|full|cg|stream`). The dump magic is
-`MSRP V091`. Telemetry inside the dump is still the kernel's 16 words.
+`native_fixed_v09b problem.bin output.bin`. Optional flags are
+`--persistent`, `--route auto|full|cg|stream`, `--k0-floor F`, and
+`--decay-segment N`. The dump magic is `MSRP V091`. Telemetry inside the
+dump is still the kernel's 16 words. Every positive-floor run also prints
+`DECAY_CHAIN expected=[...] actual=[...]`: the expected quanta are an
+independent transcription of the software level rule, and the actual quanta
+come from native-only tracing of the kernel's executed levels. A mismatch
+makes the driver fail. The same check runs in HLS C simulation.
 
 `build/run_parity.sh` compiles v09b and v06 into one binary and compares, per
 fixture, every raw state word and telemetry[0..15], plus the mailbox error
@@ -123,7 +144,26 @@ files are still not in `run_parity.sh`. The earlier mismatch, 23 raw words
 on T=80 with the first differing final state at K=2777, was the eight-wide
 fold. It is gone.
 
-## Qualified implementation (2026-10-24)
+## Qualified implementation (2026-11-08)
+
+Bitstream and board app `snn_qp_v09b_k0d_200m_39fa7e234609`, based on commit
+`6b10563` with source hash `39fa7e234609`, built with Vitis 2022.1 at
+200 MHz (HLS uncertainty 2.5 ns, `Performance_ExplorePostRoutePhysOpt`).
+Routed WNS +0.040 ns, TNS 0, WHS +0.010 ns; 71,809 CLB LUT (61.31 %),
+84,355 FF, 86 BRAM tiles (59.72 %), 0 URAM, 378 DSP (30.29 %). The HLS
+estimate was 251.19 MHz. `kria-clock load` verdict OK,
+kernel_hz_measured 199,999,998.
+
+All 13 legacy native records are byte-identical at floor 0, and the official
+v09b/v06 gate reports `failures=0`. Healthy and stiff decay cells match the
+native oracle bit-for-bit in HLS C simulation, including the executed quanta
+assertion. Board identity is 26/26 constant-k0 cells plus 4/4 decay cells in
+ONESHOT and PERSISTENT modes, `identity failures=0`, with `backend:"xrt"` in
+every host JSON. Both launch modes report four executed levels and the
+correct final effective k0. Fleet n=160/320 remain SKIP by cap. Full records:
+`evidence/board_2026-11-08_39fa7e234609/`.
+
+## Previous qualified implementation (2026-10-24)
 
 Bitstream `snn_qp_v09b_200m_3a352d326c0a`, built from kernel commit `bf208c2`
 with Vitis 2022.1 at 200 MHz (HLS uncertainty 2.5 ns,
@@ -177,4 +217,6 @@ directory README records the generating binary sha256 and the commands.
 those records: raw state, all 16 telemetry words, error, and selected route.
 Set `XCLBIN`, `HOST`, `FLEET_DIR`, and `CLOCK_JSON`. The runner prints SKIP
 for a fleet row above n=128. CG and STREAM are not identity cells. The
-kernel returns `ERR_CAPACITY` for those routes at a legal size.
+kernel returns `ERR_CAPACITY` for those routes at a legal size. After the
+constant-k0 matrix, the runner executes the healthy and stiff decay cells
+in both launch modes and checks the decay fields in the host JSON.

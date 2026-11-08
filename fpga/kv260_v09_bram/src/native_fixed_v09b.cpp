@@ -6,6 +6,7 @@
 
 #include "../../kv260_v05/src/msrp_bundle.hpp"
 #include "v09_abi.hpp"
+#include "v09b_decay.hpp"
 
 #include <array>
 #include <atomic>
@@ -27,7 +28,9 @@ extern "C" void snn_qp_v09b(
     int command, int launch_mode, int route_mode, int start_mode,
     int shift_stride, int tail_policy, int n, int m, double k0_f,
     double ctol_f, int n_iters, int projmax, int has_lower, double lower_f,
-    int has_upper, double upper_f);
+    int has_upper, double upper_f, double k0_floor_f, int decay_segment);
+
+int snn_qp_v09b_debug_decay_chain(std::uint32_t* output, int capacity);
 
 namespace {
 
@@ -57,7 +60,8 @@ void allocate_buffers(const msrp_v05::Problem& q, Buffers& b) {
 }
 
 void call_kernel(const msrp_v05::Problem& q, Buffers& b, int command,
-                 int launch, int route, int start, int shift, int tail) {
+                 int launch, int route, int start, int shift, int tail,
+                 double k0_floor, int decay_segment) {
     snn_qp_v09b(
         q.A.data(), q.C.data(), q.G.data(), q.c_norms_sq.data(),
         q.row_scale.data(), q.b.data(), q.d.data(), q.x0.data(),
@@ -65,7 +69,8 @@ void call_kernel(const msrp_v05::Problem& q, Buffers& b, int command,
         b.raw.data(), b.telemetry.data(), b.mb_in.data(), b.mb_out.data(),
         command, launch, route, start, shift, tail, q.n, q.m, q.k0,
         q.constraint_tol, q.iterations, q.projection_cap,
-        q.has_lower ? 1 : 0, q.lower, q.has_upper ? 1 : 0, q.upper);
+        q.has_lower ? 1 : 0, q.lower, q.has_upper ? 1 : 0, q.upper,
+        k0_floor, decay_segment);
 }
 
 void wait_done(const Buffers& b, std::uint32_t sequence) {
@@ -163,8 +168,54 @@ msrp_v05::Problem generated_problem(int n, int m) {
     return q;
 }
 
+int check_decay_chain(const msrp_v05::Problem& q, double floor, int segment,
+                      int& executed_levels) {
+    if (floor == 0.0) {
+        executed_levels = 1;
+        return 0;
+    }
+    const std::uint32_t start = snn_v09b_decay::quantize_positive(q.k0);
+    const std::uint32_t floor_raw = snn_v09b_decay::quantize_positive(floor);
+    std::vector<std::uint32_t> expected;
+    std::uint64_t level = start;
+    while (2ULL * level > 3ULL * floor_raw) {
+        expected.push_back(static_cast<std::uint32_t>(level));
+        level /= 2ULL;
+    }
+    expected.push_back(floor_raw);
+
+    std::uint32_t actual[64] = {};
+    const int actual_count = snn_qp_v09b_debug_decay_chain(actual, 64);
+    executed_levels = actual_count;
+    bool match = actual_count == static_cast<int>(expected.size()) &&
+                 snn_v09b_decay::level_count(start, floor_raw) ==
+                     static_cast<int>(expected.size()) &&
+                 snn_v09b_decay::final_level(start, floor_raw, segment,
+                                            q.iterations) == floor_raw;
+    if (match) {
+        for (int i = 0; i < actual_count; ++i) {
+            if (actual[i] != expected[static_cast<std::size_t>(i)]) {
+                match = false;
+                break;
+            }
+        }
+    }
+    std::printf("DECAY_CHAIN expected=[");
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (i) std::printf(",");
+        std::printf("%u", expected[i]);
+    }
+    std::printf("] actual=[");
+    for (int i = 0; i < actual_count && i < 64; ++i) {
+        if (i) std::printf(",");
+        std::printf("%u", actual[i]);
+    }
+    std::printf("] match=%s\n", match ? "true" : "false");
+    return match ? 0 : 1;
+}
+
 int run(const msrp_v05::Problem& q, const char* output, bool persistent,
-        int route) {
+        int route, double k0_floor, int decay_segment) {
     Buffers buffers;
     allocate_buffers(q, buffers);
     std::uint32_t sequence = 1;
@@ -172,20 +223,22 @@ int run(const msrp_v05::Problem& q, const char* output, bool persistent,
     if (!persistent) {
         buffers.mb_in[snn_v08::MAILBOX_SEQUENCE] = sequence;
         call_kernel(q, buffers, snn_v08::CONFIGURE, snn_v08::ONESHOT,
-                    route, snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL);
+                    route, snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL,
+                    k0_floor, decay_segment);
         error = static_cast<int>(buffers.mb_out[snn_v08::OUT_ERROR_CODE]);
         ++sequence;
         buffers.mb_in[snn_v08::MAILBOX_SEQUENCE] = sequence;
         call_kernel(q, buffers, snn_v08::SOLVE, snn_v08::ONESHOT,
-                    route, snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL);
+                    route, snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL,
+                    k0_floor, decay_segment);
         error = static_cast<int>(buffers.mb_out[snn_v08::OUT_ERROR_CODE]);
     } else {
         publish(buffers, sequence, snn_v08::CONFIGURE, snn_v08::HOST_X0, 0,
                 snn_v08::HOLD_TAIL, route);
         std::thread worker([&]() {
             call_kernel(q, buffers, snn_v08::CONFIGURE, snn_v08::PERSISTENT,
-                        route, snn_v08::HOST_X0, 0,
-                        snn_v08::HOLD_TAIL);
+                        route, snn_v08::HOST_X0, 0, snn_v08::HOLD_TAIL,
+                        k0_floor, decay_segment);
         });
         wait_done(buffers, sequence);
         error = static_cast<int>(buffers.mb_out[snn_v08::OUT_ERROR_CODE]);
@@ -202,15 +255,53 @@ int run(const msrp_v05::Problem& q, const char* output, bool persistent,
     }
 
     write_output(output, q, buffers);
+    int executed_levels = 1;
+    const int chain_error =
+        check_decay_chain(q, k0_floor, decay_segment, executed_levels);
     std::printf(
         "{\"schema\":\"msrp-v09b-native-fixed-v1\",\"n\":%d,\"m\":%d,"
         "\"persistent\":%s,\"error\":%u,\"status\":%llu,"
-        "\"iterations\":%llu,\"route\":%u}\n",
+        "\"iterations\":%llu,\"route\":%u,\"k0_floor\":%.17g,"
+        "\"decay_segment\":%d,\"decay_levels\":%d,"
+        "\"decay_chain_match\":%s}\n",
         q.n, q.m, persistent ? "true" : "false", error,
         static_cast<unsigned long long>(buffers.telemetry[1]),
         static_cast<unsigned long long>(buffers.telemetry[3]),
-        static_cast<unsigned>(buffers.mb_out[snn_v08::OUT_SELECTED_ROUTE]));
-    return error == snn_v08::ERR_OK ? 0 : 3;
+        static_cast<unsigned>(buffers.mb_out[snn_v08::OUT_SELECTED_ROUTE]),
+        k0_floor, decay_segment, executed_levels,
+        chain_error == 0 ? "true" : "false");
+    return error == snn_v08::ERR_OK && chain_error == 0 ? 0 : 3;
+}
+
+double parse_floor(const char* text) {
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0') {
+        std::fprintf(stderr, "invalid k0 floor: %s\n", text);
+        std::exit(2);
+    }
+    return value;
+}
+
+int parse_segment(const char* text) {
+    char* end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value < -2147483647L ||
+        value > 2147483647L) {
+        std::fprintf(stderr, "invalid decay segment: %s\n", text);
+        std::exit(2);
+    }
+    return static_cast<int>(value);
+}
+
+int effective_segment(const msrp_v05::Problem& q, double floor, int segment,
+                      bool explicit_segment) {
+    if (floor == 0.0) return 0;
+    if (explicit_segment) return segment;
+    const std::uint32_t start = snn_v09b_decay::quantize_positive(q.k0);
+    const std::uint32_t floor_raw = snn_v09b_decay::quantize_positive(floor);
+    if (floor_raw == 0 || floor_raw >= start) return 0;
+    return q.iterations / snn_v09b_decay::level_count(start, floor_raw);
 }
 
 }  // namespace
@@ -218,14 +309,35 @@ int run(const msrp_v05::Problem& q, const char* output, bool persistent,
 int main(int argc, char** argv) {
     bool persistent = false;
     int route = snn_v08::AUTO;
-    if (argc >= 2 && std::strcmp(argv[1], "--generate") == 0) {
-        if (argc < 5) {
-            std::fprintf(stderr,
-                         "usage: %s --generate N M output.bin "
-                         "[--persistent] [--route auto|full|cg|stream]\n",
-                         argv[0]);
+    double k0_floor = 0.0;
+    int decay_segment = 0;
+    bool explicit_segment = false;
+    const bool generate = argc >= 2 && std::strcmp(argv[1], "--generate") == 0;
+    const int first_option = generate ? 5 : 3;
+    if ((generate && argc < 5) || (!generate && argc < 3)) {
+        std::fprintf(stderr,
+                     "usage: %s [--generate N M] problem.bin output.bin "
+                     "[--persistent] [--route auto|full|cg|stream] "
+                     "[--k0-floor F] [--decay-segment N]\n",
+                     argv[0]);
+        return 2;
+    }
+    for (int i = first_option; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--persistent") == 0) {
+            persistent = true;
+        } else if (std::strcmp(argv[i], "--route") == 0 && i + 1 < argc) {
+            route = parse_route(argv[++i]);
+        } else if (std::strcmp(argv[i], "--k0-floor") == 0 && i + 1 < argc) {
+            k0_floor = parse_floor(argv[++i]);
+        } else if (std::strcmp(argv[i], "--decay-segment") == 0 && i + 1 < argc) {
+            decay_segment = parse_segment(argv[++i]);
+            explicit_segment = true;
+        } else {
+            std::fprintf(stderr, "invalid option: %s\n", argv[i]);
             return 2;
         }
+    }
+    if (generate) {
         const int n = std::atoi(argv[2]);
         const int m = std::atoi(argv[3]);
         if (n < 1 || n > 128 || m < 1 || m > 128) {
@@ -233,36 +345,13 @@ int main(int argc, char** argv) {
                          "generated dimensions must be within 1..128\n");
             return 2;
         }
-        for (int i = 5; i < argc; ++i) {
-            if (std::strcmp(argv[i], "--persistent") == 0) {
-                persistent = true;
-            } else if (std::strcmp(argv[i], "--route") == 0 && i + 1 < argc) {
-                route = parse_route(argv[++i]);
-            } else {
-                std::fprintf(stderr, "invalid --generate option: %s\n", argv[i]);
-                return 2;
-            }
-        }
         const auto q = generated_problem(n, m);
-        return run(q, argv[4], persistent, route);
-    }
-    if (argc < 3) {
-        std::fprintf(stderr,
-                     "usage: %s problem.bin output.bin [--persistent] "
-                     "[--route auto|full|cg|stream]\n",
-                     argv[0]);
-        return 2;
-    }
-    for (int i = 3; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--persistent") == 0) {
-            persistent = true;
-        } else if (std::strcmp(argv[i], "--route") == 0 && i + 1 < argc) {
-            route = parse_route(argv[++i]);
-        } else {
-            std::fprintf(stderr, "invalid option: %s\n", argv[i]);
-            return 2;
-        }
+        decay_segment = effective_segment(q, k0_floor, decay_segment,
+                                          explicit_segment);
+        return run(q, argv[4], persistent, route, k0_floor, decay_segment);
     }
     const auto q = msrp_v05::load_problem(argv[1], false, 128, 128);
-    return run(q, argv[2], persistent, route);
+    decay_segment = effective_segment(q, k0_floor, decay_segment,
+                                      explicit_segment);
+    return run(q, argv[2], persistent, route, k0_floor, decay_segment);
 }
